@@ -565,6 +565,93 @@ pub fn check_harness_host(harness: Harness) -> Result<(), String> {
   }
 }
 
+/// Host-side opencode model list, loaded once per `scsh run` when needed.
+pub struct OpencodeModelProbe {
+  available: Option<std::collections::HashSet<String>>,
+}
+
+impl OpencodeModelProbe {
+  /// Run `opencode models <provider>` for each provider required by **selected** skills'
+  /// explicit opencode models (profile-scoped — not every model in `.scsh.yml`).
+  pub fn for_selected(skills: &[crate::config::ResolvedInvocation]) -> Self {
+    let requested = requested_opencode_models(skills);
+    if requested.is_empty() {
+      return Self { available: None };
+    }
+    if which("opencode").is_none() || !opencode_auth_ready() {
+      return Self { available: None };
+    }
+    Self { available: Some(load_opencode_models_for(&requested).unwrap_or_default()) }
+  }
+
+  pub fn check_model(&self, model: &str) -> Result<(), String> {
+    match &self.available {
+      Some(set) if set.contains(model) => Ok(()),
+      Some(_) => Err(format!("opencode model '{model}' not listed by `opencode models` on this host")),
+      None => Ok(()),
+    }
+  }
+}
+
+/// Explicit opencode `model:` values on selected invocations (deduplicated).
+fn requested_opencode_models(skills: &[crate::config::ResolvedInvocation]) -> std::collections::HashSet<String> {
+  skills
+    .iter()
+    .filter(|s| s.harness == Harness::Opencode)
+    .filter_map(|s| s.model.as_deref())
+    .map(str::to_string)
+    .collect()
+}
+
+/// Provider segment of an opencode model id (`openai/gpt-5.5` → `openai`).
+fn opencode_model_provider(model: &str) -> &str {
+  model.split('/').next().unwrap_or(model)
+}
+
+/// Unique providers for a set of requested model ids, stable order.
+fn opencode_providers_for_models(models: &std::collections::HashSet<String>) -> Vec<String> {
+  let mut providers: Vec<String> = models.iter().map(|m| opencode_model_provider(m).to_string()).collect();
+  providers.sort_unstable();
+  providers.dedup();
+  providers
+}
+
+/// Harness auth plus, for opencode skills with an explicit `model:`, a host `opencode models` check.
+pub fn check_skill_host(harness: Harness, model: Option<&str>, probe: &OpencodeModelProbe) -> Result<(), String> {
+  check_harness_host(harness)?;
+  if harness == Harness::Opencode {
+    if let Some(m) = model {
+      probe.check_model(m)?;
+    }
+  }
+  Ok(())
+}
+
+fn load_opencode_models_for(
+  requested: &std::collections::HashSet<String>,
+) -> Result<std::collections::HashSet<String>, String> {
+  let mut all = std::collections::HashSet::new();
+  for provider in opencode_providers_for_models(requested) {
+    let output = std::process::Command::new("opencode")
+      .args(["models", &provider])
+      .output()
+      .map_err(|e| format!("could not run `opencode models {provider}`: {e}"))?;
+    if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      let detail = stderr.trim();
+      let msg =
+        if detail.is_empty() { format!("opencode models {provider} exited with an error") } else { detail.to_string() };
+      return Err(msg);
+    }
+    all.extend(parse_opencode_models(&String::from_utf8_lossy(&output.stdout)));
+  }
+  Ok(all)
+}
+
+fn parse_opencode_models(stdout: &str) -> std::collections::HashSet<String> {
+  stdout.lines().map(|line| line.trim()).filter(|line| !line.is_empty()).map(|line| line.to_string()).collect()
+}
+
 /// Host opencode paths for `scsh list --verbose` (real runs copy into the run clone first).
 pub fn opencode_host_mounts() -> Vec<(String, String)> {
   opencode_host_mounts_from(
@@ -1686,6 +1773,111 @@ mod tests {
     let entry = git_transport_entry("echo hi", true, "bot", "bot@example.com");
     assert!(entry.contains("pull.git"));
     assert!(entry.contains("user.email"));
+  }
+
+  #[test]
+  fn opencode_model_provider_is_first_path_segment() {
+    assert_eq!(opencode_model_provider("openai/gpt-5.5"), "openai");
+    assert_eq!(opencode_model_provider("nebius-glm/zai-org/GLM-5.2"), "nebius-glm");
+    assert_eq!(opencode_model_provider("standalone"), "standalone");
+  }
+
+  #[test]
+  fn opencode_providers_for_models_dedupes_and_sorts() {
+    let models = std::collections::HashSet::from([
+      "openai/gpt-5.5".into(),
+      "openai/gpt-5.4-mini-fast".into(),
+      "nebius-glm/zai-org/GLM-5.2".into(),
+    ]);
+    assert_eq!(opencode_providers_for_models(&models), vec!["nebius-glm".to_string(), "openai".to_string()]);
+  }
+
+  #[test]
+  fn requested_opencode_models_collects_explicit_models_from_selection() {
+    let skills = vec![
+      crate::config::ResolvedInvocation {
+        name: "a".into(),
+        skill_source: "add".into(),
+        harness: Harness::Opencode,
+        model: Some("openai/gpt-5.5".into()),
+        profile: None,
+        commits: false,
+        timeout: None,
+        env: vec![],
+        result: "tmp/a.json".into(),
+      },
+      crate::config::ResolvedInvocation {
+        name: "b".into(),
+        skill_source: "add".into(),
+        harness: Harness::Claude,
+        model: Some("sonnet".into()),
+        profile: None,
+        commits: false,
+        timeout: None,
+        env: vec![],
+        result: "tmp/b.json".into(),
+      },
+      crate::config::ResolvedInvocation {
+        name: "c".into(),
+        skill_source: "add".into(),
+        harness: Harness::Opencode,
+        model: None,
+        profile: None,
+        commits: false,
+        timeout: None,
+        env: vec![],
+        result: "tmp/c.json".into(),
+      },
+    ];
+    let set = requested_opencode_models(&skills);
+    assert_eq!(set.len(), 1);
+    assert!(set.contains("openai/gpt-5.5"));
+  }
+
+  #[test]
+  fn parse_opencode_models_collects_trimmed_lines() {
+    let set = parse_opencode_models("openai/gpt-5.5\n\nnebius-glm/zai-org/GLM-5.2\n");
+    assert_eq!(set.len(), 2);
+    assert!(set.contains("openai/gpt-5.5"));
+    assert!(set.contains("nebius-glm/zai-org/GLM-5.2"));
+  }
+
+  #[test]
+  fn opencode_model_probe_checks_listed_models() {
+    let probe = OpencodeModelProbe { available: Some(std::collections::HashSet::from(["openai/gpt-5.5".into()])) };
+    assert!(probe.check_model("openai/gpt-5.5").is_ok());
+    let err = probe.check_model("openai/other").unwrap_err();
+    assert!(err.contains("openai/other"));
+    assert!(err.contains("opencode models"));
+  }
+
+  #[test]
+  fn opencode_model_probe_skips_when_not_loaded() {
+    let probe = OpencodeModelProbe { available: None };
+    assert!(probe.check_model("any/model").is_ok());
+  }
+
+  #[test]
+  fn opencode_model_probe_rejects_when_model_list_empty() {
+    let probe = OpencodeModelProbe { available: Some(std::collections::HashSet::new()) };
+    assert!(probe.check_model("openai/anything").is_err());
+  }
+
+  #[test]
+  fn opencode_model_probe_for_selected_skips_without_explicit_models() {
+    let skills = vec![crate::config::ResolvedInvocation {
+      name: "add".into(),
+      skill_source: "add".into(),
+      harness: Harness::Opencode,
+      model: None,
+      profile: None,
+      commits: false,
+      timeout: None,
+      env: vec![],
+      result: "tmp/add.json".into(),
+    }];
+    let probe = OpencodeModelProbe::for_selected(&skills);
+    assert!(probe.check_model("openai/anything").is_ok());
   }
 
   #[test]

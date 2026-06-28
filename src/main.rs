@@ -479,10 +479,11 @@ so they would not be in the container",
       // Every git/repo/state check passed — one compact line, then the run.
       let prof = profile.map(|p| format!(" · profile {p}")).unwrap_or_default();
       ok(&format!("git · repo {} · clean · /tmp ignored{prof}", display_path(&root)));
-      // Skip skills whose harness is unavailable on this host; fail only when none remain.
+      // Skip skills whose harness or explicit opencode model is unavailable; fail only when none remain.
+      let model_probe = runtime::OpencodeModelProbe::for_selected(&selected);
       let mut runnable: Vec<&ResolvedInvocation> = Vec::new();
       for skill in &selected {
-        if let Err(msg) = runtime::check_harness_host(skill.harness) {
+        if let Err(msg) = runtime::check_skill_host(skill.harness, skill.model.as_deref(), &model_probe) {
           warn(&format!("skipping '{}' — {msg}", skill.name));
           continue;
         }
@@ -494,7 +495,7 @@ so they would not be in the container",
         runnable.push(skill);
       }
       if runnable.is_empty() {
-        fail("no skills to run — every selected skill was skipped (harness unavailable on this host)");
+        fail("no skills to run — every selected skill was skipped (harness or model unavailable on this host)");
         hint("see DEMO.md step 1 — probe add-opencode-gpt-5.4-mini-fast and add-claude-sonnet-4-6");
         return 1;
       }
