@@ -534,7 +534,11 @@ fn list_json_is_machine_readable() {
   assert_eq!(r.code, 0, "got: {}", r.out);
   assert!(r.out.contains("\"profiles\""), "got: {}", r.out);
   // The reserved `default` (add) and the declared `multiply`, each with its skill.
-  assert!(r.out.contains(r#"{ "name": "default", "skills": ["add-opencode-gpt-5.4-mini-fast", "add-claude-sonnet-4-6", "add-opencode-glm-5.2"] }"#), "got: {}", r.out);
+  assert!(
+    r.out.contains(r#"{ "name": "default", "skills": ["add-opencode-gpt-5.4-mini-fast", "add-claude-sonnet-4-6"] }"#),
+    "got: {}",
+    r.out
+  );
   assert!(
     r.out.contains(
       r#"{ "name": "multiply", "skills": ["multiply-opencode-gpt-5.4-mini-fast", "multiply-claude-sonnet-4-6"] }"#

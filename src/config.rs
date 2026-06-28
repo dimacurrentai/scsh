@@ -968,9 +968,9 @@ mod tests {
     let cfg = validate(demo_yaml()).expect("demo config should validate");
     assert_eq!(cfg.skills.len(), 2);
     let add = cfg.skills.iter().find(|s| s.name == "add").expect("add present");
-    assert_eq!(add.invocations.len(), 3);
+    assert_eq!(add.invocations.len(), 2);
     let expanded = expand_invocations(&cfg);
-    assert_eq!(expanded.len(), 5);
+    assert_eq!(expanded.len(), 4);
     let add_oc =
       expanded.iter().find(|s| s.name == "add-opencode-gpt-5.4-mini-fast").expect("add-opencode-gpt-5.4-mini-fast");
     assert_eq!(add_oc.skill_source, "add");

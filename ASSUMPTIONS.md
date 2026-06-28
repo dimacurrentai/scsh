@@ -25,7 +25,7 @@ Review these before merging or extending.
 
 - **OpenCode:** copy `auth.json` into run dir (existing behavior); only for opencode skills.
 - **Claude:** forward host `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) and/or copy `~/.claude/.credentials.json` plus optional `~/.claude` / `~/.claude.json` into the run dir and bind-mount into the container.
-- **Preflight:** `scsh run` **skips** skills whose harness is unavailable on this host; it **fails** only when every selected skill is skipped. Claude needs `CLAUDE_CODE_OAUTH_TOKEN` or `~/.claude/.credentials.json` (macOS Keychain login alone is not enough for Linux containers).
+- **Preflight:** `scsh run` **skips** skills whose harness is unavailable or whose explicit opencode `model:` is not listed by host `opencode models`; it **fails** only when every selected skill is skipped. Claude needs `CLAUDE_CODE_OAUTH_TOKEN` or `~/.claude/.credentials.json` (macOS Keychain login alone is not enough for Linux containers). OpenCode model probing runs only for **selected** invocations (profile-scoped, not every route in `.scsh.yml`), calling `opencode models <provider>` per distinct provider among those models — not a full unfiltered `opencode models` sweep.
 
 ## Results
 

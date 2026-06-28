@@ -10,7 +10,7 @@ This is a guided, English walkthrough that **builds a tiny `scsh` project from s
 
 - `scsh init-demo-project` scaffolds a two-skill project and **commits** it.
 
-- **`add`** (A + B) runs by default on **three routes** — `add-opencode-gpt-5.4-mini-fast`, `add-claude-sonnet-4-6`, `add-opencode-glm-5.2` — with the built-in defaults, and with values you pass.
+- **`add`** (A + B) runs by default on **two routes** — `add-opencode-gpt-5.4-mini-fast` and `add-claude-sonnet-4-6` — with the built-in defaults, and with values you pass.
 
 - **`add` is commit-enabled**: it records each sum as a git commit, and `scsh` **rebases that commit onto your branch**. The commit is journaled in the cache too, so even a **cached** re-run replays it — the commit side effect is never lost to a cache hit.
 
@@ -24,13 +24,13 @@ This is a guided, English walkthrough that **builds a tiny `scsh` project from s
 
 - **If you happen to be inside the `scsh` repo**, don't pollute it — put the demo under the gitignored `tmp/` instead. (Step 2 below detects this and does it for you.)
 
-The happy path runs **three `add` routes** by default — **gpt-5.4-mini-fast**, **sonnet-4-6**, and **glm-5.2** — plus **`multiply-*`** under `--profile multiply`. Step 1 **probes** each route first; `scsh run` **skips** routes whose harness is unavailable on the host and runs the rest in parallel. If **none** of the three `add` routes probe ok, the demo **fails** immediately.
+The happy path runs **two `add` routes** by default — **gpt-5.4-mini-fast** and **sonnet-4-6** — plus **`multiply-*`** under `--profile multiply`. Step 1 **probes** each route first; `scsh run` **skips** routes whose harness is unavailable on the host and runs the rest in parallel. If **none** of the two `add` routes probe ok, the demo **fails** immediately.
 
 ---
 
-## 1. Probe the environment and the three demo routes
+## 1. Probe the environment and the two demo routes
 
-Run this and read every line — it decides which steps fully run. **Stop here with a failure** if `demo routes available: 0 / 3`.
+Run this and read every line — it decides which steps fully run. **Stop here with a failure** if `demo routes available: 0 / 2`.
 
 ```sh
 # Load shell exports (e.g. CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`).
@@ -44,7 +44,6 @@ command -v scsh >/dev/null && echo "scsh: on PATH" || echo "scsh: build it (carg
 DEMO_ROUTES_AVAILABLE=0
 DEMO_ROUTE_GPT=N/A
 DEMO_ROUTE_SONNET=N/A
-DEMO_ROUTE_GLM_5_2=N/A
 
 opencode_auth_ok() {
   test -f "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
@@ -75,19 +74,11 @@ else
   echo "route sonnet-4-6 (add-claude-sonnet-4-6): N/A — run \`claude setup-token\` and export CLAUDE_CODE_OAUTH_TOKEN"
 fi
 
-if opencode_auth_ok && opencode_model_ok "nebius-glm/zai-org/GLM-5.2"; then
-  echo "route glm-5.2 (add-opencode-glm-5.2): ok"
-  DEMO_ROUTE_GLM_5_2=ok
-  DEMO_ROUTES_AVAILABLE=$((DEMO_ROUTES_AVAILABLE + 1))
-else
-  echo "route glm-5.2 (add-opencode-glm-5.2): N/A"
-fi
-
-echo "demo routes available: $DEMO_ROUTES_AVAILABLE / 3"
-export DEMO_ROUTES_AVAILABLE DEMO_ROUTE_GPT DEMO_ROUTE_SONNET DEMO_ROUTE_GLM_5_2
+echo "demo routes available: $DEMO_ROUTES_AVAILABLE / 2"
+export DEMO_ROUTES_AVAILABLE DEMO_ROUTE_GPT DEMO_ROUTE_SONNET
 
 if [ "$DEMO_ROUTES_AVAILABLE" -eq 0 ]; then
-  echo "FAIL: no demo routes available — need at least one of gpt-5.4-mini-fast, sonnet-4-6, or glm-5.2"
+  echo "FAIL: no demo routes available — need at least one of gpt-5.4-mini-fast or sonnet-4-6"
   exit 1
 fi
 ```
@@ -147,7 +138,7 @@ $SCSH init-demo-project
 BASE=$(git rev-parse HEAD)   # remember the scaffold commit — the cache demo (step 11) returns here
 ```
 
-**Confirm** the output reports `✓ committed the scaffold`. It has written `.scsh.yml` with five invocations (`add-opencode-gpt-5.4-mini-fast`, `add-claude-sonnet-4-6`, `add-opencode-glm-5.2`, `multiply-opencode-gpt-5.4-mini-fast`, `multiply-claude-sonnet-4-6`) over two skill folders (`.skills/add/`, `.skills/multiply/`), harness discovery symlinks, and a `/tmp` gitignore.
+**Confirm** the output reports `✓ committed the scaffold`. It has written `.scsh.yml` with four invocations (`add-opencode-gpt-5.4-mini-fast`, `add-claude-sonnet-4-6`, `multiply-opencode-gpt-5.4-mini-fast`, `multiply-claude-sonnet-4-6`) over two skill folders (`.skills/add/`, `.skills/multiply/`), harness discovery symlinks, and a `/tmp` gitignore.
 
 `$BASE` is the **scaffold commit** — the repo state the first `add` run (step 6) caches its result against. We return to it in step 11 to get a cache hit; capturing it now (not later) matters, because each `add` run commits and moves `HEAD`.
 
@@ -166,12 +157,11 @@ $SCSH run
 ```
 ✓ opencode: add-opencode-gpt-5.4-mini-fast       …s   2 + 3 = 5      # gpt-5.4-mini-fast
 ✓ claude: add-claude-sonnet-4-6        …s   2 + 3 = 5      # sonnet-4-6
-✓ opencode: add-opencode-glm-5.2   …s   2 + 3 = 5      # glm-5.2
 ```
 
 Unavailable harnesses print `⚠ skipping '…' — … harness unavailable` and are not run.
 
-Result files land in `tmp/add_opencode_gpt_5_4_mini_fast_result.json`, `tmp/add_claude_sonnet_4_6_result.json`, and/or `tmp/add_opencode_glm_5_2_result.json`. Only **`add-opencode-gpt-5.4-mini-fast`** is commit-enabled — if it ran, confirm the git commit:
+Result files land in `tmp/add_opencode_gpt_5_4_mini_fast_result.json` and/or `tmp/add_claude_sonnet_4_6_result.json`. Only **`add-opencode-gpt-5.4-mini-fast`** is commit-enabled — if it ran, confirm the git commit:
 
 ```sh
 git log --oneline -2
@@ -332,11 +322,9 @@ Re-print which routes were available at the start and which produced `2 + 3 = 5`
 echo "=== Demo harness report ==="
 echo "  gpt-5.4-mini-fast  (add-opencode-gpt-5.4-mini-fast):       probed $DEMO_ROUTE_GPT"
 echo "  sonnet-4-6         (add-claude-sonnet-4-6):      probed $DEMO_ROUTE_SONNET"
-echo "  glm-5.2            (add-opencode-glm-5.2): probed $DEMO_ROUTE_GLM_5_2"
-echo "  routes available at start: $DEMO_ROUTES_AVAILABLE / 3"
+echo "  routes available at start: $DEMO_ROUTES_AVAILABLE / 2"
 test -f tmp/add_opencode_gpt_5_4_mini_fast_result.json       && echo "  add-opencode-gpt-5.4-mini-fast ran → tmp/add_opencode_gpt_5_4_mini_fast_result.json" || true
 test -f tmp/add_claude_sonnet_4_6_result.json      && echo "  add-claude-sonnet-4-6 ran → tmp/add_claude_sonnet_4_6_result.json" || true
-test -f tmp/add_opencode_glm_5_2_result.json   && echo "  add-opencode-glm-5.2 ran → tmp/add_opencode_glm_5_2_result.json" || true
 ```
 
 Agents following this demo should end with an explicit **PASS** only if `DEMO_ROUTES_AVAILABLE ≥ 1` and every route that probed **ok** also reported `2 + 3 = 5` in step 6.
@@ -368,7 +356,7 @@ rm -rf "$STAMP"          # inside the scsh repo it was created as tmp/$STAMP —
 
 - **Skills install from other repos, manifest-aware**: a source repo's own `.scsh.yml` decides what ships — `scsh installskills` validates it, merges its skills into yours (append-only), and keeps authoring-only skills out of consumers (marked `autoinstall: false`, or named `internal-*`, like `internal-self-check-reviewers`).
 
-> Don't have a container runtime? You'll still see step 5 scaffold and commit, `scsh list`, step 9's refusal, and a **cache hit** in step 11 — all with no network — **but step 1 fails** if none of the three `add` routes probe ok, and that is intentional.
+> Don't have a container runtime? You'll still see step 5 scaffold and commit, `scsh list`, step 9's refusal, and a **cache hit** in step 11 — all with no network — **but step 1 fails** if none of the two `add` routes probe ok, and that is intentional.
 
 ### env syntax, for reference
 
