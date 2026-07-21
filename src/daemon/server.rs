@@ -85,6 +85,11 @@ impl Server {
     store.no_alive_since = Some(now);
     for session in store.sessions.values_mut() {
       session.client_connected = false;
+      // Graphs recorded before loop binding learned to drop implied needs still carry an edge
+      // from every pre-loop step to every later iteration. Reduce them on load so old jobs draw
+      // as cleanly as new ones — the long-running jobs that accumulated the most clutter are
+      // precisely the ones worth going back to look at.
+      crate::daemon::workflow::prune_session_workflow(session);
     }
     // The previous daemon's wait/reconcile threads are gone. Any session whose recorded
     // run_pid is already dead will never get an exit callback — end it now so waiting
