@@ -308,23 +308,21 @@ pub fn parse_loop_iteration_id(id: &str) -> Option<(&str, &str, usize)> {
   None
 }
 
-/// Whether `target` is reachable from `from` by following `needs` edges.
-fn need_reaches(nodes: &[WorkflowNodeMeta], from: &str, target: &str) -> bool {
-  let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-  let mut stack = vec![from];
+/// Everything reachable from `start` by following `needs` edges, `start` excluded.
+fn needs_reachable_from<'a>(
+  index: &std::collections::BTreeMap<&'a str, &'a Vec<String>>, start: &'a str,
+) -> std::collections::BTreeSet<&'a str> {
+  let mut seen = std::collections::BTreeSet::new();
+  let mut stack: Vec<&str> = index.get(start).map(|n| n.iter().map(String::as_str).collect()).unwrap_or_default();
   while let Some(id) = stack.pop() {
     if !seen.insert(id) {
       continue;
     }
-    let Some(node) = nodes.iter().find(|n| n.id == id) else { continue };
-    for need in &node.needs {
-      if need == target {
-        return true;
-      }
-      stack.push(need.as_str());
+    if let Some(needs) = index.get(id) {
+      stack.extend(needs.iter().map(String::as_str));
     }
   }
-  false
+  seen
 }
 
 /// Drop every need that another need already reaches.
@@ -341,8 +339,41 @@ fn need_reaches(nodes: &[WorkflowNodeMeta], from: &str, target: &str) -> bool {
 /// step that depends on some genuinely independent branch: an edge survives unless another edge
 /// already gets there, so no ordering the graph was expressing is ever lost.
 fn prune_implied_needs(nodes: &[WorkflowNodeMeta], needs: &mut Vec<String>) {
-  let original = needs.clone();
-  needs.retain(|need| !original.iter().any(|other| other != need && need_reaches(nodes, other, need)));
+  if needs.len() < 2 {
+    return;
+  }
+  let index: std::collections::BTreeMap<&str, &Vec<String>> = nodes.iter().map(|n| (n.id.as_str(), &n.needs)).collect();
+  let mut implied: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+  for need in needs.iter() {
+    let reach = needs_reachable_from(&index, need.as_str());
+    for other in needs.iter() {
+      if other != need && reach.contains(other.as_str()) {
+        // `other` is behind `need`; the edge to it says nothing the edge to `need` does not.
+        implied.insert(other.clone());
+      }
+    }
+  }
+  needs.retain(|need| !implied.contains(need));
+}
+
+/// Heal a persisted graph written before iteration binding learned to prune implied needs.
+///
+/// The prune runs when an iteration binds, so a job whose later cycles were already recorded
+/// keeps its redundant edges forever — and those are exactly the jobs worth looking at, the long
+/// ones. Reducing on load fixes them everywhere at once for the cost of one pass at startup.
+/// Every node is reduced against a SNAPSHOT of the original graph so the result cannot depend on
+/// node order; removing implied edges never changes what is reachable, so this is safe to redo.
+/// Returns whether anything changed.
+pub fn prune_session_workflow(session: &mut Session) -> bool {
+  let Some(workflow) = session.workflow.as_mut() else { return false };
+  let snapshot = workflow.nodes.clone();
+  let mut changed = false;
+  for node in &mut workflow.nodes {
+    let before = node.needs.len();
+    prune_implied_needs(&snapshot, &mut node.needs);
+    changed |= node.needs.len() != before;
+  }
+  changed
 }
 
 /// Bind a skill proc to its workflow node by step id. Ignores builds and unknown ids.
@@ -1727,6 +1758,39 @@ mod tests {
       "iteration 2 follows the previous cycle's end, and nothing the previous cycle already covered"
     );
     assert!(validate_workflow_meta(&meta).is_ok());
+  }
+
+  /// A graph recorded by an older build keeps its redundant edges — binding already happened.
+  /// Loading must reduce it, or the longest jobs stay the messiest ones forever.
+  #[test]
+  fn loading_reduces_a_graph_recorded_before_the_prune_existed() {
+    let node = |id: &str, order: usize, needs: &[&str]| WorkflowNodeMeta {
+      id: id.into(),
+      proc_index: None,
+      order,
+      needs: needs.iter().map(|s| s.to_string()).collect(),
+      conditional: false,
+      when_summary: None,
+    };
+    // The shape an old build persisted: iteration 2 re-declares the round-zero batch.
+    let meta = WorkflowMeta {
+      nodes: vec![
+        node("initial_a", 0, &[]),
+        node("initial_b", 1, &[]),
+        node("decide-while-collect-1", 2, &["initial_a", "initial_b"]),
+        node("collect-while-collect-1", 3, &["decide-while-collect-1"]),
+        node("decide-while-collect-2", 4, &["initial_a", "initial_b", "collect-while-collect-1"]),
+      ],
+    };
+    let mut session = session_with_workflow(meta);
+    assert!(prune_session_workflow(&mut session), "an old graph is reduced on load");
+    let nodes = &session.workflow.as_ref().unwrap().nodes;
+    let second = nodes.iter().find(|n| n.id == "decide-while-collect-2").unwrap();
+    assert_eq!(second.needs, ["collect-while-collect-1"], "the cross-graph edges are gone");
+    let first = nodes.iter().find(|n| n.id == "decide-while-collect-1").unwrap();
+    assert_eq!(first.needs, ["initial_a", "initial_b"], "iteration 1's real dependencies survive");
+    assert!(!prune_session_workflow(&mut session), "reducing an already-reduced graph changes nothing");
+    assert!(validate_workflow_meta(session.workflow.as_ref().unwrap()).is_ok());
   }
 
   /// The prune is by reachability, not by "outside the loop", so an edge to a genuinely
