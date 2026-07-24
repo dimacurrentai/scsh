@@ -167,11 +167,18 @@ pub fn daemon_reported_started_at(port: u16) -> Option<u64> {
 
 /// The raw JSON body of `GET /api/v1/version`, shared by the field extractors above.
 fn fetch_version_body(port: u16) -> Option<String> {
+  daemon_get_body(port, "/api/v1/version")
+}
+
+/// GET `path` from the local daemon and return the 200 response body, or `None` if the
+/// daemon is unreachable or answered non-200. The one place scsh does a plain read-only GET
+/// against the running daemon from CLI code (kept JSON-parser-free — callers parse the body).
+pub fn daemon_get_body(port: u16, path: &str) -> Option<String> {
   let addr: SocketAddr = format!("127.0.0.1:{port}").parse().ok()?;
   let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500)).ok()?;
   stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
   stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-  let req = "GET /api/v1/version HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+  let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
   stream.write_all(req.as_bytes()).ok()?;
   let mut resp = String::new();
   stream.read_to_string(&mut resp).ok()?;
