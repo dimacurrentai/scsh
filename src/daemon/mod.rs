@@ -28,7 +28,7 @@ pub use model::{DaemonMode, ProcKind, ProcRecord, ProcStatus};
 #[cfg(unix)]
 pub use paths::daemon_detach_child;
 pub use paths::{
-  absolutize_repo_path, base_url, clear_session_cancel, consume_proc_restart, daemon_dir, daemon_port,
+  absolutize_repo_path, base_url, clear_session_cancel, consume_proc_restart, daemon_dir, daemon_get_body, daemon_port,
   daemon_port_reachable, daemon_reported_started_at, daemon_reported_version, now_unix_secs, read_live_pid,
   request_proc_restart, request_session_cancel, session_cancelled,
 };

@@ -690,11 +690,17 @@ enum Mode {
   },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum DaemonAction {
   Start,
   Stop,
-  Restart,
+  /// `scsh daemon restart`. When jobs are running a restart would interrupt them, so it
+  /// asks first: a terminal prompts for `restart`; an agent (no TTY) is refused and told to
+  /// re-run with `--despite-jobs <ids>` naming the exact running set it got human sign-off
+  /// for. `despite_jobs` carries that approved set (`None` = no override given yet).
+  Restart {
+    despite_jobs: Option<Vec<String>>,
+  },
   Status,
   /// Just the version reconciliation and uptime (`scsh daemon version`): installed CLI vs
   /// running daemon, whether they match, and how long the daemon has been up.
@@ -1087,7 +1093,20 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         let action = match sub.as_str() {
           "start" => DaemonAction::Start,
           "stop" => DaemonAction::Stop,
-          "restart" => DaemonAction::Restart,
+          "restart" => {
+            // Optional `--despite-jobs <id,id,…>`: the exact running set a human approved.
+            let mut despite_jobs = None;
+            if args.get(i + 1).map(String::as_str) == Some("--despite-jobs") {
+              i += 1;
+              let list = args
+                .get(i + 1)
+                .ok_or("--despite-jobs needs a comma-separated job id list (the ids `scsh daemon restart` printed)")?;
+              i += 1;
+              despite_jobs =
+                Some(list.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>());
+            }
+            DaemonAction::Restart { despite_jobs }
+          }
           "status" => DaemonAction::Status,
           "version" => DaemonAction::Version,
           other => {
@@ -3707,7 +3726,18 @@ fn daemon_cmd(action: DaemonAction) -> i32 {
         1
       }
     },
-    DaemonAction::Restart => {
+    DaemonAction::Restart { despite_jobs } => {
+      // A restart tears down the daemon and orphans whatever it is supervising. If jobs are
+      // running, confirm before doing that — see `confirm_restart_despite_jobs`.
+      if daemon::Client::daemon_alive() {
+        let running = daemon_running_jobs(daemon::daemon_port());
+        if !running.is_empty() {
+          match confirm_restart_despite_jobs(&running, despite_jobs.as_deref()) {
+            RestartConfirm::Proceed => {}
+            RestartConfirm::Abort(code) => return code,
+          }
+        }
+      }
       let _ = daemon::stop();
       match daemon::start_persistent() {
         Ok(()) => {
@@ -3811,6 +3841,122 @@ fn print_daemon_version_lines(port: u16, running: &str, installed: &str) {
 /// of *this* build — we already say so in the status line, without a misleading nudge).
 fn daemon_version_is_stale(running: &str, installed: &str) -> bool {
   running != installed && !running.starts_with("unknown")
+}
+
+/// One job the daemon is currently running, as `scsh daemon restart` needs it: an id to name
+/// in a confirmation and a human label for the listing.
+#[derive(Debug, Clone, PartialEq)]
+struct RunningJob {
+  id: String,
+  label: String,
+}
+
+/// The outcome of the running-jobs confirmation gate.
+enum RestartConfirm {
+  /// Confirmed (or nothing to confirm) — go ahead and restart.
+  Proceed,
+  /// Do not restart; exit with this code.
+  Abort(i32),
+}
+
+/// Ask the running daemon which jobs are live (`GET /api/v1/jobs/running`). Empty on any
+/// failure — the restart guard treats "couldn't tell" as "nothing to interrupt", never
+/// blocking a restart on a transient read error.
+fn daemon_running_jobs(port: u16) -> Vec<RunningJob> {
+  let Some(body) = daemon::daemon_get_body(port, "/api/v1/jobs/running") else { return Vec::new() };
+  let Ok(json::Value::Object(root)) = json::parse(&body) else { return Vec::new() };
+  let Some((_, json::Value::Array(items))) = root.iter().find(|(k, _)| k == "jobs") else { return Vec::new() };
+  items
+    .iter()
+    .filter_map(|item| {
+      let json::Value::Object(o) = item else { return None };
+      let get = |k: &str| {
+        o.iter().find(|(key, _)| key == k).and_then(|(_, v)| match v {
+          json::Value::String(s) => Some(s.clone()),
+          _ => None,
+        })
+      };
+      let id = get("id")?;
+      // A readable label: `<repo> · <profile>` (either may be absent on old sessions).
+      let repo = get("repo").unwrap_or_default();
+      let profile = get("profile");
+      let label = match (repo.is_empty(), profile) {
+        (false, Some(p)) => format!("{repo} · {p}"),
+        (false, None) => repo,
+        (true, Some(p)) => p,
+        (true, None) => "(job)".into(),
+      };
+      Some(RunningJob { id, label })
+    })
+    .collect()
+}
+
+/// Running jobs NOT covered by the human-approved set. Non-empty means jobs appeared since
+/// the confirmation, so the approval no longer covers reality and must be renewed — this is
+/// what makes `--despite-jobs` a snapshot of a specific moment, not a blanket override.
+fn unapproved_running<'a>(running: &'a [RunningJob], approved: &[String]) -> Vec<&'a RunningJob> {
+  running.iter().filter(|j| !approved.iter().any(|a| a == &j.id)).collect()
+}
+
+/// The exact command that re-runs the restart with the current running set pre-approved.
+fn restart_despite_command(running: &[RunningJob]) -> String {
+  let ids: Vec<&str> = running.iter().map(|j| j.id.as_str()).collect();
+  format!("scsh daemon restart --despite-jobs {}", ids.join(","))
+}
+
+/// Print the running jobs as an indented list, one `id — label` per line.
+fn print_running_jobs(running: &[RunningJob]) {
+  for j in running {
+    info(&format!("{} — {}", j.id, j.label));
+  }
+}
+
+/// The confirmation gate for restarting while jobs run. Pure of the actual restart, so the
+/// caller stays simple and this stays testable at its decision points.
+fn confirm_restart_despite_jobs(running: &[RunningJob], approved: Option<&[String]>) -> RestartConfirm {
+  use std::io::{IsTerminal, Write};
+  let n = running.len();
+  let plural = if n == 1 { "" } else { "s" };
+  match approved {
+    // An explicit approval: proceed only if it still covers every running job. A job that
+    // appeared since is unapproved, so we refuse and ask for a fresh confirmation of the NEW
+    // set — the approval is deliberately scoped to the exact ids the human saw.
+    Some(approved) => {
+      let unapproved = unapproved_running(running, approved);
+      if unapproved.is_empty() {
+        RestartConfirm::Proceed
+      } else {
+        fail(&format!("{} job{plural} started since your confirmation — not restarting", unapproved.len()));
+        warn("the running jobs now are:");
+        print_running_jobs(running);
+        hint("confirm the NEW set with a human, then re-run:");
+        hint(&format!("  {}", restart_despite_command(running)));
+        RestartConfirm::Abort(1)
+      }
+    }
+    // No approval yet: a terminal asks the human directly; an agent is refused with the
+    // exact command to run once it has a human's OK for this specific set.
+    None => {
+      fail(&format!("{n} job{plural} running — a restart would interrupt {}", if n == 1 { "it" } else { "them" }));
+      print_running_jobs(running);
+      if std::io::stdin().is_terminal() {
+        eprint!("Type `restart` to restart anyway (anything else cancels): ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_ok() && line.trim() == "restart" {
+          RestartConfirm::Proceed
+        } else {
+          fail("restart cancelled");
+          RestartConfirm::Abort(1)
+        }
+      } else {
+        hint("this is not a terminal. Get a human's OK to interrupt these jobs, then re-run:");
+        hint(&format!("  {}", restart_despite_command(running)));
+        hint("the id list must match the running jobs — if new jobs appear, confirm again.");
+        RestartConfirm::Abort(1)
+      }
+    }
+  }
 }
 
 fn daemon_serve(mode: daemon::DaemonMode, port: u16) -> i32 {
@@ -8712,7 +8858,8 @@ fn print_help_command(name: &str) {
       &[
         ("start", "Run a persistent daemon until `daemon stop`."),
         ("stop", "Stop the running daemon."),
-        ("restart", "Stop then start (persistent)."),
+        ("restart", "Stop then start (persistent). Lists running jobs and confirms before interrupting them."),
+        ("restart --despite-jobs <ids>", "Restart despite the named running jobs (the comma-separated ids it printed)."),
         ("status", "Whether it's listening, where, plus versions and uptime."),
         ("version", "Installed CLI vs running daemon version, match, and uptime; exit 0 iff they match."),
         ("SCSH_DAEMON_PORT", "Listen port (default 7274)."),
@@ -10055,6 +10202,44 @@ steps:
     assert!(bare.contains("version"), "{bare}");
     let Err(err) = cli(&["daemon", "nope"]) else { panic!("unknown daemon subcommand must be a usage error") };
     assert!(err.contains("unknown daemon subcommand 'nope'") && err.contains("version"), "{err}");
+  }
+
+  #[test]
+  fn daemon_restart_parses_the_despite_jobs_override() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    // Plain restart carries no approved set.
+    assert!(matches!(
+      cli(&["daemon", "restart"]).unwrap().mode,
+      Mode::Daemon { action: DaemonAction::Restart { despite_jobs: None } }
+    ));
+    // The override captures the exact id list, trimmed and non-empty.
+    let Mode::Daemon { action: DaemonAction::Restart { despite_jobs: Some(ids) } } =
+      cli(&["daemon", "restart", "--despite-jobs", "abcdef, ghijkl ,mnopqr"]).unwrap().mode
+    else {
+      panic!("--despite-jobs must parse into an approved set");
+    };
+    assert_eq!(ids, vec!["abcdef", "ghijkl", "mnopqr"]);
+    // The flag needs a value.
+    let Err(err) = cli(&["daemon", "restart", "--despite-jobs"]) else { panic!("--despite-jobs needs a value") };
+    assert!(err.contains("--despite-jobs needs"), "{err}");
+  }
+
+  #[test]
+  fn restart_confirmation_is_scoped_to_the_approved_ids() {
+    let jobs =
+      |ids: &[&str]| ids.iter().map(|id| RunningJob { id: id.to_string(), label: "r · p".into() }).collect::<Vec<_>>();
+    // Approval covers every running job — nothing unapproved, so a restart may proceed.
+    let running = jobs(&["aaa", "bbb"]);
+    assert!(unapproved_running(&running, &["aaa".into(), "bbb".into()]).is_empty());
+    // A superset approval is fine too (a job in the approved set already finished).
+    assert!(unapproved_running(&jobs(&["aaa"]), &["aaa".into(), "bbb".into()]).is_empty());
+    // A NEW job that the human never saw is unapproved — forces a fresh confirmation.
+    let with_new = jobs(&["aaa", "ccc"]);
+    let fresh = unapproved_running(&with_new, &["aaa".into(), "bbb".into()]);
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(fresh[0].id, "ccc");
+    // The re-run command names every currently-running id, comma-joined.
+    assert_eq!(restart_despite_command(&with_new), "scsh daemon restart --despite-jobs aaa,ccc");
   }
 
   #[test]

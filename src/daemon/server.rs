@@ -1126,6 +1126,33 @@ fn route(
       let parts: Vec<String> = ids.iter().map(|id| quote(id)).collect();
       (200, format!("{{ \"sessions\": [{}] }}", parts.join(", ")), "application/json", false)
     }
+    // The jobs currently running, so `scsh daemon restart` can list what a restart would
+    // interrupt and require confirmation. Minimal shape: id + a label + start time.
+    "/api/v1/jobs/running" => {
+      let now = now_unix_secs();
+      let store = lock_store(store);
+      let mut jobs: Vec<&Session> = store
+        .sessions
+        .values()
+        .filter(|s| s.lifecycle_status(now) == crate::daemon::model::SessionLifecycle::Running)
+        .collect();
+      // Oldest first — the same order the browser lists them, and the order a human reads.
+      jobs.sort_by_key(|s| s.started_at);
+      let parts: Vec<String> = jobs
+        .iter()
+        .map(|s| {
+          format!(
+            "{{ \"id\": {}, \"repo\": {}, \"profile\": {}, \"kind\": {}, \"started_at\": {} }}",
+            quote(&s.id),
+            quote(&s.repo),
+            s.profile.as_deref().map(quote).unwrap_or_else(|| "null".into()),
+            s.kind.as_deref().map(quote).unwrap_or_else(|| "null".into()),
+            s.started_at,
+          )
+        })
+        .collect();
+      (200, format!("{{ \"jobs\": [{}] }}", parts.join(", ")), "application/json", false)
+    }
     // The running daemon's own version — so `scsh daemon status` can report what is
     // actually serving (which may lag the installed CLI until a restart), not just the
     // caller's version.
@@ -3452,6 +3479,79 @@ mod tests {
     // the store's `started_at` (the `now` passed to Store::new).
     assert!(body.contains("\"started_at\": 50"), "endpoint omits the daemon start time: {body}");
     assert!(parse(&body).is_ok(), "version payload parses as JSON: {body}");
+  }
+
+  #[test]
+  fn running_jobs_endpoint_lists_only_live_sessions() {
+    use crate::daemon::model::{ProcKind, ProcRecord, ProcStatus, Session};
+    // The endpoint reads the real wall clock, so a live session must be anchored to it: a
+    // running proc (work started) with a fresh last_seen keeps it inside the idle deadline.
+    let now = now_unix_secs();
+    let running_proc = ProcRecord {
+      index: 0,
+      previous_attempt: None,
+      kind: ProcKind::Skill,
+      label: "skill".into(),
+      status: ProcStatus::Running,
+      note: None,
+      detail: None,
+      fail_reason: None,
+      container_name: None,
+      container_runtime: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
+      annotate_target: None,
+      harness: Some("claude".into()),
+      skill_name: Some("skill".into()),
+      model: None,
+      started_at: Some(now),
+      elapsed: None,
+      lines: vec![],
+    };
+    let session = |id: &str, ended_at: Option<u64>, repo: &str, profile: Option<&str>| Session {
+      id: id.into(),
+      started_at: now,
+      ended_at,
+      profile: profile.map(str::to_string),
+      kind: Some("profile".into()),
+      repo: repo.into(),
+      branch: "main".into(),
+      last_seen_at: now,
+      client_connected: ended_at.is_none(),
+      run_pid: None,
+      skills: vec![],
+      procs: if ended_at.is_none() { vec![running_proc.clone()] } else { vec![] },
+      workflow: None,
+      parent_session: None,
+      supervisor: Default::default(),
+    };
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, now)));
+    {
+      let mut s = lock_store(&store);
+      s.sessions.insert("liveaa".into(), session("liveaa", None, "/tmp/repo", Some("code-review")));
+      s.sessions.insert("donebb".into(), session("donebb", Some(now.saturating_sub(50)), "/tmp/repo", Some("add")));
+    }
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    let ws_dirty = AtomicBool::new(false);
+    let req = HttpRequest {
+      method: "GET".into(),
+      path: "/api/v1/jobs/running".into(),
+      body: String::new(),
+      headers: Vec::new(),
+      http1_0: false,
+    };
+    let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty, None);
+    assert_eq!(status, 200);
+    assert_eq!(content_type, "application/json");
+    assert!(!mutated);
+    // The live session is listed with its label fields; the ended one is not.
+    assert!(body.contains("\"id\": \"liveaa\""), "{body}");
+    assert!(body.contains("\"profile\": \"code-review\""), "{body}");
+    assert!(!body.contains("donebb"), "an ended session must not be reported as running: {body}");
+    assert!(parse(&body).is_ok(), "running-jobs payload parses as JSON: {body}");
   }
 
   #[test]
