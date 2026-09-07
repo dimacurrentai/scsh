@@ -1294,7 +1294,9 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           s.profile = profile;
           s.kind = kind;
         }
-        if !skills.is_empty() {
+        // Preserve the planned fleet so a skipped harness cannot silently shrink the
+        // publication gate to only the routes that happened to run.
+        if !skills.is_empty() && (s.kind.as_deref() != Some("github-review") || s.skills.is_empty()) {
           s.skills = skills;
         }
         if run_pid.is_some() {
@@ -2517,6 +2519,9 @@ fn start_job_in_repo(
           super::github::snapshot_quotas(&post_run_exe, &review_root, &review.harnesses, "after");
           let state = if code == Some(0) { "reviewed" } else { "failed" };
           super::github::write_browser_receipt(&review_root, &review.pull_request, &sid, state);
+          if code == Some(0) {
+            publish_browser_review(&store_reap, &sid, &review_root, &review.pull_request);
+          }
         }
         reconcile_finished_job(&store_reap, &sid, code, &tail);
       });
@@ -2553,6 +2558,73 @@ fn start_job_in_repo(
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
     }
     Err(e) => (500, err_body(&format!("failed to spawn scsh run: {e}")), false),
+  }
+}
+
+/// Publication is visible as the final job step, including API failures and the review URL.
+fn publish_browser_review(
+  store: &Arc<Mutex<Store>>, id: &str, root: &std::path::Path, pr: &super::github::PullRequest,
+) {
+  let now = now_unix_secs();
+  let (snapshot, index) = {
+    let mut guard = lock_store(store);
+    let Some(session) = guard.session_mut(id) else { return };
+    let snapshot = session.clone();
+    let index = session.procs.iter().map(|p| p.index).max().unwrap_or(0) + 1;
+    session.ended_at = None;
+    session.run_pid = None;
+    session.client_connected = true;
+    session.last_seen_at = now;
+    session.procs.push(ProcRecord {
+      index,
+      previous_attempt: None,
+      label: "Publish GitHub review".into(),
+      kind: ProcKind::Skill,
+      status: ProcStatus::Running,
+      skill_name: None,
+      harness: None,
+      model: None,
+      started_at: Some(now),
+      note: None,
+      detail: None,
+      fail_reason: None,
+      elapsed: None,
+      lines: Vec::new(),
+      container_name: None,
+      container_runtime: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
+      annotate_target: None,
+      phase: None,
+      phase_until: None,
+    });
+    (snapshot, index)
+  };
+  super::github::write_browser_receipt(root, pr, id, "publishing");
+  let result = super::github_publish::publish(root, pr, &snapshot);
+  let state = if result.is_ok() { "published" } else { "publication_failed" };
+  super::github::write_browser_receipt(root, pr, id, state);
+  let mut guard = lock_store(store);
+  if let Some(session) = guard.session_mut(id) {
+    session.ended_at = Some(now_unix_secs());
+    session.client_connected = false;
+    if let Some(proc) = session.procs.iter_mut().find(|p| p.index == index) {
+      proc.elapsed = Some(now_unix_secs().saturating_sub(now) as f64);
+      match result {
+        Ok(url) => {
+          proc.status = ProcStatus::Ok;
+          proc.detail = Some(url);
+        }
+        Err(error) => {
+          proc.status = ProcStatus::Fail;
+          proc.fail_reason = Some("publication_failed".into());
+          proc.detail = Some(error);
+        }
+      }
+    }
   }
 }
 
@@ -6065,7 +6137,7 @@ mod tests {
       );
       let receipt = dir.join("tmp/gh-gorgeous-review-browser.json");
       for _ in 0..30 {
-        if std::fs::read_to_string(&receipt).unwrap_or_default().contains(r#""state":"reviewed""#) {
+        if std::fs::read_to_string(&receipt).unwrap_or_default().contains(r#""state":"publication_failed""#) {
           break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -6083,7 +6155,9 @@ mod tests {
       assert_eq!(job.kind.as_deref(), Some("github-review"));
     }
     assert!(dir.join("tmp/quota-before-codex.json").is_file());
-    assert!(final_receipt.contains(r#""state":"reviewed""#), "got: {final_receipt}");
+    // A zero-exit stub without route results must never authorize a GitHub write.
+    assert!(final_receipt.contains(r#""state":"publication_failed""#), "got: {final_receipt}");
+    assert_eq!(store.lock().unwrap().sessions[session].procs.last().unwrap().status, ProcStatus::Fail);
     assert!(dir.join("tmp/quota-after-codex.json").is_file());
     std::fs::remove_file(&stub).ok();
     std::fs::remove_dir_all(&home).ok();
