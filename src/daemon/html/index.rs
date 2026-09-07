@@ -356,7 +356,9 @@ fn start_panel() -> &'static str {
   r##"<div class="chamfer card card--accent-left-green">
 <p class="section-label">Run</p>
 <p class="dim"><strong><code>gh-gorgeous-review</code></strong> reviews a GitHub pull request
-with the machine-wide fleet. scsh creates the same durable local replica used by the agent
+with the machine-wide fleet and publishes one GitHub review when every route succeeds.
+Starting this job authorizes publication: inline comments plus a summary, with approval
+only when the review meets the approval bar. scsh creates the same durable local replica used by the agent
 skill, records quota around the review, uses the PR's actual base branch, and opens the live
 job; after one-time <code>gh auth login</code> and global skill installation, kickoff is
 browser-only.</p>
