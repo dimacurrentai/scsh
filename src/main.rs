@@ -78,7 +78,7 @@ fn run(args: &[String]) -> i32 {
       if cli.json {
         list_profiles_json(cli.override_dot_scsh_yml.as_deref())
       } else {
-        preflight_then(Action::List, profile, cli.verbose, cli.override_dot_scsh_yml.as_deref(), None)
+        preflight_then(Action::List, profile, cli.verbose, cli.override_dot_scsh_yml.as_deref(), None, None)
       }
     }
     Mode::CheckProfile => check_profile_cmd(profile, cli.override_dot_scsh_yml.as_deref()),
@@ -89,9 +89,14 @@ fn run(args: &[String]) -> i32 {
       Some(name) => {
         preflight_then_def(name, cli.failures.session.as_deref(), cli.resume_from.as_deref(), cli.base.as_deref())
       }
-      None => {
-        preflight_then(Action::Run, profile, cli.verbose, cli.override_dot_scsh_yml.as_deref(), cli.base.as_deref())
-      }
+      None => preflight_then(
+        Action::Run,
+        profile,
+        cli.verbose,
+        cli.override_dot_scsh_yml.as_deref(),
+        cli.failures.session.as_deref(),
+        cli.base.as_deref(),
+      ),
     },
     // Hidden: a self-contained demo of the live board (no container/model needed), used by the
     // feature's demo + PTY test. `--frames` dumps deterministic plain frames; otherwise it runs
@@ -3392,7 +3397,8 @@ fn doctor_preflight(rt: &Runtime) {
 }
 
 fn preflight_then(
-  action: Action, profile: Option<&str>, verbose: bool, override_yml: Option<&Path>, base: Option<&str>,
+  action: Action, profile: Option<&str>, verbose: bool, override_yml: Option<&Path>, session: Option<&str>,
+  base: Option<&str>,
 ) -> i32 {
   // The preflight checks run quietly on success and collapse into one compact
   // summary line (see CONTRIBUTING "Output style"); only failures speak up, each
@@ -3498,7 +3504,9 @@ fn preflight_then(
         hint("see DEMO.md step 1 — probe add-opencode-gpt-5.4-mini-fast and add-claude-sonnet-4-6");
         return 1;
       }
-      let session_id = daemon::new_session_id();
+      // A browser-started profile already owns its session id and deep link. Reuse it just
+      // like definition/workflow runs do; CLI runs without --session still get a fresh id.
+      let session_id = session.filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(daemon::new_session_id);
       build_and_run(&rt, &root, &runnable, profile, &session_id, "profile", base.as_ref())
     }
   }
@@ -11227,6 +11235,11 @@ mod tests {
     assert!(cli(&["foo"]).is_err(), "a bare token without `run` is an unknown command");
     assert!(cli(&["list", "foo"]).is_err(), "profiles don't apply to `list`");
     assert!(cli(&["run", "--nope"]).is_err(), "an unknown flag after `run` is not a profile");
+
+    // Browser-started profile jobs pass their pre-created session through the same run parser.
+    let c = cli(&["run", "code-review", "--session", "xlcsdy"]).unwrap();
+    assert_eq!(c.profile.as_deref(), Some("code-review"));
+    assert_eq!(c.failures.session.as_deref(), Some("xlcsdy"));
   }
 
   #[test]

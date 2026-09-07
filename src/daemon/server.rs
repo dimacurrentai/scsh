@@ -1287,8 +1287,13 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         if !branch.is_empty() {
           s.branch = branch;
         }
-        s.profile = profile;
-        s.kind = kind;
+        // A browser GitHub review is pre-created with its user-facing skill identity, then
+        // the spawned profile runner registers into that same session. Keep the outer job's
+        // identity instead of relabeling it as the implementation profile.
+        if s.kind.as_deref() != Some("github-review") {
+          s.profile = profile;
+          s.kind = kind;
+        }
         if !skills.is_empty() {
           s.skills = skills;
         }
@@ -4964,6 +4969,24 @@ mod tests {
   }
 
   #[test]
+  fn session_start_preserves_precreated_github_review_identity() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    let browser = r#"{"session":"review1","repo":"/r","branch":"feature","profile":"gh-gorgeous-review","kind":"github-review","skills":[]}"#;
+    assert!(handle_api_post("/api/v1/session/start", browser, &store, &prune));
+
+    let runner = r#"{"session":"review1","repo":"/r","branch":"feature","profile":"code-gorgeous-review","kind":"profile","skills":[{"name":"reviewer","source":"reviewer"}],"run_pid":4242}"#;
+    assert!(handle_api_post("/api/v1/session/start", runner, &store, &prune));
+
+    let guard = store.lock().unwrap();
+    let session = &guard.sessions["review1"];
+    assert_eq!(session.profile.as_deref(), Some("gh-gorgeous-review"));
+    assert_eq!(session.kind.as_deref(), Some("github-review"));
+    assert_eq!(session.run_pid, Some(4242));
+    assert_eq!(session.skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["reviewer"]);
+  }
+
+  #[test]
   fn session_start_stamps_the_retries_budget_and_explicit_beats_daemon_default() {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let prune = Arc::new(Mutex::new(PruneQueue::default()));
@@ -5053,6 +5076,7 @@ mod tests {
 
   #[test]
   fn images_build_spawns_and_precreates_session() {
+    let _env_guard = crate::runtime::test_env_lock();
     // A sleeping stub stands in for scsh so the "build" stays alive while we assert the
     // pre-created session (an instant-exit stub would be reconciled to ended before we look).
     let stub = std::env::temp_dir().join(format!("scsh-build-sleeper-{}.sh", crate::runtime::random_nonce_6()));
@@ -5078,6 +5102,7 @@ mod tests {
 
   #[test]
   fn images_build_reconciles_a_silent_startup_failure() {
+    let _env_guard = crate::runtime::test_env_lock();
     // Instant-exit stub with no registration → session must end as failed, not stay "running".
     std::env::set_var("SCSH_BIN", "/usr/bin/false");
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
