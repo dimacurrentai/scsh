@@ -1529,14 +1529,21 @@ fn preflight_runtime_engine(is_run: bool) -> Result<Runtime, i32> {
     hint("if skills fail to start, use Podman instead (e.g. SCSH_RUNTIME=podman)");
   }
 
-  // For a real run, the runtime's engine must actually be up.
-  if is_run && !ui::engine::is_running(&rt.name) {
-    fail(&format!("{} is installed but not running", ui::engine::display_name(&rt.name)));
-    if let Some(cmd) = ui::engine::start_command(&rt.name, ui::Os::current()) {
-      hint(&format!("start it with: {}", bold(&cmd)));
+  // A real run needs a live engine. Apple Containers is safe to start headlessly on macOS,
+  // which makes the first browser-started job after a reboot genuinely browser-only.
+  if is_run {
+    match ui::engine::ensure_running(&rt.name, ui::Os::current()) {
+      Ok(ui::engine::EnsureRunning::AlreadyRunning) => {}
+      Ok(ui::engine::EnsureRunning::Started) => ok("started Apple container with `container system start`"),
+      Err(message) => {
+        fail(&message);
+        if let Some(cmd) = ui::engine::start_command(&rt.name, ui::Os::current()) {
+          hint(&format!("start it with: {}", bold(&cmd)));
+        }
+        hint("then re-run 'scsh run'");
+        return Err(1);
+      }
     }
-    hint("then re-run 'scsh run'");
-    return Err(1);
   }
   Ok(rt)
 }
@@ -8157,12 +8164,16 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
       return 1;
     }
   };
-  if !ui::engine::is_running(&rt.name) {
-    fail(&format!("{} is installed but not running", ui::engine::display_name(&rt.name)));
-    if let Some(cmd) = ui::engine::start_command(&rt.name, ui::Os::current()) {
-      hint(&format!("start it with: {}", bold(&cmd)));
+  match ui::engine::ensure_running(&rt.name, ui::Os::current()) {
+    Ok(ui::engine::EnsureRunning::AlreadyRunning) => {}
+    Ok(ui::engine::EnsureRunning::Started) => ok("started Apple container with `container system start`"),
+    Err(message) => {
+      fail(&message);
+      if let Some(cmd) = ui::engine::start_command(&rt.name, ui::Os::current()) {
+        hint(&format!("start it with: {}", bold(&cmd)));
+      }
+      return 1;
     }
-    return 1;
   }
 
   // Session browser wiring — same shape as a run; `--session` reuses the id the daemon

@@ -595,10 +595,7 @@ which renders as a red **Needs build** badge on every card over a **Build** butt
 cannot possibly succeed. One unreachable engine is the truth; six missing images is a
 fabrication. So scsh skips the inspects entirely when the engine is down.
 
-scsh does **not** start the engine for you. Starting a machine-level service as a side
-effect of loading a browser tab is a surprise, it races anything that stopped the engine
-deliberately, and it can hang or prompt in ways a page cannot surface. The failure is cheap
-to fix once it is named — naming it is the whole fix.
+Loading the Setup tab never starts an engine. Starting an actual job or image build is different: on macOS, when Apple Containers is selected and installed but stopped, `scsh` runs the user-scoped, headless `container system start` command and verifies liveness before continuing. This makes the first browser-started job after a reboot self-sufficient. Docker and Podman retain the explicit-start behavior because starting them may open a desktop application or require privilege escalation.
 
 The advice is runtime-generic: Docker gets `open -a Docker` (macOS) or `sudo systemctl start
 docker` (Linux), Podman gets `podman machine start`. An `SCSH_RUNTIME` scsh has no canned
