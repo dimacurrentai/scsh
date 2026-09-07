@@ -355,6 +355,21 @@ fn images_skeleton_row(name: &str, tag: &str, selectable: bool) -> String {
 fn start_panel() -> &'static str {
   r##"<div class="chamfer card card--accent-left-green">
 <p class="section-label">Run</p>
+<p class="dim"><strong><code>gh-gorgeous-review</code></strong> reviews a GitHub pull request
+with the machine-wide fleet. scsh creates the same durable local replica used by the agent
+skill, records quota around the review, uses the PR's actual base branch, and opens the live
+job; after one-time <code>gh auth login</code> and global skill installation, kickoff is
+browser-only.</p>
+<div class="start-controls">
+<div class="chamfer input-wrap">
+<input class="input" type="url" id="github-pr-url" placeholder="https://github.com/owner/repo/pull/123" autocomplete="off" spellcheck="false">
+</div>
+<div class="start-actions">
+<button type="button" class="chamfer btn btn--green btn--sm" id="github-review-start"><span>Start gh-gorgeous-review</span></button>
+</div>
+<span id="github-review-note" class="dim"></span>
+</div>
+<hr class="section-rule">
 <p class="dim">Open a git repository — an absolute path, or the bare name of a project under
 <code>~/.scsh/projects/</code> — to configure and start a harness-definition job in it; the
 daemon runs it just like <code>scsh run</code>. The repo must be committed, clean, and have a

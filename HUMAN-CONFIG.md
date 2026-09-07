@@ -12,6 +12,13 @@ login leaves behind, and precisely what `scsh` looks for.
 
 ---
 
+## gh — GitHub CLI
+
+- **Install:** `brew install gh` on macOS, or use GitHub's package for your platform.
+- **Log in:** `gh auth login` and complete the browser flow.
+- **Artifact produced:** `$GH_CONFIG_DIR/hosts.yml` when set, otherwise `$XDG_CONFIG_HOME/gh/hosts.yml` when set, otherwise `~/.config/gh/hosts.yml`. A non-empty `GH_TOKEN` or `GITHUB_TOKEN` is also accepted by `gh` without a file.
+- **What `scsh` uses and forwards:** the daemon uses the host CLI login to import a PR when **Start gh-gorgeous-review** is selected in the browser. Normal skill runs receive the first non-empty token variable, or the authenticated `hosts.yml`, for their duration; the canonical `$gh-gorgeous-review` skill still enforces explicit approval before publication. Set `SCSH_NO_GH_AUTH=1` to disable container forwarding (the browser importer still needs the host's `gh` login).
+
 ## claude — Claude Code CLI
 
 - **Install:** `npm install -g @anthropic-ai/claude-code`
@@ -120,6 +127,7 @@ One line per tool; exit 0 means `scsh` will consider that harness available.
 
 | Tool | Host check |
 | --- | --- |
+| gh | `[ -n "$GH_TOKEN" ] \|\| [ -n "$GITHUB_TOKEN" ] \|\| test -f "${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"` |
 | claude | `[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] \|\| test -f ~/.claude/.credentials.json \|\| security find-generic-password -s "Claude Code-credentials" -w >/dev/null 2>&1` |
 | codex | `test -f "${CODEX_HOME:-$HOME/.codex}/auth.json" \|\| [ -n "$OPENAI_API_KEY" ]` |
 | cursor | `[ -n "$CURSOR_API_KEY" ] \|\| test -f ~/.config/cursor/auth.json \|\| test -f ~/.cursor/auth.json \|\| security find-generic-password -s cursor-access-token -w >/dev/null 2>&1` |

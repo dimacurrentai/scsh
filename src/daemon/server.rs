@@ -1022,6 +1022,10 @@ fn route(
     let (status, body, mutated) = projects_create_response(&req.body, store);
     return (status, body, "application/json", mutated);
   }
+  if req.method == "POST" && req.path == "/api/v1/skills/gh-gorgeous-review/start" {
+    let (status, body, mutated) = gh_gorgeous_review_start_response(&req.body, store);
+    return (status, body, "application/json", mutated);
+  }
   if req.method == "POST" && req.path == "/api/v1/harness-defs" {
     let (status, body) = harness_defs_response(&req.body);
     return (status, body, "application/json", false);
@@ -2291,7 +2295,64 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
   let retries = field_num(&obj, "retries").map(|n| n as u32).unwrap_or(crate::daemon::model::DEFAULT_JOB_RETRIES);
   // Optional: pin what this job reviews against, exactly like `scsh run --base <ref>`.
   let base = field_str(&obj, "base").map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
-  start_job_in_repo(&repo_in, def_name, profile_name, read_params(&obj), None, base, retries, store)
+  start_job_in_repo(&repo_in, def_name, profile_name, read_params(&obj), None, base, retries, None, None, None, store)
+}
+
+/// `POST /api/v1/skills/gh-gorgeous-review/start` — begin the canonical
+/// `gh-gorgeous-review` operation by importing the PR and starting its review fleet.
+fn gh_gorgeous_review_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  let obj = match parse(body) {
+    Ok(Value::Object(o)) => o,
+    _ => return (400, err_body("expected a JSON object with a 'url'"), false),
+  };
+  let input = match field_str(&obj, "url") {
+    Some(url) if !url.trim().is_empty() => url,
+    _ => return (400, err_body("paste a GitHub pull-request URL"), false),
+  };
+  let reference = match super::github::parse_pull_request(&input) {
+    Ok(reference) => reference,
+    Err(e) => return (400, err_body(&e), false),
+  };
+  let Some(gh) = crate::runtime::which("gh") else {
+    return (400, err_body("GitHub CLI is not installed; install gh and run 'gh auth login' once"), false);
+  };
+  let pr = match super::github::load_pull_request(&gh, reference) {
+    Ok(pr) => pr,
+    Err(e) => return (400, err_body(&e), false),
+  };
+  let root = match super::github::prepare_pull_request(&gh, &super::paths::scsh_home_dir(), &pr) {
+    Ok(root) => root,
+    Err(e) => return (400, err_body(&e), false),
+  };
+  let manifest = super::paths::scsh_home_dir().join(".scsh.yml");
+  let params = Vec::new();
+  let routes = profile_routes_in_manifest(&manifest, "code-gorgeous-review");
+  if routes.is_empty() {
+    return (
+      400,
+      err_body("the global code-gorgeous-review profile is missing; run 'scsh installskills --global https://github.com/dkorolev/code-review-skills' once"),
+      false,
+    );
+  }
+  let harnesses: Vec<String> = routes
+    .iter()
+    .map(|route| route.harness.as_str().to_string())
+    .collect::<std::collections::BTreeSet<_>>()
+    .into_iter()
+    .collect();
+  start_job_in_repo(
+    &root.to_string_lossy(),
+    None,
+    Some("code-gorgeous-review".into()),
+    params,
+    None,
+    Some("main".into()),
+    crate::daemon::model::DEFAULT_JOB_RETRIES,
+    Some(manifest),
+    Some("gh-gorgeous-review"),
+    Some(super::github::BrowserReview { pull_request: pr, harnesses }),
+    store,
+  )
 }
 
 /// A validated, ready-to-spawn job: the repo root, what to run, and the planned tasks.
@@ -2310,6 +2371,7 @@ struct PlannedJob {
 /// doomed restart BEFORE it stops the old run.
 fn plan_job_request(
   repo_in: &str, def_name: &Option<String>, profile_name: &Option<String>, params: &[(String, String)],
+  override_yml: Option<&std::path::Path>,
 ) -> Result<PlannedJob, (u16, String, bool)> {
   let run_name = match (def_name, profile_name) {
     (Some(d), None) => d.clone(),
@@ -2336,7 +2398,8 @@ fn plan_job_request(
         false,
       ));
     }
-    let routes = profile_routes_for(&root, profile);
+    let routes =
+      override_yml.map_or_else(|| profile_routes_for(&root, profile), |path| profile_routes_in_manifest(path, profile));
     if routes.is_empty() {
       return Err((
         400,
@@ -2346,9 +2409,17 @@ fn plan_job_request(
         false,
       ));
     }
+    if let Err(msg) = validate_profile_params(&routes, params) {
+      return Err((400, err_body(&msg), false));
+    }
     let planned: Vec<SkillMeta> =
       routes.iter().map(|r| SkillMeta { name: r.name.clone(), harness: r.harness.as_str().to_string() }).collect();
-    (planned, None, None, vec!["run".to_string(), profile.clone()])
+    let mut run_args = vec!["run".to_string(), profile.clone()];
+    if let Some(path) = override_yml {
+      run_args.push("--override-dot-scsh-yml".into());
+      run_args.push(path.to_string_lossy().into_owned());
+    }
+    (planned, None, None, run_args)
   } else {
     let discovery = crate::harness_def::discover(&root);
     let Some(def) = discovery.find(&run_name) else {
@@ -2370,10 +2441,11 @@ fn plan_job_request(
 #[allow(clippy::too_many_arguments)]
 fn start_job_in_repo(
   repo_in: &str, def_name: Option<String>, profile_name: Option<String>, params: Vec<(String, String)>,
-  resume_from: Option<String>, base: Option<String>, retries: u32, store: &Arc<Mutex<Store>>,
+  resume_from: Option<String>, base: Option<String>, retries: u32, override_yml: Option<std::path::PathBuf>,
+  display_name: Option<&str>, browser_review: Option<super::github::BrowserReview>, store: &Arc<Mutex<Store>>,
 ) -> (u16, String, bool) {
   let PlannedJob { root, run_name, planned, kind, workflow, run_args } =
-    match plan_job_request(repo_in, &def_name, &profile_name, &params) {
+    match plan_job_request(repo_in, &def_name, &profile_name, &params, override_yml.as_deref()) {
       Ok(p) => p,
       Err(e) => return e,
     };
@@ -2395,7 +2467,7 @@ fn start_job_in_repo(
   };
   let branch = crate::current_branch(&root);
   let session_id = crate::runtime::random_nonce_6();
-  let mut cmd = std::process::Command::new(exe);
+  let mut cmd = std::process::Command::new(&exe);
   cmd.args(&run_args);
   cmd.current_dir(&root);
   for (k, v) in &params {
@@ -2413,6 +2485,10 @@ fn start_job_in_repo(
   cmd.stdin(std::process::Stdio::null());
   cmd.stdout(std::process::Stdio::null());
   cmd.stderr(std::process::Stdio::piped()); // captured, so a failure before registration is not silent
+  if let Some(review) = &browser_review {
+    super::github::snapshot_quotas(&exe, &root, &review.harnesses, "before");
+  }
+  let post_run_exe = exe.clone();
   match cmd.spawn() {
     Ok(mut child) => {
       let run_pid = Some(child.id());
@@ -2422,15 +2498,31 @@ fn start_job_in_repo(
       let store_reap = Arc::clone(store);
       let sid = session_id.clone();
       let stderr = child.stderr.take();
+      if let Some(review) = &browser_review {
+        super::github::write_browser_receipt(&root, &review.pull_request, &session_id, "running");
+      }
+      let review_root = root.clone();
       std::thread::spawn(move || {
         let mut tail = String::new();
         if let Some(mut e) = stderr {
           let _ = e.read_to_string(&mut tail);
         }
         let code = child.wait().ok().and_then(|s| s.code());
+        if let Some(review) = browser_review {
+          super::github::snapshot_quotas(&post_run_exe, &review_root, &review.harnesses, "after");
+          let state = if code == Some(0) { "reviewed" } else { "failed" };
+          super::github::write_browser_receipt(&review_root, &review.pull_request, &sid, state);
+        }
         reconcile_finished_job(&store_reap, &sid, code, &tail);
       });
-      write_start_recipe(&session_id, def_name.as_deref(), profile_name.as_deref(), &params, base.as_deref());
+      write_start_recipe(
+        &session_id,
+        def_name.as_deref(),
+        profile_name.as_deref(),
+        &params,
+        base.as_deref(),
+        override_yml.as_deref(),
+      );
       let mut store = lock_store(store);
       store.touch(now);
       store.insert_session(
@@ -2439,8 +2531,8 @@ fn start_job_in_repo(
           id: session_id.clone(),
           started_at: now,
           ended_at: None,
-          profile: Some(run_name.clone()),
-          kind,
+          profile: Some(display_name.unwrap_or(&run_name).to_string()),
+          kind: display_name.map(|_| "github-review".to_string()).or(kind),
           repo: repo.clone(),
           branch,
           skills: planned,
@@ -2586,7 +2678,7 @@ pub(crate) fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u
     None | Some("scratch") => false,
     Some(other) => return (400, err_body(&format!("unknown restart mode '{other}' (resume or scratch)")), false),
   };
-  let (repo, name, retries) = {
+  let (repo, name, retries, github_review) = {
     let store = lock_store(store);
     let Some(s) = store.sessions.get(&session_id) else {
       return (404, err_body("session not found"), false);
@@ -2604,23 +2696,23 @@ pub(crate) fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u
         false,
       );
     }
-    (s.repo.clone(), name, s.supervisor.retries)
+    (s.repo.clone(), name, s.supervisor.retries, s.kind.as_deref() == Some("github-review"))
   };
   // The recipe: what jobs/start recorded, or — for a CLI-started run — the name alone,
   // classified def-vs-profile with the same precedence a fresh start would use.
-  let (def, profile, params, base) = read_start_recipe(&session_id).unwrap_or_else(|| {
+  let (def, profile, params, base, override_yml) = read_start_recipe(&session_id).unwrap_or_else(|| {
     let is_def = crate::git_root_of(std::path::Path::new(&repo))
       .map(|root| crate::harness_def::discover(&root).find(&name).is_some())
       .unwrap_or(false);
     if is_def {
-      (Some(name.clone()), None, Vec::new(), None)
+      (Some(name.clone()), None, Vec::new(), None, None)
     } else {
-      (None, Some(name.clone()), Vec::new(), None)
+      (None, Some(name.clone()), Vec::new(), None, None)
     }
   });
   // Refuse a doomed restart BEFORE stopping anything: if the respawn cannot start (repo
   // dirty, unmet required param, vanished def), the old run — stuck or not — is left alone.
-  if let Err(e) = plan_job_request(&repo, &def, &profile, &params) {
+  if let Err(e) = plan_job_request(&repo, &def, &profile, &params, override_yml.as_deref()) {
     return e;
   }
   if resume && def.is_none() {
@@ -2633,8 +2725,19 @@ pub(crate) fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u
   if status != 200 {
     return (status, out, false);
   }
-  let (status, out, mutated) =
-    start_job_in_repo(&repo, def, profile, params, resume.then(|| session_id.clone()), base, retries, store);
+  let (status, out, mutated) = start_job_in_repo(
+    &repo,
+    def,
+    profile,
+    params,
+    resume.then(|| session_id.clone()),
+    base,
+    retries,
+    override_yml,
+    github_review.then_some("gh-gorgeous-review"),
+    None,
+    store,
+  );
   // Link the chain: the old session records its replacement, and the fresh session
   // inherits the supervisor state (attempt-incremented) so restart budgets and the
   // job-level breaker span the whole chain rather than resetting per restart.
@@ -3082,6 +3185,51 @@ fn validate_job_params(def: &crate::harness_def::HarnessDef, params: &[(String, 
   Ok(())
 }
 
+/// Required host variables shared by a profile's routes, rendered as ordinary web-form params.
+/// Optional/defaulted variables continue to resolve from the daemon's environment or manifest;
+/// only values a browser user must provide belong in this minimal form.
+fn required_profile_params(routes: &[crate::config::ResolvedInvocation]) -> Vec<crate::harness_def::Param> {
+  use crate::config::EnvRule;
+  let mut required = std::collections::BTreeMap::<String, String>::new();
+  for route in routes {
+    for env in &route.env {
+      if let EnvRule::Require { src, message } = &env.rule {
+        required.entry(src.clone()).or_insert_with(|| message.clone());
+      }
+    }
+  }
+  required
+    .into_iter()
+    .map(|(name, message)| crate::harness_def::Param {
+      name,
+      ty: crate::harness_def::ParamType::String,
+      default: None,
+      required: true,
+      description: (!message.is_empty()).then_some(message),
+      choices: Vec::new(),
+    })
+    .collect()
+}
+
+/// Validate browser-supplied environment for a global profile before a job becomes visible.
+fn validate_profile_params(
+  routes: &[crate::config::ResolvedInvocation], params: &[(String, String)],
+) -> Result<(), String> {
+  let declared = required_profile_params(routes);
+  for (name, _) in params {
+    if !declared.iter().any(|p| p.name == *name) {
+      return Err(format!("profile does not declare param '{name}'"));
+    }
+  }
+  for p in declared {
+    match params.iter().find(|(name, _)| name == &p.name) {
+      Some((_, value)) if !value.trim().is_empty() => p.validate_value(value)?,
+      _ => return Err(format!("param '{}' is required", p.name)),
+    }
+  }
+  Ok(())
+}
+
 /// Extract the `params` object as `(name, value-as-string)` pairs (strings, numbers, and bools
 /// are accepted; other JSON shapes are skipped).
 fn read_params(obj: &[(String, Value)]) -> Vec<(String, String)> {
@@ -3114,26 +3262,34 @@ fn global_profiles_json() -> Vec<String> {
   let yml = crate::runtime::scsh_home().join(".scsh.yml");
   let Ok(src) = std::fs::read_to_string(&yml) else { return Vec::new() };
   let Ok(cfg) = crate::config::validate(&src) else { return Vec::new() };
-  let mut profiles: Vec<(String, Vec<String>)> = Vec::new();
+  let mut profiles: Vec<(String, Vec<crate::config::ResolvedInvocation>)> = Vec::new();
   for inv in crate::config::expand_invocations(&cfg) {
-    let profile = inv.profile.as_deref().unwrap_or("default");
-    if profile == "default" {
+    let profile = inv.profile.as_deref().unwrap_or("default").to_string();
+    if profile == "default" || profile.ends_with("-driver") {
       continue;
     }
-    let agent = format!(
-      "{{\"route\":{},\"agent\":{},\"model\":{}}}",
-      quote(&inv.name),
-      quote(inv.harness.as_str()),
-      inv.model.as_deref().map(quote).unwrap_or_else(|| "null".into()),
-    );
-    match profiles.iter_mut().find(|(name, _)| name == profile) {
-      Some((_, agents)) => agents.push(agent),
-      None => profiles.push((profile.to_string(), vec![agent])),
+    match profiles.iter_mut().find(|(name, _)| name == &profile) {
+      Some((_, routes)) => routes.push(inv),
+      None => profiles.push((profile, vec![inv])),
     }
   }
   profiles
     .into_iter()
-    .map(|(name, agents)| format!("{{\"name\":{},\"agents\":[{}]}}", quote(&name), agents.join(",")))
+    .map(|(name, routes)| {
+      let agents: Vec<String> = routes
+        .iter()
+        .map(|inv| {
+          format!(
+            "{{\"route\":{},\"agent\":{},\"model\":{}}}",
+            quote(&inv.name),
+            quote(inv.harness.as_str()),
+            inv.model.as_deref().map(quote).unwrap_or_else(|| "null".into()),
+          )
+        })
+        .collect();
+      let params: Vec<String> = required_profile_params(&routes).iter().map(param_json).collect();
+      format!("{{\"name\":{},\"params\":[{}],\"agents\":[{}]}}", quote(&name), params.join(","), agents.join(","))
+    })
     .collect()
 }
 
@@ -3152,6 +3308,7 @@ fn session_start_recipe_path(session_id: &str) -> std::path::PathBuf {
 /// the params it actually ran with.
 pub(crate) fn write_start_recipe(
   session_id: &str, def: Option<&str>, profile: Option<&str>, params: &[(String, String)], base: Option<&str>,
+  override_yml: Option<&std::path::Path>,
 ) {
   let path = session_start_recipe_path(session_id);
   let Some(dir) = path.parent() else { return };
@@ -3166,12 +3323,15 @@ pub(crate) fn write_start_recipe(
   // The pinned base is part of WHAT the job ran against, so a restart that dropped it
   // would quietly re-run against a different base. Absent for the ordinary unpinned run.
   let base = base.map(|r| format!(",\"base\":{}", quote(r))).unwrap_or_default();
+  let override_yml = override_yml
+    .map(|path| format!(",\"override_dot_scsh_yml\":{}", quote(&path.to_string_lossy())))
+    .unwrap_or_default();
   let params: Vec<String> = params.iter().map(|(k, v)| format!("{}:{}", quote(k), quote(v))).collect();
-  let _ = std::fs::write(&path, format!("{{{what},\"params\":{{{}}}{base}}}", params.join(",")));
+  let _ = std::fs::write(&path, format!("{{{what},\"params\":{{{}}}{base}{override_yml}}}", params.join(",")));
 }
 
-/// A persisted start recipe: `(def, profile, params, base)`.
-type StartRecipe = (Option<String>, Option<String>, Vec<(String, String)>, Option<String>);
+/// A persisted start recipe: `(def, profile, params, base, explicit manifest)`.
+type StartRecipe = (Option<String>, Option<String>, Vec<(String, String)>, Option<String>, Option<std::path::PathBuf>);
 
 /// The recipe from a session's persisted `start.json`, or `None` when the session has no
 /// (readable) recipe.
@@ -3185,7 +3345,8 @@ fn read_start_recipe(session_id: &str) -> Option<StartRecipe> {
   }
   let params = read_params(&obj);
   let base = field_str(&obj, "base").filter(|s| !s.is_empty());
-  Some((def, profile, params, base))
+  let override_yml = field_str(&obj, "override_dot_scsh_yml").filter(|s| !s.is_empty()).map(std::path::PathBuf::from);
+  Some((def, profile, params, base, override_yml))
 }
 
 /// The routes a named skill profile would run in `root`, mirroring `scsh run <profile>`'s
@@ -3205,6 +3366,17 @@ fn profile_routes_for(root: &std::path::Path, profile: &str) -> Vec<crate::confi
     }
   }
   Vec::new()
+}
+
+/// Resolve one profile from exactly one manifest. GitHub review imports use this to guarantee
+/// that an unrelated PR's repo-local `.scsh.yml` cannot replace the operator's review fleet.
+fn profile_routes_in_manifest(yml: &std::path::Path, profile: &str) -> Vec<crate::config::ResolvedInvocation> {
+  let Ok(src) = std::fs::read_to_string(yml) else { return Vec::new() };
+  let Ok(cfg) = crate::config::validate(&src) else { return Vec::new() };
+  crate::config::expand_invocations(&cfg)
+    .into_iter()
+    .filter(|inv| inv.profile.as_deref().unwrap_or("default") == profile)
+    .collect()
 }
 
 fn def_json(def: &crate::harness_def::HarnessDef) -> String {
@@ -5724,6 +5896,8 @@ mod tests {
     let yml = "skills:\n\
       \x20 greeter:\n\
       \x20   profile: hello-fleet\n\
+      \x20   env:\n\
+      \x20     PR_URL: ${PR_URL:?Paste the GitHub pull-request URL}\n\
       \x20   result: tmp/greeter-{name}.json\n\
       \x20   invocations:\n\
       \x20     claude-sonnet:\n\
@@ -5734,7 +5908,11 @@ mod tests {
       \x20       model: gpt-5.6-luna\n\
       \x20 chore:\n\
       \x20   harness: claude\n\
-      \x20   result: tmp/chore.json\n";
+      \x20   result: tmp/chore.json\n\
+      \x20 hidden-wrapper:\n\
+      \x20   harness: codex\n\
+      \x20   profile: hidden-wrapper-driver\n\
+      \x20   result: tmp/hidden-wrapper.json\n";
     std::fs::write(home.join(".scsh.yml"), yml).unwrap();
     home
   }
@@ -5767,6 +5945,12 @@ mod tests {
     );
     assert!(out.contains(r#""agent":"codex","model":"gpt-5.6-luna""#), "all routes listed: {out}");
     assert!(
+      out.contains(r#""params":[{"name":"PR_URL","type":"string","default":null,"required":true"#),
+      "required profile environment is exposed as a browser param: {out}"
+    );
+    assert!(out.contains("Paste the GitHub pull-request URL"), "the manifest's required-value guidance reaches the UI");
+    assert!(!out.contains("hidden-wrapper-driver"), "agent-facing driver profiles stay out of the browser: {out}");
+    assert!(
       !out.contains(r#"{"name":"default""#),
       "the default profile is never a global card — it is always the repo's own: {out}"
     );
@@ -5791,7 +5975,10 @@ mod tests {
     std::fs::write(&stub, "#!/bin/sh\nsleep 5\n").unwrap();
     std::process::Command::new("chmod").arg("+x").arg(&stub).status().unwrap();
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
-    let body = format!(r#"{{"repo":{},"profile":"hello-fleet"}}"#, quote(&repo));
+    let body = format!(
+      r#"{{"repo":{},"profile":"hello-fleet","params":{{"PR_URL":"https://github.com/o/r/pull/7"}}}}"#,
+      quote(&repo)
+    );
     let (status, out, mutated) = with_scsh_home(&home, || {
       std::env::set_var("SCSH_BIN", &stub);
       let out = jobs_start_response(&body, &store);
@@ -5810,7 +5997,124 @@ mod tests {
       let names: Vec<&str> = session.skills.iter().map(|s| s.name.as_str()).collect();
       assert_eq!(names, ["greeter-claude-sonnet", "greeter-codex-luna"], "planned tasks are the profile's routes");
     }
+    let (_, profile, params, _, _) =
+      with_scsh_home(&home, || read_start_recipe(&session_id)).expect("global profile start recipe");
+    assert_eq!(profile.as_deref(), Some("hello-fleet"));
+    assert_eq!(params, [("PR_URL".into(), "https://github.com/o/r/pull/7".into())]);
     std::fs::remove_file(&stub).ok();
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn browser_review_keeps_its_skill_identity_and_writes_resume_artifacts() {
+    let home = global_home_with_profile("browser-review");
+    let dir = clean_repo("browser-review");
+    let nonce = crate::runtime::random_nonce_6();
+    let stub = std::env::temp_dir().join(format!("scsh-browser-review-{nonce}.sh"));
+    std::fs::write(&stub, "#!/bin/sh\nif [ \"$1\" = quota ]; then printf '{\"ok\":true}\\n'; exit 0; fi\nsleep 1\n")
+      .unwrap();
+    assert!(std::process::Command::new("chmod").arg("+x").arg(&stub).status().unwrap().success());
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let pr = crate::daemon::github::PullRequest {
+      reference: crate::daemon::github::PullRequestRef { owner: "owner".into(), repo: "repo".into(), number: 7 },
+      title: "Review me".into(),
+      body: String::new(),
+      base_ref: "main".into(),
+      url: "https://github.com/owner/repo/pull/7".into(),
+    };
+    let (result, final_receipt) = with_scsh_home(&home, || {
+      std::env::set_var("SCSH_BIN", &stub);
+      let result = start_job_in_repo(
+        &dir.to_string_lossy(),
+        None,
+        Some("hello-fleet".into()),
+        vec![("PR_URL".into(), pr.url.clone())],
+        None,
+        Some("main".into()),
+        0,
+        Some(home.join(".scsh.yml")),
+        Some("gh-gorgeous-review"),
+        Some(crate::daemon::github::BrowserReview { pull_request: pr, harnesses: vec!["codex".into()] }),
+        &store,
+      );
+      let receipt = dir.join("tmp/gh-gorgeous-review-browser.json");
+      for _ in 0..30 {
+        if std::fs::read_to_string(&receipt).unwrap_or_default().contains(r#""state":"reviewed""#) {
+          break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+      }
+      let final_receipt = std::fs::read_to_string(&receipt).unwrap();
+      std::env::remove_var("SCSH_BIN");
+      (result, final_receipt)
+    });
+    assert_eq!(result.0, 200, "got: {}", result.1);
+    let session = result.1.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap();
+    {
+      let guard = store.lock().unwrap();
+      let job = guard.sessions.get(session).unwrap();
+      assert_eq!(job.profile.as_deref(), Some("gh-gorgeous-review"));
+      assert_eq!(job.kind.as_deref(), Some("github-review"));
+    }
+    assert!(dir.join("tmp/quota-before-codex.json").is_file());
+    assert!(final_receipt.contains(r#""state":"reviewed""#), "got: {final_receipt}");
+    assert!(dir.join("tmp/quota-after-codex.json").is_file());
+    std::fs::remove_file(&stub).ok();
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn explicit_global_manifest_cannot_be_shadowed_by_the_reviewed_repo() {
+    let home = global_home_with_profile("override");
+    let dir = clean_repo("goverride");
+    std::fs::write(
+      dir.join(".scsh.yml"),
+      "skills:\n  impostor:\n    harness: grok\n    profile: hello-fleet\n    result: tmp/impostor.json\n",
+    )
+    .unwrap();
+    assert!(crate::git_command().args(["add", ".scsh.yml"]).current_dir(&dir).status().unwrap().success());
+    assert!(crate::git_command()
+      .args(["commit", "-qm", "Add local collision."])
+      .current_dir(&dir)
+      .status()
+      .unwrap()
+      .success());
+    let profile = Some("hello-fleet".to_string());
+    let params = [("PR_URL".into(), "https://github.com/o/r/pull/7".into())];
+    let planned = with_scsh_home(&home, || {
+      plan_job_request(&dir.to_string_lossy(), &None, &profile, &params, Some(&home.join(".scsh.yml"))).unwrap()
+    });
+    let names: Vec<_> = planned.planned.iter().map(|skill| skill.name.as_str()).collect();
+    assert_eq!(names, ["greeter-claude-sonnet", "greeter-codex-luna"]);
+    assert_eq!(
+      planned.run_args,
+      ["run", "hello-fleet", "--override-dot-scsh-yml", home.join(".scsh.yml").to_string_lossy().as_ref(),]
+    );
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn jobs_start_requires_declared_global_profile_params() {
+    let home = global_home_with_profile("required");
+    let dir = clean_repo("grequired");
+    let repo = dir.to_string_lossy();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let missing = format!(r#"{{"repo":{},"profile":"hello-fleet"}}"#, quote(&repo));
+    let (status, out, mutated) = with_scsh_home(&home, || jobs_start_response(&missing, &store));
+    assert_eq!(status, 400, "got: {out}");
+    assert!(!mutated && out.contains("param 'PR_URL' is required"), "got: {out}");
+
+    let unknown = format!(
+      r#"{{"repo":{},"profile":"hello-fleet","params":{{"PR_URL":"https://github.com/o/r/pull/7","TYPO":"x"}}}}"#,
+      quote(&repo)
+    );
+    let (status, out, mutated) = with_scsh_home(&home, || jobs_start_response(&unknown, &store));
+    assert_eq!(status, 400, "got: {out}");
+    assert!(!mutated && out.contains("does not declare param 'TYPO'"), "got: {out}");
+
     std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&dir).ok();
   }

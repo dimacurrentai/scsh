@@ -3764,6 +3764,30 @@ function openRepo() {
     handleRepoOpened(resp, note);
   }).catch(() => { if (note) note.textContent = 'could not open'; });
 }
+// Import a GitHub PR on the daemon host, then launch the explicit machine-wide review fleet.
+// Preparation can fetch a sizeable repository, so keep a visible status until the response.
+function startGhGorgeousReview() {
+  const input = document.getElementById('github-pr-url');
+  const note = document.getElementById('github-review-note');
+  const button = document.getElementById('github-review-start');
+  const url = (input?.value || '').trim();
+  if (!url) { if (note) note.textContent = 'paste a GitHub pull-request URL'; input?.focus(); return; }
+  if (note) note.textContent = 'fetching PR and preparing its local review checkout…';
+  if (button) button.disabled = true;
+  fetch('/api/v1/skills/gh-gorgeous-review/start', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: url }),
+  }).then(r => r.json()).then(resp => {
+    if (resp.ok && resp.session) window.location.href = '/job/' + resp.session;
+    else {
+      if (note) note.textContent = resp.error || 'could not start GitHub review';
+      if (button) button.disabled = false;
+    }
+  }).catch(() => {
+    if (note) note.textContent = 'could not start GitHub review';
+    if (button) button.disabled = false;
+  });
+}
 // Create a fresh project under ~/.scsh/projects/<name> — a new git repo born runnable — and
 // open it in place, so a demo job can start seconds later with no terminal involved.
 // Names: letters/digits/-/_ only (no dots or slashes). An existing name copies into Open + toasts.
@@ -3897,32 +3921,8 @@ function renderDefs(defs, globals) {
   list.querySelectorAll('.global-pick').forEach(b =>
     b.addEventListener('click', () => selectGlobalProfile(b.dataset.profile)));
 }
-// Mirror of selectDef for a globally installed skill profile: no params to collect, so the
-// form is just the Start button; the daemon spawns `scsh run <profile>` in the open repo.
-function selectGlobalProfile(name) {
-  const form = document.getElementById('def-form');
-  if (!GLOBAL_PROFILES[name] || !form) return;
-  const disabled = OPEN_REPO_RUNNABLE ? '' : ' disabled';
-  const hint = OPEN_REPO_RUNNABLE ? '' : 'the repository is not ready to run (see the blockers above)';
-  form.innerHTML = '<h4 class="form-title">run global skill profile <code>' + esc(name) + '</code></h4>' +
-    '<div class="images-controls"><button type="button" class="chamfer btn btn--green btn--sm" id="def-start"' +
-    disabled + '><span>Start job</span></button>' +
-    '<span id="def-note" class="dim">' + hint + '</span></div>';
-  document.getElementById('def-start')?.addEventListener('click', () => startGlobalJob(name));
-  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  form.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
-}
-function startGlobalJob(name) {
-  const note = document.getElementById('def-note');
-  if (!GLOBAL_PROFILES[name] || !OPEN_REPO) return;
-  if (!OPEN_REPO_RUNNABLE) { if (note) note.textContent = 'the repository is not ready to run'; return; }
-  postJobStart({ repo: OPEN_REPO, profile: name }, note);
-}
-function selectDef(name) {
-  const def = DEFS_BY_NAME[name];
-  const form = document.getElementById('def-form');
-  if (!def || !form) return;
-  const fields = (def.params || []).map(p => {
+function paramFields(params) {
+  return (params || []).map(p => {
     const id = 'param-' + p.name;
     let input;
     if (p.type === 'bool') {
@@ -3935,13 +3935,57 @@ function selectDef(name) {
         ' placeholder="Describe the complete feature…">' + esc(p.default || '') + '</textarea>';
     } else {
       const t = p.type === 'int' ? 'number' : 'text';
-      input = '<input type="' + t + '" id="' + id + '" value="' + esc(p.default || '') + '">';
+      input = '<input type="' + t + '" id="' + id + '" value="' + esc(p.default || '') + '"' +
+        (p.required ? ' required' : '') + '>';
     }
     const rowClass = p.type === 'text' ? 'param-row param-row--text' : 'param-row';
     return '<div class="' + rowClass + '"><label for="' + id + '">' + esc(p.name) +
       (p.required ? ' <span class="param-req">*</span>' : '') + '</label> ' + input +
       (p.description ? ' <span class="dim">' + esc(p.description) + '</span>' : '') + '</div>';
   }).join('');
+}
+function missingRequiredParam(params) {
+  return (params || []).find(p => {
+    const el = document.getElementById('param-' + p.name);
+    return p.required && el && p.type !== 'bool' && !String(el.value || '').trim();
+  });
+}
+// A globally installed profile may declare required host variables. Render them exactly like
+// definition params; the daemon forwards the submitted values as environment to `scsh run`.
+function selectGlobalProfile(name) {
+  const form = document.getElementById('def-form');
+  const profile = GLOBAL_PROFILES[name];
+  if (!profile || !form) return;
+  const disabled = OPEN_REPO_RUNNABLE ? '' : ' disabled';
+  const hint = OPEN_REPO_RUNNABLE ? '' : 'the repository is not ready to run (see the blockers above)';
+  form.innerHTML = '<h4 class="form-title">run global skill profile <code>' + esc(name) + '</code></h4>' +
+    paramFields(profile.params) +
+    '<div class="images-controls"><button type="button" class="chamfer btn btn--green btn--sm" id="def-start"' +
+    disabled + '><span>Start job</span></button>' +
+    '<span id="def-note" class="dim">' + hint + '</span></div>';
+  document.getElementById('def-start')?.addEventListener('click', () => startGlobalJob(name));
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  form.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+}
+function startGlobalJob(name) {
+  const profile = GLOBAL_PROFILES[name];
+  const note = document.getElementById('def-note');
+  if (!profile || !OPEN_REPO) return;
+  if (!OPEN_REPO_RUNNABLE) { if (note) note.textContent = 'the repository is not ready to run'; return; }
+  const missing = missingRequiredParam(profile.params);
+  if (missing) {
+    const el = document.getElementById('param-' + missing.name);
+    if (note) note.textContent = missing.name + ' is required';
+    if (el) { el.focus(); el.reportValidity(); }
+    return;
+  }
+  postJobStart({ repo: OPEN_REPO, profile: name, params: collectParams(profile) }, note);
+}
+function selectDef(name) {
+  const def = DEFS_BY_NAME[name];
+  const form = document.getElementById('def-form');
+  if (!def || !form) return;
+  const fields = paramFields(def.params);
   const disabled = OPEN_REPO_RUNNABLE ? '' : ' disabled';
   const hint = OPEN_REPO_RUNNABLE ? '' : 'the repository is not ready to run (see the blockers above)';
   form.innerHTML = '<h4 class="form-title">run <code>' + esc(name) + '</code></h4>' + fields +
@@ -3972,10 +4016,7 @@ function startJob(name) {
   const note = document.getElementById('def-note');
   if (!def || !OPEN_REPO) return;
   if (!OPEN_REPO_RUNNABLE) { if (note) note.textContent = 'the repository is not ready to run'; return; }
-  const missing = (def.params || []).find(p => {
-    const el = document.getElementById('param-' + p.name);
-    return p.type === 'text' && p.required && el && !el.value.trim();
-  });
+  const missing = missingRequiredParam(def.params);
   if (missing) {
     const el = document.getElementById('param-' + missing.name);
     if (note) note.textContent = missing.name + ' is required';
@@ -4159,6 +4200,10 @@ function renderInternalJobs(sessions, nowUnix) {
 }
 (function initReposPanel() {
   if (!document.getElementById('repo-path')) return;
+  document.getElementById('github-review-start')?.addEventListener('click', startGhGorgeousReview);
+  document.getElementById('github-pr-url')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') startGhGorgeousReview();
+  });
   document.getElementById('repo-open')?.addEventListener('click', openRepo);
   document.getElementById('project-create')?.addEventListener('click', createProject);
   document.getElementById('project-name')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') createProject(); });
