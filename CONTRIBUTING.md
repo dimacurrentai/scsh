@@ -121,7 +121,7 @@ This repo holds a few kinds of thing, deliberately kept apart:
 ├── Cargo.toml, build.rs, src/, tests/, README.md, rustfmt.toml  # ← the scsh crate (repo root)
 ├── .gitignore                                                   # /target, /tmp (Cargo.lock IS committed)
 ├── DEMO.md                                                     # the guided, agent-followed demo
-├── .skills/                                                     # canonical agent skills (source of truth)
+├── .skills/                                                     # scsh-owned skills plus pinned reviewer mirrors
 │   ├── README.md
 │   ├── add/ · multiply/                                         # example skills (the init-demo project)
 │   ├── scsh-harness-demo-and-selftest/                         # bundled: follows DEMO.md to demo + self-test
@@ -136,14 +136,12 @@ the product; everything else supports it.
 
 ### `.skills/` — agent skills
 
-`.skills/` is the **single source of truth** for repo skills. Each skill is a
-folder containing `SKILL.md` (YAML frontmatter + markdown body) plus optional
-`scripts/`, `references/`, `assets/`. The tool-specific discovery paths
+`.skills/` contains the skills authored by this repository plus pinned mirrors of the five reviewers canonically authored in [`dkorolev/code-review-skills`](https://github.com/dkorolev/code-review-skills). Delivery-family skills are canonically authored in [`dkorolev/beautiful-skills`](https://github.com/dkorolev/beautiful-skills) and are not copied here. Each local skill is a folder containing `SKILL.md` (YAML frontmatter + markdown body) plus optional `scripts/`, `references/`, `assets/`. The tool-specific discovery paths
 (`.claude/skills`, `.cursor/skills`, `.opencode/skills`, `.agents/skills`, …) are
 **symlinks** to `.skills/`, so one edit updates every host. See
 [`.skills/README.md`](.skills/README.md) for the full table. Rules:
 
-- **Author in `.skills/<name>/`** — never in the symlinked tool paths.
+- **Author `scsh`-owned skills in `.skills/<name>/`** — never in the symlinked tool paths. For a mirrored reviewer, change `code-review-skills` first and follow the pinning protocol documented in `.skills/README.md` and `src/config.rs`.
 - The **folder name must equal the `name` in the frontmatter.**
 - The example skills illustrate the env-spec conventions and are what
   `scsh init-demo-project` scaffolds: `add` sums `A`+`B` (defaults `2`,`3`,

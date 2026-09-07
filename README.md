@@ -519,9 +519,7 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
   dependency versions for reproducible builds.
 - **The image installs the latest `opencode` via `npm`** (`npm install -g opencode-ai`) —
   more reliable than the upstream curl installer, and easy to pin.
-- **There is no root `.scsh.yml` in this repo, by design.** It is the *tool*, not a
-  consumer of itself, so there is nothing to run against it. `scsh init-demo-project` (and
-  `installskills`) is what writes a `.scsh.yml` into a demo or target repo.
+- **The root `.scsh.yml` is bundle authoring input, not an application configuration.** `scsh` embeds it as the manifest for the no-URL `scsh installskills` bundle and also uses it to exercise the bundled reviewer and harness-smoke profiles in this repository. `scsh init-demo-project` writes the separate `src/demo.scsh.yml` manifest into a new demo repository; URL-based `installskills` merges the selected source repository's manifest into its target.
 
 ## Environment variables
 
