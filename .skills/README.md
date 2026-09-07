@@ -1,49 +1,48 @@
-# Agent skills (canonical)
+# Agent skills used by `scsh`
 
-This directory is the **single source of truth** for repo agent skills. Each skill is a folder with `SKILL.md` (YAML frontmatter + markdown body) and optional `scripts/`, `references/`, and `assets/`.
+This directory contains the skills that `scsh` develops, exercises, or embeds. Each skill is a folder with a `SKILL.md` (YAML frontmatter plus Markdown body) and optional `scripts/`, `references/`, and `assets/`.
 
-For the beautiful family and the five code-review specialties, these copies are temporarily canonical while the integrated `scsh` workflow lands. Follow-up PRs will reconcile [`dkorolev/beautiful-skills`](https://github.com/dkorolev/beautiful-skills) and [`dkorolev/code-review-skills`](https://github.com/dkorolev/code-review-skills) after this branch merges.
+The source of truth depends on the skill family:
 
-Edit skills here — not in the tool-specific paths below (they are symlinks).
+- The example, smoke, and self-test skills are authored here because they document or exercise `scsh` itself.
+- The five reviewer bodies are synchronized mirrors of [`dkorolev/code-review-skills`](https://github.com/dkorolev/code-review-skills), their canonical authoring repository. `src/config.rs` pins their content hashes to a named canonical revision, and tests reject an unpinned local edit. Reviewer changes land in `code-review-skills` first and are then mirrored here.
+- Delivery and publishing workflows such as `big-beautiful-build`, `code-gorgeous-review`, and `gh-gorgeous-review` are authored in [`dkorolev/beautiful-skills`](https://github.com/dkorolev/beautiful-skills). They are installed from that repository and are deliberately not bundled into the `scsh` binary.
+
+Edit a skill here only when this repository is its source of truth or when deliberately mirroring a canonical reviewer revision. Do not edit through the tool-specific paths below; they are symlinks.
 
 ## Tool discovery paths
 
 | Tool | Project path | Notes |
 | --- | --- | --- |
-| **Canonical** | `.skills/<name>/` | Author here |
-| Cursor | `.cursor/skills/` → `.skills` | Also `~/.cursor/skills/` for personal skills |
-| Claude Code | `.claude/skills/` → `.skills` | Also `~/.claude/skills/` |
-| Codex | `.agents/skills/`, `.codex/skills/` → `.skills` | Repo; also `~/.agents/skills/`, `~/.codex/skills/` |
-| OpenCode | `.opencode/skills/` → `.skills` | Also reads `.claude/skills`, `.agents/skills` |
+| Skills | `.skills/<name>/` | Repository-local skill bodies |
+| Cursor | `.cursor/skills/` -> `.skills` | Also `~/.cursor/skills/` for personal skills |
+| Claude Code | `.claude/skills/` -> `.skills` | Also `~/.claude/skills/` |
+| Codex | `.agents/skills/`, `.codex/skills/` -> `.skills` | Also `~/.agents/skills/`, `~/.codex/skills/` |
+| OpenCode | `.opencode/skills/` -> `.skills` | Also reads `.claude/skills` and `.agents/skills` |
 
-All symlinks point at this directory so one edit updates every host.
+All repository discovery symlinks point at this directory, so a legitimate edit is visible to every host.
 
 ## Skills in this repo
 
-| Skill | Purpose |
-| --- | --- |
-| [big-beautiful-build](big-beautiful-build/SKILL.md) | Build a complete feature after one intake question |
-| [fast-beautiful-forward](fast-beautiful-forward/SKILL.md) | Replay local work onto the freshest upstream default branch |
-| [code-beautiful-review](code-beautiful-review/SKILL.md) | Run and summarize the 15-route code-review fleet |
-| [the-beautiful-loop](the-beautiful-loop/SKILL.md) | Fix review findings and repeat preparation and review until the strict bar passes |
-| [prepare-beautiful-pr](prepare-beautiful-pr/SKILL.md) | Shape commits and write the local PR description |
-| [send-beautiful-pr](send-beautiful-pr/SKILL.md) | Audit authorship, push once, and open the GitHub PR |
-| [conventions-reviewer](conventions-reviewer/SKILL.md) | Enforce the repository's own conventions |
-| [justification-reviewer](justification-reviewer/SKILL.md) | Challenge scope, necessity, and complexity |
-| [reviewability-reviewer](reviewability-reviewer/SKILL.md) | Review commit and PR presentation for humans |
-| [sanity-reviewer](sanity-reviewer/SKILL.md) | Catch obvious security, performance, and resource-leak problems |
-| [testing-reviewer](testing-reviewer/SKILL.md) | Check that changed behavior is verifiable and test tooling cleans up |
-| [scsh-harness-demo-and-selftest](scsh-harness-demo-and-selftest/SKILL.md) | Follow `DEMO.md` to bootstrap a tiny `scsh` demo repo and run it, reporting PASS/FAIL |
-| [harness-smoke](harness-smoke/SKILL.md) | Minimal JSON OK smoke test for **grok** and **cursor** harnesses — run via [`HARNESS-SMOKE.md`](../HARNESS-SMOKE.md) or `./scripts/harness-smoke.sh` |
-| [add](add/SKILL.md) | Sum of env vars `A`+`B` (defaults `2`,`3`); reports `A + B = sum` |
-| [subtract](subtract/SKILL.md) | Difference `C`−`D` (defaults `10`,`4`); commit-enabled companion to `add` |
-| [multiply](multiply/SKILL.md) | Product of `X`·`Y` with **no defaults** — errors if either `X` or `Y` is unset |
-| [demo-pr](demo-pr/SKILL.md) | Minimal fake PR: write `demo_pr_note.txt` + `PR-DESCRIPTION.md`, two commits (packdiff Description panel) |
+| Skill | Ownership | Purpose |
+| --- | --- | --- |
+| [conventions-reviewer](conventions-reviewer/SKILL.md) | Mirrored from `code-review-skills` | Enforce the repository's own conventions |
+| [justification-reviewer](justification-reviewer/SKILL.md) | Mirrored from `code-review-skills` | Challenge scope, necessity, and complexity |
+| [reviewability-reviewer](reviewability-reviewer/SKILL.md) | Mirrored from `code-review-skills` | Review commit and PR presentation for humans |
+| [sanity-reviewer](sanity-reviewer/SKILL.md) | Mirrored from `code-review-skills` | Catch obvious security, performance, and resource-leak problems |
+| [testing-reviewer](testing-reviewer/SKILL.md) | Mirrored from `code-review-skills` | Check that changed behavior is verifiable and test tooling cleans up |
+| [scsh-harness-demo-and-selftest](scsh-harness-demo-and-selftest/SKILL.md) | Authored here and bundled | Follow `DEMO.md` to bootstrap and verify a tiny `scsh` project |
+| [harness-smoke](harness-smoke/SKILL.md) | Authored here | Minimal JSON smoke test for the configured subscription-first harness routes |
+| [add](add/SKILL.md) | Authored here | Add `A` and `B`; scaffolded by `scsh init-demo-project` |
+| [subtract](subtract/SKILL.md) | Authored here | Subtract `D` from `C`; scaffolded by `scsh init-demo-project` |
+| [multiply](multiply/SKILL.md) | Authored here | Multiply required `X` and `Y`; scaffolded by `scsh init-demo-project` |
+| [demo-pr](demo-pr/SKILL.md) | Authored here | Produce a minimal fake PR for commit-integration demonstrations |
 
-The root `.scsh.yml` is the source of truth for the beautiful skills' profiles and the 15 reviewer routes. The `add` and `multiply` reference examples are scaffolded by `scsh init-demo-project`. See [`DEMO.md`](../DEMO.md).
+The root `.scsh.yml` is the manifest embedded by no-URL `scsh installskills`: it defines the bundled five-reviewer `code-review` profile and the repository's harness-smoke profiles. The demo skills scaffolded by `scsh init-demo-project` use the separate embedded manifest at `src/demo.scsh.yml`.
 
-## Adding a skill
+## Changing a skill
 
-1. Create `.skills/<skill-name>/SKILL.md` with `name` and `description` frontmatter (name must match the folder).
-2. Author only here — never in the symlinked host paths (`.claude/skills/`, `.cursor/skills/`, …); see [`CONTRIBUTING.md`](../CONTRIBUTING.md) for the layout and house rules.
-3. Invoke via your host (`/skill-name`, `$skill-name`, or natural-language trigger per `description`).
+1. Identify its source of truth above. For a reviewer, change `dkorolev/code-review-skills` first, then mirror the exact body here and update the pinned hashes and canonical revision in `src/config.rs`.
+2. Keep the directory name equal to the skill's frontmatter `name`.
+3. Author only under `.skills/<name>/`, never through a symlinked host path.
+4. Update the appropriate manifest only when the skill is actually shipped by that manifest, then run the repository test suite.

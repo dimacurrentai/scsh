@@ -301,10 +301,10 @@ A=2 B=3 $SCSH run             # back to the first env → cache HIT → 2 + 3 = 
 `scsh` can pull skills from any git repo that ships them. When that repo has its **own** `.scsh.yml`, the manifest drives the install: `scsh` validates it, installs each skill it lists — **except** the authoring-only ones (marked `autoinstall: false`, or named with the `internal-` prefix) — and **merges those skills' entries into your `.scsh.yml`**, so they are runnable immediately.
 
 ```sh
-$SCSH installskills https://github.com/dimacurrentai/code-review-skills
+$SCSH installskills https://github.com/dkorolev/code-review-skills
 ```
 
-You'll see `scsh` install the reviewer skills and add them to your `.scsh.yml` under `profile: code-review`, while **skipping** the authoring-only `internal-self-check-reviewers` (its `internal-` name marks it internal to that repo):
+You'll see `scsh` install the reviewer skills and add them to your `.scsh.yml` under `profile: code-gorgeous-review`, while **skipping** the authoring-only `internal-self-check-reviewers` (its `internal-` name marks it internal to that repo):
 
 ```
 ✓ from …/code-review-skills: 5 skills — conventions-reviewer, justification-reviewer, …
