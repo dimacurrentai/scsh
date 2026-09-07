@@ -2868,7 +2868,7 @@ fn run_workflow(
     def.params.iter().filter_map(|p| std::env::var(&p.name).ok().map(|v| (p.name.clone(), v))).collect();
   // Record the RESOLVED base commit, not the ref the caller typed: a restart days later must
   // review against the same commit even if `origin/main` has moved on since.
-  daemon::write_start_recipe(&session_id, Some(&def.name), None, &recipe_params, base.map(|b| b.sha.as_str()));
+  daemon::write_start_recipe(&session_id, Some(&def.name), None, &recipe_params, base.map(|b| b.sha.as_str()), None);
   let mut daemon_session = DaemonSession { client: None, ping_active: None, registered: false };
   if daemon::ensure_for_run().is_ok() {
     let client = std::sync::Arc::new(daemon::Client::new(session_id.clone()));
@@ -6114,6 +6114,7 @@ fn run_one_skill(
   } else {
     None
   };
+  let github_auth = github_auth_enabled().then(|| forward_github_auth(&run_dir)).flatten();
   let tag = runtime::image_tag(skill.harness);
   // Claude needs no extra mounts: its forwarded config lives under the run clone's
   // tmp/.claude-auth (the image's CLAUDE_CONFIG_DIR), riding along with the repo mount —
@@ -6129,6 +6130,16 @@ fn run_one_skill(
   }
   let vol_refs: Vec<(&str, &str)> = vols.iter().map(|(h, m)| (h.as_str(), m.as_str())).collect();
   let mut container_env = env.clone();
+  if github_auth_enabled() {
+    for name in runtime::GH_TOKEN_ENVS {
+      if let Ok(value) = std::env::var(name) {
+        if !value.is_empty() {
+          container_env.push((name.to_string(), value));
+          break;
+        }
+      }
+    }
+  }
   if skill.harness == config::Harness::Claude {
     if let Some(token) = runtime::claude_oauth_token() {
       container_env.push((runtime::CLAUDE_OAUTH_TOKEN_ENV.to_string(), token));
@@ -6343,6 +6354,9 @@ fn run_one_skill(
   }
   if cursor_auth {
     scrub_cursor_credentials(&run_dir);
+  }
+  if let Some(dir) = &github_auth {
+    let _ = std::fs::remove_dir_all(dir);
   }
   // A watchdog can fire after a live limit classification was missed. Before assigning its
   // ordinary stall verdict, use Claude's two independent artifacts: stopped-limit prose in the
@@ -7034,6 +7048,11 @@ fn cursor_auth_enabled() -> bool {
   !matches!(std::env::var("SCSH_NO_CURSOR_AUTH").ok().as_deref(), Some("1") | Some("true"))
 }
 
+/// Whether `gh` may reuse the host's existing login inside skill containers.
+fn github_auth_enabled() -> bool {
+  !matches!(std::env::var("SCSH_NO_GH_AUTH").ok().as_deref(), Some("1") | Some("true"))
+}
+
 /// Whether scsh keeps every skill's `/tmp` run-clone instead of cleaning up. By default a
 /// successful skill's clone is removed after the run (its result was collected and any commits
 /// integrated) while a failed skill's clone is kept for inspection, and stale clones from past
@@ -7079,6 +7098,23 @@ fn forward_opencode(run_dir: &Path) -> Option<PathBuf> {
     let _ = std::fs::copy(&cfg, cfg_dir.join("opencode.jsonc"));
   }
   Some(data_dir)
+}
+
+/// Copy only the GitHub CLI's authenticated-host file into the run clone. The destination is
+/// under the gitignored `tmp/`, is visible through both repository transport modes, and is
+/// removed as soon as the container exits. Token-only users are handled through container env.
+fn forward_github_auth(run_dir: &Path) -> Option<PathBuf> {
+  let src = runtime::gh_hosts_file_on_host()?;
+  let dest = run_dir.join(runtime::GH_CONFIG_REL);
+  std::fs::create_dir_all(&dest).ok()?;
+  let hosts = dest.join("hosts.yml");
+  std::fs::copy(src, &hosts).ok()?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&hosts, std::fs::Permissions::from_mode(0o600));
+  }
+  Some(dest)
 }
 
 /// Assemble the minimal Claude config the container needs into `run_dir`, returning the auth
@@ -10021,6 +10057,7 @@ the run fails only when every selected skill is skipped.",
   help_row("SCSH_NO_OPENCODE_AUTH=1", "Do not forward opencode credentials into containers.");
   help_row("SCSH_NO_CLAUDE_AUTH=1", "Do not forward Claude credentials into containers.");
   help_row("SCSH_NO_CURSOR_AUTH=1", "Do not forward Cursor credentials into containers.");
+  help_row("SCSH_NO_GH_AUTH=1", "Do not forward GitHub CLI credentials into containers.");
   println!();
   println!("{}", h_head("After a run"));
   println!("{}", h_dim("  Read each skill's declared `result` path (usually under tmp/). On failure, scsh"));
@@ -10211,6 +10248,9 @@ fn print_help_internals() {
   OAuth tokens from ~/.config/cursor/auth.json or the macOS login keychain into tmp/.config/cursor/auth.json,
   CURSOR_API_KEY is forwarded when set, and credentials are scrubbed after exit (opt out: SCSH_NO_CURSOR_AUTH=1). Cursor is
   the native harness for Cursor Agent models (Composer, etc.).
+  Every skill can use the container's GitHub CLI with the host's existing login: scsh copies
+  the host gh hosts.yml into tmp/.config/gh, or forwards GH_TOKEN/GITHUB_TOKEN, then scrubs it
+  after exit (opt out: SCSH_NO_GH_AUTH=1).
   Harness runs at full verbosity (OpenCode DEBUG + --print-logs; Claude --verbose --debug;
   Codex RUST_LOG tracing + its final message appended to the log; Grok --debug + its debug
   log appended; Cursor --output-format stream-json);
@@ -11550,6 +11590,42 @@ steps:
     assert!(out.is_some(), "forwarding happened");
     assert!(run.join("tmp/.xdg-data/opencode/auth.json").is_file(), "auth rides the repo mount");
     assert!(run.join("tmp/.config/opencode/opencode.json").is_file(), "config rides the repo mount");
+    let _ = std::fs::remove_dir_all(&base);
+  }
+
+  #[test]
+  fn forward_github_auth_copies_only_hosts_file_into_the_run_clone() {
+    let _guard = runtime::test_env_lock();
+    let base = std::env::temp_dir().join(format!("scsh-gh-fwd-{}-{}", std::process::id(), now_secs()));
+    let host = base.join("host");
+    std::fs::create_dir_all(host.join(".config/gh")).unwrap();
+    std::fs::write(host.join(".config/gh/hosts.yml"), "github.com:\n  oauth_token: secret\n").unwrap();
+    let run = base.join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    let prev_home = std::env::var_os("HOME");
+    let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+    let prev_gh = std::env::var_os("GH_CONFIG_DIR");
+    std::env::set_var("HOME", &host);
+    std::env::remove_var("XDG_CONFIG_HOME");
+    std::env::remove_var("GH_CONFIG_DIR");
+    let out = forward_github_auth(&run);
+    match prev_home {
+      Some(v) => std::env::set_var("HOME", v),
+      None => std::env::remove_var("HOME"),
+    }
+    match prev_xdg {
+      Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+      None => std::env::remove_var("XDG_CONFIG_HOME"),
+    }
+    match prev_gh {
+      Some(v) => std::env::set_var("GH_CONFIG_DIR", v),
+      None => std::env::remove_var("GH_CONFIG_DIR"),
+    }
+    assert_eq!(out.as_deref(), Some(run.join("tmp/.config/gh").as_path()));
+    assert_eq!(
+      std::fs::read_to_string(run.join("tmp/.config/gh/hosts.yml")).unwrap(),
+      "github.com:\n  oauth_token: secret\n"
+    );
     let _ = std::fs::remove_dir_all(&base);
   }
 

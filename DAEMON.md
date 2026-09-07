@@ -43,6 +43,12 @@ http://127.0.0.1:7274/job/abcdef
 Open it in a browser to see image builds and skills as collapsible sections, with timestamped
 harness output and container names.
 
+## Browser-only `gh-gorgeous-review` kickoff
+
+The Run tab exposes **Start gh-gorgeous-review** and accepts a GitHub pull-request URL without first opening a local repository. After one-time `gh auth login` and global installs of `dkorolev/beautiful-skills` plus `dkorolev/code-review-skills`, it fetches metadata on the daemon host, creates or safely refreshes an scsh-owned full checkout under `$SCSH_HOME/github-reviews/`, pins local `main` to the PR's actual base branch, recreates the real description as the final `PR-DESCRIPTION.md` notes commit, snapshots quota before and after the fleet, and starts the global `code-gorgeous-review` profile. The global manifest is passed explicitly, so a PR's repo-local profile cannot shadow the review fleet.
+
+An existing checkout is refreshed only when it carries scsh's ownership marker, has no worktree changes, and has no unexpected local commits. A collision or local work is reported in the Run form instead of being overwritten. The daemon writes `tmp/gh-gorgeous-review-browser.json` and marks it `running`, `reviewed`, or `failed`. The canonical `$gh-gorgeous-review <PR URL>` skill validates a matching completed receipt and resumes from its result and quota artifacts; publication therefore retains the skill's conversational explicit-approval gate without repeating the review fleet.
+
 ## What is collected
 
 | Event | Source |

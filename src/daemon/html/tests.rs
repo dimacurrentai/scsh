@@ -1040,8 +1040,19 @@ fn setup_panel_surfaces_a_stopped_container_engine() {
 fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   let store = Store::new(DaemonMode::Persistent, 7274, 1);
   let html = super::index_page(&store);
-  for id in
-    ["repo-path", "repo-pick", "repo-open", "repo-blockers", "defs-panel", "defs-list", "def-form", "repos-body"]
+  for id in [
+    "github-pr-url",
+    "github-review-start",
+    "github-review-note",
+    "repo-path",
+    "repo-pick",
+    "repo-open",
+    "repo-blockers",
+    "defs-panel",
+    "defs-list",
+    "def-form",
+    "repos-body",
+  ]
   {
     assert!(html.contains(&format!("id=\"{id}\"")), "index page should contain #{id}");
   }
@@ -1076,6 +1087,11 @@ fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   assert!(js.contains("/api/v1/repos/open"), "client js opens a repo");
   assert!(js.contains("/api/v1/repos/pick"), "client js pops the folder picker");
   assert!(js.contains("/api/v1/jobs/start"), "client js starts a job");
+  assert!(
+    js.contains("/api/v1/skills/gh-gorgeous-review/start"),
+    "client js starts the named gh-gorgeous-review operation"
+  );
+  assert!(js.contains("function startGhGorgeousReview"), "the named skill has a dedicated browser action");
   assert!(js.contains("function renderRepoJobs"), "client js renders jobs by repository");
   assert!(js.contains("function renderInternalJobs"), "client js renders Internal section");
   assert!(js.contains("Chapters pending ⬇"), "export label for pending chapters");
@@ -1520,6 +1536,8 @@ fn global_skills_are_startable_from_the_run_page() {
   assert!(js.contains("function selectGlobalProfile"), "picking a global profile opens a start form");
   assert!(js.contains("function startGlobalJob"), "…and its Start button starts a job");
   assert!(js.contains("profile: name"), "the start request posts a profile, not a def");
+  assert!(js.contains("paramFields(profile.params)"), "required global-profile inputs render in the start form");
+  assert!(js.contains("params: collectParams(profile)"), "global-profile inputs reach the daemon");
   assert!(js.contains("scsh installskills --global"), "the section says where global skills come from");
   assert!(js.contains(r#"badge--cyan"><span>global"#), "global cards wear the cyan source badge");
   assert!(js.contains("renderDefs(resp.defs || [], resp.global || [])"), "open replies feed the global list");

@@ -277,6 +277,10 @@ The built-in `big-beautiful-build` workflow is the browser's complete feature fa
 
 The built-in `gorgeous-pipeline` workflow prepares the current branch, runs the five-specialty Opus/Codex/Cursor review fleet, and loops through fixes until the score bar passes: Opus 4.8 orchestrates the loop, applies the fixes, and journals the decisions, while Opus 4.8, Codex Spark, and Cursor Auto grade every profile independently. Whatever a fix cycle deliberately declines is journaled as a `PR-DECISION-<topic>.md` note that the next cycle's reviewers read before grading, so a settled question is argued once instead of re-litigated every round. When, from the third round on, everything still holding a route below the bar is a journaled human-adjudication item (split-the-PR requests, product direction) with no poor grades and nothing blocking, the loop exits honestly as `approved_with_reservations` — listing each reservation for the human — instead of grinding the iteration backstop. Every one of its 30 review steps references the same canonical reviewer body embedded for `scsh installskills` from this repository's `.skills/` (originally derived from [dkorolev/code-review-skills](https://github.com/dkorolev/code-review-skills)); `scsh` appends only the workflow's grade/comments output contract. The reviewers inspect commits, diffs, source, tests, documentation, and repository guidelines statically — they never build, run, lint, format, test, execute repository scripts, or invoke the product.
 
+`gh-gorgeous-review` has two entry points. Invoke `$gh-gorgeous-review <PR URL>` in an agent session for the complete conversational workflow, or use **Start gh-gorgeous-review** on scsh's Run page. The browser kickoff requires `gh auth login` plus one-time global installs of [dkorolev/beautiful-skills](https://github.com/dkorolev/beautiful-skills) and [dkorolev/code-review-skills](https://github.com/dkorolev/code-review-skills). The daemon creates or safely refreshes the same scsh-owned replica under `~/.scsh/github-reviews/`, pins local `main` to the PR's actual base, reconstructs `PR-DESCRIPTION.md`, snapshots the fleet harness quotas before and after, and starts the explicit machine-wide `code-gorgeous-review` fleet. An untrusted repo-local `.scsh.yml` cannot replace that fleet. The checkout receives a browser receipt, so a later `$gh-gorgeous-review <PR URL>` resumes at the flat publication summary and explicit approval gate instead of running the fleet twice.
+
+Globally installed skill profiles may also declare required environment inputs. The Run page renders those inputs as form fields and forwards their values to the spawned profile.
+
 **Installing skills.** With no arguments, `scsh installskills` installs all five code-review specialties, their 15-route `code-review` profile, and `scsh-harness-demo-and-selftest` into the repo's `.skills/` — and deliberately nothing more: the delivery-pipeline skill families live in their own repositories and install from source, so the bundle can never drift from them. Give the command one or more **git URLs** to install another repository's skills (installed in order, as if you ran the command once per repo):
 
 ```sh
@@ -494,8 +498,7 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
   and results can never be committed by accident.
 - **Least privilege.** The container runs as a non-root `agent` user whose UID/GID
   match yours, so files it writes are owned by you.
-- **Secrets don't linger.** Your opencode credential is copied into a run only for its
-  duration and removed afterward (opt out with `SCSH_NO_OPENCODE_AUTH=1`).
+- **Secrets don't linger.** Harness credentials and the GitHub CLI's `hosts.yml` are copied into a run only for its duration and removed afterward. Opt out of GitHub credential forwarding with `SCSH_NO_GH_AUTH=1`.
 - **Scratch is cleaned up.** Each skill's container is `--rm`, and its throwaway clone in
   the system temp dir is removed after the skill **succeeds**; a **failed** skill's clone is
   kept for inspection (its path is printed), and clones older than a day are swept at the next
@@ -538,13 +541,13 @@ The one place they are all listed. Host-side knobs, all optional:
 | `SCSH_NO_RETRY` | off | `1` disables the single automatic retry of transient failures. |
 | `SCSH_QUIET` | off | `1` runs harnesses at their default log level (output is still teed to the run log). |
 | `SCSH_NO_CLAUDE_AUTH` / `SCSH_NO_OPENCODE_AUTH` / `SCSH_NO_CODEX_AUTH` / `SCSH_NO_GROK_AUTH` / `SCSH_NO_CURSOR_AUTH` | off | `1` skips forwarding that harness's host credentials into containers. |
+| `SCSH_NO_GH_AUTH` | off | `1` skips forwarding `GH_TOKEN`/`GITHUB_TOKEN` and the host GitHub CLI `hosts.yml` into containers. |
 | `SCSH_ANNOTATE_MODEL` | `gpt-5.6-luna` | Model `scsh annotate-cast` drives via Codex. |
 | `SCSH_STATS_FILE` | `~/.scsh/stats.jsonl` | Where run statistics are journaled. |
 | `SCSH_HARNESS_HOME` | `~/.harness` | User-level harness-definition directory. |
 | `SCSH_BIN` | self | Path to the scsh binary the daemon re-execs (tests/packaging override). |
 
-Host credentials scsh reads (never stored, forwarded per-run): `CLAUDE_CODE_OAUTH_TOKEN`,
-`OPENAI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY` — plus each CLI's own login files.
+Host credentials `scsh` reads (never stored, forwarded per-run): `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY`, `GH_TOKEN`, `GITHUB_TOKEN` — plus each CLI's own login files.
 
 Inside every container, scsh sets the skill contract: `SCSH=1`, `SCSH_RESULT` (the result
 file path), and `SCSH_RUN_LOG` (the teed harness log).

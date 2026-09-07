@@ -185,6 +185,26 @@ pub const OPENCODE_DATA_REL: &str = "tmp/.xdg-data/opencode";
 /// host config into each run clone here so it rides the repo mount (no separate bind mounts).
 pub const OPENCODE_CONFIG_REL: &str = "tmp/.config/opencode";
 
+/// Run-dir-relative GitHub CLI config. The image's `XDG_CONFIG_HOME` points at `tmp/.config`,
+/// so a copied `hosts.yml` is discovered by `gh` without another bind mount.
+pub const GH_CONFIG_REL: &str = "tmp/.config/gh";
+
+/// GitHub CLI token variables accepted by `gh`, in precedence order.
+pub const GH_TOKEN_ENVS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
+
+/// Host `gh auth login` configuration: `$GH_CONFIG_DIR/hosts.yml`, then
+/// `$XDG_CONFIG_HOME/gh/hosts.yml`, then `~/.config/gh/hosts.yml`.
+pub fn gh_hosts_file_on_host() -> Option<PathBuf> {
+  let candidate = if let Some(dir) = std::env::var_os("GH_CONFIG_DIR").filter(|d| !d.is_empty()) {
+    PathBuf::from(dir).join("hosts.yml")
+  } else if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
+    PathBuf::from(dir).join("gh/hosts.yml")
+  } else {
+    PathBuf::from(std::env::var_os("HOME")?).join(".config/gh/hosts.yml")
+  };
+  candidate.is_file().then_some(candidate)
+}
+
 /// Host env var for long-lived Claude OAuth (`claude setup-token`).
 pub const CLAUDE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
