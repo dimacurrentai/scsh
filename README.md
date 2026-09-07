@@ -453,15 +453,7 @@ servers) alike — every architecture-specific download resolves the target arch
 so there are no hardcoded-arch URLs. The Dockerfile is a single static file,
 [`src/Dockerfile`](src/Dockerfile), embedded into the binary at compile time.
 
-**Apple Containers (macOS default):** Apple's `container build` sends the Dockerfile in a
-gRPC header with a **16 KB hard limit**
-([apple/container#735](https://github.com/apple/container/issues/735)). Larger files fail with
-the opaque `Stream unexpectedly closed` / `Transport became inactive`. `scsh` keeps
-`src/Dockerfile` under 15 KB, **comment-strips** it before every Apple build, refuses to start
-a doomed build with a clear error, and rewrites those opaque failures into a builder-reset
-hint. Prefer a healthy BuildKit (`container builder start --cpus 6 --memory 8G`) for the
-large base image. If Apple Containers is unavailable, `scsh` automatically falls back to
-Docker and then Podman.
+**Apple Containers (macOS default):** Apple's `container build` sends the Dockerfile in a gRPC header with a **16 KB hard limit** ([apple/container#735](https://github.com/apple/container/issues/735)). Larger files fail with the opaque `Stream unexpectedly closed` / `Transport became inactive`. `scsh` keeps `src/Dockerfile` under 15 KB, **comment-strips** it before every Apple build, refuses to start a doomed build with a clear error, and rewrites those opaque failures into a builder-reset hint. Prefer a healthy BuildKit (`container builder start --cpus 6 --memory 8G`) for the large base image. If Apple Containers is installed but its service stopped after a reboot, the first run or image build starts it with `container system start` and verifies liveness before continuing. If Apple Containers is unavailable, `scsh` automatically falls back to Docker and then Podman.
 
 The base is glibc Debian (not musl Alpine) precisely so these prebuilt toolchains install and
 run without friction. The image is large (a few GB) and **built once, then cached** and reused
