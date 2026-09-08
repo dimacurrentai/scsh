@@ -90,6 +90,11 @@ fn findings(root: &Path, session: &Session) -> Result<(Vec<Value>, bool), String
   Ok((issues, excellent + good == session.skills.len() && excellent >= good))
 }
 
+// The local review input is a file; GitHub readers know it as the PR description.
+fn github_wording(text: &str) -> String {
+  text.replace("`PR-DESCRIPTION.md`", "PR description").replace("PR-DESCRIPTION.md", "PR description")
+}
+
 fn payload(head: &str, event: &str, issues: &[Value], files: &[Value], marker: &str) -> Result<String, String> {
   let mut anchors = BTreeMap::new();
   for file in files {
@@ -105,11 +110,11 @@ fn payload(head: &str, event: &str, issues: &[Value], files: &[Value], marker: &
       Some(Value::Number(n)) if n.is_finite() && *n >= 0.0 && n.fract() == 0.0 => *n as u64,
       _ => return Err("review issue has an invalid line".into()),
     };
-    let description = string(issue, "description")?;
+    let description = github_wording(&string(issue, "description")?);
     if description.trim().is_empty() {
       return Err("review issue has an empty description".into());
     }
-    let suggestion = string(issue, "suggestion").unwrap_or_default();
+    let suggestion = github_wording(&string(issue, "suggestion").unwrap_or_default());
     let body = if suggestion.is_empty() { description } else { format!("{description}\n\nSuggestion: {suggestion}") };
     grouped.entry((path, line)).or_default().insert(body);
   }
@@ -131,7 +136,9 @@ fn payload(head: &str, event: &str, issues: &[Value], files: &[Value], marker: &
         quote(&text)
       ));
     } else {
-      let location = if path == "PR-DESCRIPTION.md" || path.starts_with('<') {
+      let location = if path == "PR-DESCRIPTION.md" {
+        "PR description".to_string()
+      } else if path.starts_with('<') {
         "Overall change".to_string()
       } else {
         format!("{path}:{line}")
@@ -345,6 +352,28 @@ mod tests {
   #[test]
   fn patch_anchors_track_additions_context_and_deletions() {
     assert_eq!(right_lines("@@ -3,3 +3,3 @@\n context\n-old\n+new\n end\n"), BTreeSet::from([3, 4, 5]));
+  }
+
+  #[test]
+  fn publication_calls_the_local_description_file_the_pr_description() {
+    for path in ["PR-DESCRIPTION.md", "a.rs"] {
+      let issue = parse(&format!(
+        r#"{{"file":"{path}","line":1,"description":"Clarify `PR-DESCRIPTION.md`.","suggestion":"Update PR-DESCRIPTION.md."}}"#
+      ))
+      .unwrap();
+      let files = [parse(r#"{"filename":"a.rs","patch":"@@ -1 +1 @@\n+new"}"#).unwrap()];
+      let published = payload("abc", "COMMENT", &[issue], &files, "marker").unwrap();
+      assert!(!published.contains("PR-DESCRIPTION.md"));
+      assert!(published.contains("Clarify PR description."));
+      assert!(published.contains("Update PR description."));
+      let value = parse(&published).unwrap();
+      if path == "PR-DESCRIPTION.md" {
+        assert!(string(&value, "body").unwrap().contains("\n\nPR description\n\n"));
+        assert_eq!(field(&value, "comments"), Some(&Value::Array(vec![])));
+      } else {
+        assert!(matches!(field(&value, "comments"), Some(Value::Array(comments)) if comments.len() == 1));
+      }
+    }
   }
 
   #[test]
