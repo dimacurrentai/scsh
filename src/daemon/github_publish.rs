@@ -72,10 +72,11 @@ fn findings(root: &Path, session: &Session) -> Result<(Vec<Value>, bool), String
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let value = parse(&text)?;
     let result = field(&value, "result").ok_or("missing review result")?;
-    match string(result, "grade")?.as_str() {
-      "excellent" => excellent += 1,
-      "good" => good += 1,
-      "ok" | "poor" | "bad" => {}
+    // Shared scores: 5 = excellent, 4 = good; lower valid grades cannot approve.
+    match crate::fleet::grade_score(&string(result, "grade")?) {
+      Some(5) => excellent += 1,
+      Some(4) => good += 1,
+      Some(_) => {}
       _ => return Err(format!("route {} has an invalid grade", skill.name)),
     }
     let Some(Value::Array(found)) = field(&value, "issues") else {
@@ -255,8 +256,6 @@ mod tests {
     std::fs::create_dir_all(root.join("tmp")).unwrap();
     std::fs::write(root.join("tmp/gh-gorgeous-review-browser.json"), r#"{"reviewed_head":"head","base_head":"base"}"#)
       .unwrap();
-    std::fs::write(root.join("reviewer.json"), r#"{"result":{"grade":"excellent","issues_found":0},"issues":[]}"#)
-      .unwrap();
     let mut session = super::super::jsonio::parse_session_json(
       r#"{
       "id":"test-publication", "skills":[{"name":"reviewer","source":"reviewer"}],
@@ -271,7 +270,30 @@ mod tests {
       base_ref: "main".into(),
       url: "https://github.com/o/r/pull/1".into(),
     };
-    for scenario in ["publish", "duplicate", "stale", "failed", "missing", "self", "draft"] {
+    for scenario in [
+      "publish",
+      "duplicate",
+      "stale",
+      "failed",
+      "missing",
+      "self",
+      "draft",
+      "good",
+      "average",
+      "poor",
+      "bad",
+      "invalid",
+    ] {
+      let grade = match scenario {
+        "good" | "average" | "poor" | "bad" => scenario,
+        "invalid" => "ok",
+        _ => "excellent",
+      };
+      std::fs::write(
+        root.join("reviewer.json"),
+        format!(r#"{{"result":{{"grade":"{grade}","issues_found":0}},"issues":[]}}"#),
+      )
+      .unwrap();
       session.procs[0].status = if scenario == "failed" { ProcStatus::Fail } else { ProcStatus::Ok };
       let mut posted = 0;
       let missing = root.join("missing");
@@ -290,7 +312,11 @@ mod tests {
           let body = parse(&std::fs::read_to_string(args[args.len() - 1]).unwrap()).unwrap();
           assert_eq!(
             string(&body, "event").unwrap(),
-            if scenario == "self" || scenario == "draft" { "COMMENT" } else { "APPROVE" }
+            if matches!(scenario, "self" | "draft" | "good" | "average" | "poor" | "bad") {
+              "COMMENT"
+            } else {
+              "APPROVE"
+            }
           );
           r#"{"html_url":"https://github.com/o/r/pull/1#review"}"#.into()
         } else if args[1].ends_with("/reviews") && scenario == "duplicate" {
@@ -300,8 +326,16 @@ mod tests {
         };
         parse(&value)
       });
-      assert_eq!(result.is_ok(), !matches!(scenario, "stale" | "failed" | "missing"), "{scenario}: {result:?}");
-      assert_eq!(posted, usize::from(matches!(scenario, "publish" | "self" | "draft")), "{scenario}");
+      assert_eq!(
+        result.is_ok(),
+        !matches!(scenario, "stale" | "failed" | "missing" | "invalid"),
+        "{scenario}: {result:?}"
+      );
+      assert_eq!(
+        posted,
+        usize::from(matches!(scenario, "publish" | "self" | "draft" | "good" | "average" | "poor" | "bad")),
+        "{scenario}"
+      );
     }
     std::fs::remove_dir_all(root).unwrap();
   }
