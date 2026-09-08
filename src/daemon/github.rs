@@ -26,6 +26,10 @@ pub struct PullRequest {
   pub title: String,
   pub body: String,
   pub base_ref: String,
+  /// Exact base revision reported by GitHub, including the historical base of a merged PR.
+  pub base_oid: String,
+  /// Exact reviewed head; preparation refuses a PR ref that moves after metadata was loaded.
+  pub head_oid: String,
   pub url: String,
 }
 
@@ -72,7 +76,7 @@ pub fn parse_pull_request(input: &str) -> Result<PullRequestRef, String> {
 pub fn load_pull_request(gh: &Path, reference: PullRequestRef) -> Result<PullRequest, String> {
   let url = format!("https://github.com/{}/{}/pull/{}", reference.owner, reference.repo, reference.number);
   let output = Command::new(gh)
-    .args(["pr", "view", &url, "--json", "title,body,baseRefName,url"])
+    .args(["pr", "view", &url, "--json", "title,body,baseRefName,baseRefOid,headRefOid,url"])
     .output()
     .map_err(|e| format!("could not run gh: {e}"))?;
   let stdout = checked_output(output, "gh pr view")?;
@@ -86,6 +90,8 @@ pub fn load_pull_request(gh: &Path, reference: PullRequestRef) -> Result<PullReq
     title: get("title")?,
     body: field_str(&obj, "body").unwrap_or_default(),
     base_ref: get("baseRefName")?,
+    base_oid: get("baseRefOid")?,
+    head_oid: get("headRefOid")?,
     url: get("url")?,
   })
 }
@@ -98,6 +104,11 @@ fn field_str(obj: &[(String, Value)], name: &str) -> Option<String> {
 }
 
 pub fn prepare_pull_request(gh: &Path, home: &Path, pr: &PullRequest) -> Result<PathBuf, String> {
+  for oid in [&pr.base_oid, &pr.head_oid] {
+    if oid.len() != 40 || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+      return Err("GitHub returned an invalid PR revision".into());
+    }
+  }
   let root = home.join("github-reviews");
   std::fs::create_dir_all(&root).map_err(|e| format!("could not create {}: {e}", root.display()))?;
   let dir = root.join(format!("pr-{}-{}-{}", pr.reference.number, pr.reference.repo, pr.reference.owner));
@@ -126,12 +137,14 @@ pub fn prepare_pull_request(gh: &Path, home: &Path, pr: &PullRequest) -> Result<
     ensure_refresh_is_safe(&dir, previous_head.as_deref())?;
   }
   let imported_head = git_capture(&dir, &["rev-parse", "FETCH_HEAD"])?;
+  if imported_head.trim() != pr.head_oid {
+    return Err("the PR head changed during preparation; start the review again".into());
+  }
   let branch = format!("pr-{}-{}-{}", pr.reference.number, pr.reference.repo, pr.reference.owner);
   git(&dir, &["checkout", "-B", &branch, "FETCH_HEAD"])?;
   git(&dir, &["clean", "-fd"])?;
-  git(&dir, &["fetch", "origin", &pr.base_ref])?;
-  let base = format!("origin/{}", pr.base_ref);
-  git(&dir, &["branch", "-f", "main", &base])?;
+  git(&dir, &["fetch", "origin", &pr.base_oid])?;
+  git(&dir, &["branch", "-f", "main", &pr.base_oid])?;
 
   let exclude = dir.join(".git/info/exclude");
   let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
@@ -146,7 +159,9 @@ pub fn prepare_pull_request(gh: &Path, home: &Path, pr: &PullRequest) -> Result<
   let notes = format!("# {}\n\n{}\n\n> Reconstructed from {} for local review.\n", pr.title, body, pr.url);
   std::fs::write(dir.join("PR-DESCRIPTION.md"), notes)
     .map_err(|e| format!("could not write PR-DESCRIPTION.md: {e}"))?;
-  git(&dir, &["add", "--", "PR-DESCRIPTION.md"])?;
+  // This generated review input belongs only to our owned replica, even when the
+  // upstream repository or global excludes intentionally ignore the filename.
+  git(&dir, &["add", "-f", "--", "PR-DESCRIPTION.md"])?;
   git_env(
     &dir,
     &[
@@ -320,7 +335,8 @@ mod tests {
     std::fs::create_dir_all(&source).unwrap();
     git(&source, &["init", "-q", "-b", "main"]).unwrap();
     std::fs::write(source.join("base.txt"), "base\n").unwrap();
-    git(&source, &["add", "base.txt"]).unwrap();
+    std::fs::write(source.join(".gitignore"), "/PR-DESCRIPTION.md\n").unwrap();
+    git(&source, &["add", "base.txt", ".gitignore"]).unwrap();
     git_env(
       &source,
       &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-qm", "Base."],
@@ -352,14 +368,19 @@ mod tests {
     )
     .unwrap();
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let pr = PullRequest {
+    let mut pr = PullRequest {
       reference: PullRequestRef { owner: "owner".into(), repo: "repo".into(), number: 7 },
       title: "A useful change".into(),
       body: "The real body.".into(),
       base_ref: "main".into(),
+      base_oid: base.trim().into(),
+      head_oid: head.trim().into(),
       url: "https://github.com/owner/repo/pull/7".into(),
     };
 
+    // Model a merged PR: the branch tip already contains the feature, but GitHub's
+    // recorded base is still the pre-merge commit. Review that exact historical diff.
+    git(&remote, &["update-ref", "refs/heads/main", head.trim()]).unwrap();
     let checkout = prepare_pull_request(&gh, &home, &pr).unwrap();
     assert_eq!(git_capture(&checkout, &["rev-parse", "main"]).unwrap().trim(), base.trim());
     assert_eq!(git_capture(&checkout, &["rev-parse", "HEAD^"]).unwrap().trim(), head.trim());
@@ -368,6 +389,7 @@ mod tests {
       format!("{NOTES_NAME} <{NOTES_EMAIL}>")
     );
     assert!(std::fs::read_to_string(checkout.join("PR-DESCRIPTION.md")).unwrap().contains("The real body."));
+    assert_eq!(git_capture(&checkout, &["show", "HEAD:.gitignore"]).unwrap(), "/PR-DESCRIPTION.md\n");
     assert!(git_capture(&checkout, &["status", "--porcelain"]).unwrap().is_empty());
     write_browser_receipt(&checkout, &pr, "abcxyz", "running");
     let receipt = std::fs::read_to_string(checkout.join("tmp/gh-gorgeous-review-browser.json")).unwrap();
@@ -403,6 +425,8 @@ mod tests {
       .unwrap();
     checked_output(pushed, "git push rewritten PR").unwrap();
 
+    assert!(prepare_pull_request(&gh, &home, &pr).unwrap_err().contains("head changed"));
+    pr.head_oid = rewritten_head.trim().into();
     let refreshed = prepare_pull_request(&gh, &home, &pr).unwrap();
     assert_eq!(refreshed, checkout);
     assert_eq!(git_capture(&checkout, &["rev-parse", "HEAD^"]).unwrap().trim(), rewritten_head.trim());
