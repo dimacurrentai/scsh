@@ -6118,6 +6118,8 @@ mod tests {
       title: "Review me".into(),
       body: String::new(),
       base_ref: "main".into(),
+      base_oid: "a".repeat(40),
+      head_oid: "b".repeat(40),
       url: "https://github.com/owner/repo/pull/7".into(),
     };
     let (result, final_receipt) = with_scsh_home(&home, || {

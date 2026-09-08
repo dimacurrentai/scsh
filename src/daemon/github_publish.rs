@@ -268,6 +268,8 @@ mod tests {
       title: "Change".into(),
       body: String::new(),
       base_ref: "main".into(),
+      base_oid: "a".repeat(40),
+      head_oid: "b".repeat(40),
       url: "https://github.com/o/r/pull/1".into(),
     };
     for scenario in [
