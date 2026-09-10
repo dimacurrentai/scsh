@@ -45,6 +45,11 @@ class ReleaseShape(unittest.TestCase):
     self.git("config", "user.name", "test")
     self.git("config", "user.email", "test@example.com")
     self.git("config", "commit.gpgsign", "false")
+    # Commits may hand the repository to a detached `git gc --auto` / maintenance
+    # process; one still writing `maintenance.lock` while the scratch directory is
+    # removed fails the cleanup. Nothing here needs either.
+    self.git("config", "gc.auto", "0")
+    self.git("config", "maintenance.auto", "false")
     self.base = self.commit("1.17.2", "Initial state.")
 
   def git(self, *args: str) -> str:
