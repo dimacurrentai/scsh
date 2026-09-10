@@ -856,7 +856,10 @@ fn session_export_response(
     })
     .collect();
   // The snapshot freezes lifecycle, duration, and workflow-node states at this instant.
-  let page = html::session_export_page(&session, &exports, now_unix_secs());
+  // The whole-job commits diff lives beside the per-step ones; the live page links it,
+  // the snapshot carries it.
+  let job_diff = std::fs::read_to_string(crate::runtime::session_diffs_dir(&session.id).join("job.html")).ok();
+  let page = html::session_export_page(&session, &exports, job_diff.as_deref(), now_unix_secs());
   (200, page, Some(format!("attachment; filename=\"scsh-job-{id}.html\"")))
 }
 
@@ -5800,6 +5803,27 @@ mod tests {
     assert!(started.elapsed() >= std::time::Duration::from_millis(550), "waited out the bound");
     assert!(page.contains("⏳ annotation unfinished"), "{page}");
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// `/job/<id>/export.html` embeds the whole-job commits diff from the session's diffs
+  /// directory — the file `/diff/<id>/all` serves — when it exists.
+  #[test]
+  fn session_export_embeds_the_whole_job_diff_from_the_diffs_dir() {
+    let home = std::env::temp_dir().join(format!("scsh-export-jobdiff-{}", crate::runtime::random_nonce_6()));
+    let store = store_with_export_session("jobdif", vec![export_test_proc(0, "claude: add", None)]);
+    with_scsh_home(&home, || {
+      let (status, page, _) = session_export_response("/job/jobdif/export.html", &store, None);
+      assert_eq!(status, 200);
+      assert!(!page.contains(r#"proc-diff job-diff">"#), "no packed whole-job diff, no section");
+      let dir = crate::runtime::session_diffs_dir("jobdif");
+      std::fs::create_dir_all(&dir).unwrap();
+      std::fs::write(dir.join("job.html"), "<html><body><p>whole job</p></body></html>").unwrap();
+      let (status, page, _) = session_export_response("/job/jobdif/export.html", &store, None);
+      assert_eq!(status, 200);
+      assert!(page.contains(r#"<details class="chamfer proc-diff job-diff">"#), "{page}");
+      assert!(page.contains("<p>whole job<\\/p>"), "the diff page rides in the srcdoc: {page}");
+    });
+    let _ = std::fs::remove_dir_all(&home);
   }
 
   #[test]

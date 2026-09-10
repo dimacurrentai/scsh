@@ -120,8 +120,10 @@ code or license rides in the browser UI). It has:
 - **⬇ session .html** — in the session-page header: downloads **the entire session as one
   self-contained offline page** (`scsh-session-<id>.html`) — a summary header plus every
   recording embedded as its own per-cast export page (annotated casts keep their summary
-  and chapters; procs without a recording become note rows). Shown whenever any proc has a
-  registered cast.
+  and chapters; procs without a recording become note rows). Every packed commits diff
+  rides along as a sandboxed embedded page: each step's under its row, and the whole job's
+  end-to-end diff (what `⇄ all commits` opens) under the job meta. Shown whenever any proc
+  has a registered cast.
 
 ## In-progress recordings
 

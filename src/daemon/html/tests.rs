@@ -96,7 +96,7 @@ fn job_page_puts_errors_and_results_above_the_graph_and_the_log_below_it() {
   );
   // The offline export shows the same sections in the same places.
   let session = store.sessions.get("castab").unwrap();
-  let export = session_export_page(session, &[], 2);
+  let export = session_export_page(session, &[], None, 2);
   let at = |needle: &str| export.find(needle).unwrap_or_else(|| panic!("export missing {needle}"));
   assert!(at(r#"id="job-results""#) < at(r#"id="job-log""#) && at(r#"id="job-log""#) < at(r#"<div class="procs">"#));
   assert!(export.contains("<h2>Sum</h2>"));
@@ -1377,7 +1377,7 @@ fn offline_export_carries_lede_and_full_meta() {
     supervisor: Default::default(),
     report: Vec::new(),
   };
-  let html = session_export_page(&session, &[], 100);
+  let html = session_export_page(&session, &[], None, 100);
   // The file travels: its note names the scsh that prepared it and links the crate page.
   let note = html.split(r#"<p class="snapshot-note">"#).nth(1).and_then(|s| s.split("</p>").next()).expect("snapshot note");
   assert!(note.contains(r#"<a href="https://crates.io/crates/scsh" rel="noopener">scsh "#), "note links crates.io: {note}");
@@ -1658,7 +1658,7 @@ fn offline_export_advertises_chapter_keys_only_when_chapters_exist() {
     diff_html: None,
     annotation: None,
   }];
-  let html = session_export_page(session, &no_chapters, 100);
+  let html = session_export_page(session, &no_chapters, None, 100);
   assert!(!html.contains("c chapters"), "an empty chapter panel must not be advertised: {html}");
 
   let with_chapters = [CastExport::Cast {
@@ -1668,7 +1668,7 @@ fn offline_export_advertises_chapter_keys_only_when_chapters_exist() {
     diff_html: None,
     annotation: None,
   }];
-  let html = session_export_page(session, &with_chapters, 100);
+  let html = session_export_page(session, &with_chapters, None, 100);
   assert!(html.contains("[/] chapter · c chapters"), "real chapters advertise their keyboard controls: {html}");
 }
 
@@ -1689,11 +1689,11 @@ fn offline_export_carries_annotation_status() {
       annotation,
     }]
   };
-  let html = session_export_page(session, &cast(None), 100);
+  let html = session_export_page(session, &cast(None), None, 100);
   assert!(!html.contains(r#"<span class="annotation-link"#), "no annotate proc, no chip: {html}");
   assert!(!html.contains("still being annotated"));
 
-  let html = session_export_page(session, &cast(Some("ok")), 100);
+  let html = session_export_page(session, &cast(Some("ok")), None, 100);
   let toolbar = html.split(r#"<div class="cast-toolbar">"#).nth(1).and_then(|s| s.split("</div>").next()).expect("toolbar");
   assert!(
     toolbar.contains(r#"<span class="annotation-link annotation-link--ok">✓ annotation complete</span>"#),
@@ -1702,10 +1702,10 @@ fn offline_export_carries_annotation_status() {
   assert!(!toolbar.contains("<a class=\"annotation-link"), "offline chips never link to a job page");
   assert!(!html.contains("still being annotated"));
 
-  let html = session_export_page(session, &cast(Some("fail")), 100);
+  let html = session_export_page(session, &cast(Some("fail")), None, 100);
   assert!(html.contains(r#"annotation-link--fail">✗ annotation failed</span>"#), "{html}");
 
-  let html = session_export_page(session, &cast(Some("running")), 100);
+  let html = session_export_page(session, &cast(Some("running")), None, 100);
   assert!(html.contains(r#"annotation-link--running">⏳ annotation unfinished</span>"#), "{html}");
   assert!(!html.contains("annotating</span>"), "a frozen file never claims to be annotating right now");
   assert!(
@@ -1763,7 +1763,7 @@ fn offline_export_embeds_commits_diff_when_present() {
   };
   let hostile = r#"<html><body></script><p>diff</p></body></html>"#;
   let exports = [CastExport::Note { text: "no recording".into(), diff_html: Some(hostile.into()) }];
-  let html = session_export_page(&session, &exports, 100);
+  let html = session_export_page(&session, &exports, None, 100);
   assert!(html.contains(r#"<span class="proc-diff""#), "summary carries static commits-diff chip");
   assert!(html.contains(r#"<details class="chamfer proc-diff">"#), "body embeds the packed diff");
   assert!(html.contains("srcdoc="), "diff rides in an iframe srcdoc");
@@ -1773,6 +1773,35 @@ fn offline_export_embeds_commits_diff_when_present() {
   );
   assert!(html.contains("<\\/"), "hostile </ is broken for srcdoc like CASTS");
   assert!(!html.contains("</script><p>diff"), "raw </script> must not appear unescaped");
+}
+
+/// The live job page links the whole job's end-to-end commits diff (`/diff/<id>/all`);
+/// the snapshot embeds that page under the job meta, sandboxed like a step's diff, and
+/// omits the section when the run packed none.
+#[test]
+fn offline_export_embeds_the_whole_job_commits_diff() {
+  let store = store_with_cast_proc(ProcStatus::Ok);
+  let session = store.sessions.get("castab").unwrap();
+  let html = session_export_page(session, &[], None, 100);
+  assert!(!html.contains(r#"proc-diff job-diff">"#), "no whole-job diff, no section: {html}");
+
+  let hostile = r#"<html><body></script><p>all commits</p></body></html>"#;
+  let html = session_export_page(session, &[], Some(hostile), 100);
+  let section = html
+    .split(r#"<details class="chamfer proc-diff job-diff">"#)
+    .nth(1)
+    .and_then(|s| s.split("</details>").next())
+    .expect("whole-job diff section");
+  assert!(section.starts_with("<summary>⇄ all commits"), "{section}");
+  assert!(section.contains(r#"sandbox="allow-scripts allow-same-origin" srcdoc=""#), "{section}");
+  assert!(section.contains("<\\/script>"), "hostile </ is broken for srcdoc: {section}");
+  assert!(!html.contains("</script><p>all commits"), "raw </script> never appears unescaped");
+  let meta_at = html.find(r#"<dl class="session-meta">"#).unwrap();
+  let diff_at = html.find(r#"proc-diff job-diff">"#).unwrap();
+  let procs_at = html.find(r#"<div class="procs">"#).unwrap();
+  assert!(meta_at < diff_at && diff_at < procs_at, "the section sits under the meta, above the recordings");
+  let html = session_export_page(session, &[], Some(""), 100);
+  assert!(!html.contains(r#"proc-diff job-diff">"#), "an empty page is no diff");
 }
 
 #[test]
@@ -1830,7 +1859,7 @@ fn offline_export_renders_unrecorded_procs_as_note_rows() {
   };
   let note = "no recording — skipped/failed before output";
   let exports = [CastExport::Note { text: note.into(), diff_html: None }];
-  let html = session_export_page(&session, &exports, 100);
+  let html = session_export_page(&session, &exports, None, 100);
   // There is no text-log format anywhere — the cast is the output format — so an
   // unrecorded proc exports as its note row alone, even when log lines were streamed.
   assert!(!html.contains(r#"<div class="chamfer output">"#), "no text-log output box in exports: {html}");
@@ -1945,7 +1974,7 @@ fn offline_export_includes_workflow_graph() {
     },
     CastExport::Note { text: "no recording".into(), diff_html: None },
   ];
-  let html = session_export_page(&session, &exports, 100);
+  let html = session_export_page(&session, &exports, None, 100);
   // The live graph labels each annotated task under its title; the snapshot has no
   // browser-side lookup, so the label is server-rendered from the export's states.
   let add_node = html.split(r#"id="wf-node-add""#).nth(1).and_then(|s| s.split("</a>").next()).expect("add node");
@@ -2001,7 +2030,7 @@ fn offline_snapshot_survives_browser_resave() {
     supervisor: Default::default(),
     report: Vec::new(),
   };
-  let html = session_export_page(&session, &[], 100);
+  let html = session_export_page(&session, &[], None, 100);
   let boot = html.split("CASTS.forEach").nth(1).expect("player boot");
   let clear_at = boot.find("mount.replaceChildren();").expect("stale players are cleared before mounting");
   let create_at = boot.find("BeeCastPlayer.create(").expect("player mount");
@@ -2028,7 +2057,7 @@ fn awaiting_limits_has_live_ssr_and_offline_export_parity() {
   let page = session_page(&store, "castab").expect("session page");
   let ssr = page.split("<script").next().unwrap();
   let session = store.sessions.get("castab").unwrap();
-  let export = session_export_page(session, &[CastExport::Note { text: "waiting".into(), diff_html: None }], now);
+  let export = session_export_page(session, &[CastExport::Note { text: "waiting".into(), diff_html: None }], None, now);
   for html in [ssr, export.as_str()] {
     assert!(html.contains(r#"data-wf-status="awaiting_limits" title="Jump to first awaiting limits task">1 awaiting limits</a>"#));
     assert!(html.contains(r#"<li class="wf-leg wf-leg-awaiting_limits""#));
