@@ -1901,6 +1901,11 @@ fn offline_export_includes_workflow_graph() {
   assert!(html.contains(r#"<span class="proc-task-anchor" id="task-add" aria-hidden="true"></span>"#), "proc task alias: {html}");
   // The graph CSS rides in the shared stylesheet the export inlines.
   assert!(html.contains(".wf-bookend"), "bookend CSS is inlined in the export");
+  // A frozen graph still needs an interactive viewport. Omitting the shared script left
+  // visible buttons inert and removed initial fitting and drag scrolling from exports.
+  assert!(html.contains(super::workflow_view_js::WORKFLOW_VIEW_JS), "export embeds the shared graph controls");
+  assert!(html.contains("initWorkflowGraphView(step => {"), "export initializes the graph controls");
+  assert!(!html.contains("new WebSocket"), "offline controls never connect to the daemon");
 }
 
 #[test]
@@ -2901,7 +2906,7 @@ fn live_client_js_clears_the_fragment_at_the_top_of_a_job() {
 
 /// The offline snapshot has no server and no `client_js`: its in-page navigation is plain
 /// fragment anchors, so a graph node must stay a REAL `#task-…` link that a browser can follow
-/// unaided. The live page only intercepts those clicks — it must never be what creates them.
+/// unaided. Both pages enhance those links with viewport controls and task focus.
 #[test]
 fn workflow_graph_nodes_are_real_fragment_links_for_the_offline_export() {
   let source = include_str!("workflow.rs");

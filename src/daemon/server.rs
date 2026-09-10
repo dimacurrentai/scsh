@@ -5821,7 +5821,7 @@ mod tests {
     assert!(!page.contains("<script>alert(1)</script>"), "script payload must not go live");
     assert!(page.contains("<\\/iframe>"), "the payload's closing tags are JSON-escaped");
     assert!(page.contains("<\\/script>"), "the payload's </script> is JSON-escaped");
-    assert_eq!(page.matches("</script>").count(), 2, "only the page's own two script blocks close");
+    assert_eq!(page.matches("</script>").count(), 3, "only the graph, player, and recording script blocks close");
     let _ = std::fs::remove_dir_all(&dir);
   }
 

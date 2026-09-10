@@ -16,6 +16,7 @@ mod session;
 mod session_export;
 mod stats;
 mod workflow;
+mod workflow_view_js;
 
 /// Render a task's markdown contribution for the job page (packdiff's safety-first subset).
 pub(crate) fn markdown_to_html(text: &str) -> String {
