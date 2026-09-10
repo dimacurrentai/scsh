@@ -20,8 +20,12 @@ function wfFitZoom(scroller, stage) {
 }
 function initWorkflowGraphView(activateTask) {
   const root = document.querySelector('[data-workflow-graph]');
-  if (!root || root.dataset.bound) return;
-  root.dataset.bound = '1';
+  // The bound flag is a JS property, never a DOM attribute. A snapshot re-saved from the
+  // browser ("Save as") serializes attributes and inline styles: a baked-in flag left the
+  // copy's zoom, panning, and large view inert. The property never survives serialization,
+  // and initializing below resets whatever zoom or modal state the save captured.
+  if (!root || root.__scshWfBound) return;
+  root.__scshWfBound = true;
   const scroller = root.querySelector('.workflow-scroll');
   if (scroller && !scroller.getAttribute('aria-label')) {
     scroller.setAttribute('role', 'region');
@@ -122,6 +126,10 @@ function initWorkflowGraphView(activateTask) {
   // this card when possible, but a late graph mount can still introduce it after page load.
   // Expose the closure on the node instead of capturing a stale element in a document listener.
   root.__scshApplyWorkflowExpanded = applyExpanded;
+  // Apply the modal state before measuring: a copy saved while the large view was open
+  // carries the expanded classes, and fitting inside them would size the collapsed card
+  // to the modal's viewport.
+  applyExpanded(workflowExpanded, false);
   // The page opens on the fitted graph. Only the first mount per page load fits: live
   // updates remount the card, and a remount must keep the zoom the viewer chose.
   if (!window.__scshWfInitialFitDone) {
@@ -135,7 +143,6 @@ function initWorkflowGraphView(activateTask) {
   reset?.addEventListener('click', () => applyZoom(1));
   root.querySelector('[data-wf-zoom-fit]')?.addEventListener('click', fit);
   expand?.addEventListener('click', () => applyExpanded(!workflowExpanded, false));
-  applyExpanded(workflowExpanded, false);
   root.__scshApplyWorkflowZoom = () => applyZoom(workflowZoom);
   if (!window.__scshWfResizeBound) {
     window.__scshWfResizeBound = true;

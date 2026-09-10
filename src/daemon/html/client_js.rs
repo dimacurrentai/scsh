@@ -1892,7 +1892,6 @@ function ensureWorkflowGraphMounted(session, nowUnix) {
   }
   root = document.querySelector('[data-workflow-graph]');
   if (root) {
-    delete root.dataset.bound;
     initWorkflowGraph();
     if (preserved) {
       const newScroller = root.querySelector('.workflow-scroll');
@@ -2124,7 +2123,7 @@ function syncWorkflowTaskFromLocation() {
 }
 function initWorkflowGraph() {
   const root = document.querySelector('[data-workflow-graph]');
-  if (!root || root.dataset.bound) return;
+  if (!root || root.__scshWfBound) return;
   initWorkflowGraphView(step => activateWorkflowTask(step, { pushHistory: true }));
   if (!window.__scshWfHistoryBound) {
     window.__scshWfHistoryBound = true;

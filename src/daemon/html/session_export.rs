@@ -13,11 +13,15 @@
 //! small boot script mounts the players with the exact options the live page uses
 //! (`fit: 'both'`, idle compression, chapter markers, player-owned fullscreen,
 //! focus-on-open). Live-only machinery — WebSocket, Live toggle, reload, downloads,
-//! Force stop — simply is not there (and `LIVE_ONLY_CSS` is not inlined). Packed
+//! Force stop — simply is not there (and `LIVE_ONLY_CSS` is not inlined). The boot
+//! scripts tolerate a copy re-saved from the browser ("Save as"), which serializes the
+//! live DOM: mounted players and graph state come back as inert markup and are reset
+//! before anything binds. Packed
 //! commits-diff pages (when present) ride as sandboxed
 //! `srcdoc` iframes (`allow-scripts allow-same-origin` so packdiff's in-page WASM comment
 //! engine and localStorage work — packdiff 0.9.1 document-first review) so the snapshot
-//! stays a single file.
+//! stays a single file. The note under the meta names the scsh version that prepared
+//! the file and links it to the crate on crates.io.
 
 use super::escape::esc;
 use super::fleet::fleet_sections_by_anchor;
@@ -75,6 +79,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
   let errors = super::report::report_section_html(session, ReportSection::Errors);
   let results = super::report::report_section_html(session, ReportSection::Results);
   let log = super::report::report_section_html(session, ReportSection::Log);
+  let prepared_by = snapshot_version_html();
   let mut fleet_sections = fleet_sections_by_anchor(session);
   let mut sections = String::new();
   let mut data_entries: Vec<String> = Vec::new();
@@ -120,7 +125,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
 <dt>Branch</dt><dd><code>{branch}</code></dd>
 </dl>
 </div>
-<p class="snapshot-note">Offline snapshot — everything below plays without a network.</p>
+<p class="snapshot-note">Offline snapshot prepared by {prepared_by} — everything below plays without a network.</p>
 {errors}{results}{workflow}{log}<div class="procs">
 {sections}</div>
 </main>
@@ -143,6 +148,11 @@ CASTS.forEach((c) => {{
   const box = document.querySelector('.cast[data-proc="' + c.proc + '"]');
   const mount = box && box.querySelector('.cast-player');
   if (!mount) return;
+  // A snapshot re-saved from the browser ("Save as") carries the players it had mounted,
+  // as inert markup. The player appends to its mount, so an uncleared mount stacked a dead
+  // copy above the working one: keys went to the dead copy, and fullscreen showed a pane
+  // laid out for the inline width.
+  mount.replaceChildren();
   // Chapters (c.markers) are player chrome: the ☰ panel, the seek-bar ticks, [/] keys.
   box._player = BeeCastPlayer.create({{ data: c.cast }}, mount, {{
     fit: 'both', controls: true, idleTimeLimit: 2, markers: c.markers,
@@ -165,6 +175,7 @@ document.querySelectorAll('details.proc').forEach((det) => det.addEventListener(
     player_js = super::PLAYER_JS,
     workflow_view_js = WORKFLOW_VIEW_JS,
     extra_css = EXPORT_EXTRA_CSS,
+    prepared_by = prepared_by,
     errors = errors,
     results = results,
     log = log,
@@ -175,6 +186,22 @@ document.querySelectorAll('details.proc').forEach((det) => det.addEventListener(
     branch = esc(&session.branch),
     repo = esc(&session.repo),
   )
+}
+
+/// The scsh that prepared the snapshot, linked to its crates.io page: whoever receives
+/// the file learns which version made it and where to install that same tool. The git
+/// stamp follows when the build carries one.
+fn snapshot_version_html() -> String {
+  let link = format!(
+    "<a href=\"https://crates.io/crates/scsh\" rel=\"noopener\">scsh {}</a>",
+    esc(crate::version::pkg_version())
+  );
+  let git = crate::version::git_stamp();
+  if git.is_empty() {
+    link
+  } else {
+    format!("{link} · <code>{}</code>", esc(&git))
+  }
 }
 
 /// Escape packed-diff HTML for an iframe `srcdoc="…"` attribute: quote/amp for the

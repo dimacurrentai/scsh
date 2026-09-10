@@ -1378,6 +1378,10 @@ fn offline_export_carries_lede_and_full_meta() {
     report: Vec::new(),
   };
   let html = session_export_page(&session, &[], 100);
+  // The file travels: its note names the scsh that prepared it and links the crate page.
+  let note = html.split(r#"<p class="snapshot-note">"#).nth(1).and_then(|s| s.split("</p>").next()).expect("snapshot note");
+  assert!(note.contains(r#"<a href="https://crates.io/crates/scsh" rel="noopener">scsh "#), "note links crates.io: {note}");
+  assert!(note.contains(&format!("scsh {}</a>", crate::version::pkg_version())), "note names the version: {note}");
   assert!(html.contains(r#"class="page-lede""#), "export carries the live page's lede: {html}");
   assert!(
     html.contains("profile <strong>code-review</strong> · completed · 0 tasks"),
@@ -1906,6 +1910,43 @@ fn offline_export_includes_workflow_graph() {
   assert!(html.contains(super::workflow_view_js::WORKFLOW_VIEW_JS), "export embeds the shared graph controls");
   assert!(html.contains("initWorkflowGraphView(step => {"), "export initializes the graph controls");
   assert!(!html.contains("new WebSocket"), "offline controls never connect to the daemon");
+}
+
+/// A viewer who opens a snapshot and saves it again from the browser ("Save as") gets
+/// the serialized live DOM, not the original bytes: attributes, inline styles, and the
+/// mounted players ride along as markup. Such a copy must still bind its graph controls
+/// and mount exactly one working player per recording.
+#[test]
+fn offline_snapshot_survives_browser_resave() {
+  let js = super::workflow_view_js::WORKFLOW_VIEW_JS;
+  assert!(js.contains("if (!root || root.__scshWfBound) return;"), "bound guard is a JS property");
+  assert!(js.contains("root.__scshWfBound = true;"));
+  assert!(!js.contains("dataset.bound") && !js.contains("data-bound"), "a serialized attribute must not disable binding");
+  let live = super::client_js::live_client_js();
+  assert!(!live.contains("dataset.bound"), "the live page shares the property guard");
+  let session = Session {
+    id: "resave".into(),
+    started_at: 1,
+    ended_at: Some(10),
+    profile: None,
+    kind: None,
+    repo: "/tmp/repo".into(),
+    branch: "main".into(),
+    last_seen_at: 10,
+    client_connected: false,
+    run_pid: None,
+    skills: vec![],
+    procs: vec![],
+    workflow: None,
+    parent_session: None,
+    supervisor: Default::default(),
+    report: Vec::new(),
+  };
+  let html = session_export_page(&session, &[], 100);
+  let boot = html.split("CASTS.forEach").nth(1).expect("player boot");
+  let clear_at = boot.find("mount.replaceChildren();").expect("stale players are cleared before mounting");
+  let create_at = boot.find("BeeCastPlayer.create(").expect("player mount");
+  assert!(clear_at < create_at, "the mount is cleared before the player appends itself");
 }
 
 #[test]
