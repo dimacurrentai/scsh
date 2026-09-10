@@ -43,6 +43,11 @@ class PullRequestCommitPolicy(unittest.TestCase):
     os.chdir(repo)
     self.git("init", "-q", "-b", "main")
     self.git("config", "commit.gpgsign", "false")
+    # Commits may hand the repository to a detached `git gc --auto` / maintenance
+    # process; one still writing `maintenance.lock` while the scratch directory is
+    # removed fails the cleanup. Nothing here needs either.
+    self.git("config", "gc.auto", "0")
+    self.git("config", "maintenance.auto", "false")
     self.base = self.commit("Base state.", "base.txt")
 
   def git(self, *args: str, env: dict[str, str] | None = None) -> str:
