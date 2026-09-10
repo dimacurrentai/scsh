@@ -29,7 +29,7 @@ use super::format::format_duration_secs;
 use super::layout::{FAVICON_LINK, PAGE_CSS};
 use super::proc::{proc_elapsed_phrase, proc_meta_html};
 use super::session::{session_ended_text, session_lede_html};
-use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html};
+use super::workflow::{annotation_label, proc_task_anchor_html, proc_task_attrs, workflow_graph_html_annotated};
 use super::workflow_view_js::WORKFLOW_VIEW_JS;
 use crate::daemon::model::{ProcRecord, ReportSection, Session};
 use crate::daemon::paths::now_unix_secs;
@@ -38,10 +38,21 @@ use crate::json::quote;
 /// What the export gathered for one proc (aligned 1:1 with `session.procs`): the raw
 /// recording plus its sidecar's summary and chapters, or a note explaining why there is
 /// nothing to embed — never an error. Optional packed commits-diff HTML for offline
-/// review (same file the live `⇄ commits diff` chip opens).
+/// review (same file the live `⇄ commits diff` chip opens). `annotation` is the state of
+/// the annotate proc covering this recording when the export was taken (`"ok"`, `"fail"`,
+/// `"running"`), or `None` when no annotation was ever registered for it.
 pub(crate) enum CastExport {
-  Cast { ndjson: String, summary: Option<String>, chapters: Vec<(f64, String)>, diff_html: Option<String> },
-  Note { text: String, diff_html: Option<String> },
+  Cast {
+    ndjson: String,
+    summary: Option<String>,
+    chapters: Vec<(f64, String)>,
+    diff_html: Option<String>,
+    annotation: Option<&'static str>,
+  },
+  Note {
+    text: String,
+    diff_html: Option<String>,
+  },
 }
 
 impl CastExport {
@@ -50,12 +61,22 @@ impl CastExport {
       CastExport::Cast { diff_html, .. } | CastExport::Note { diff_html, .. } => diff_html.as_deref(),
     }
   }
+
+  fn annotation(&self) -> Option<&'static str> {
+    match self {
+      CastExport::Cast { annotation, .. } => *annotation,
+      CastExport::Note { .. } => None,
+    }
+  }
 }
 
 /// Export-only CSS on top of the live stylesheet: the details rows carry the live page's
 /// classes, so only the few live-control gaps need filling.
 const EXPORT_EXTRA_CSS: &str = r#"
   .snapshot-note { color: var(--text-muted); font-size: 0.85rem; margin: -8px 0 16px; }
+  .snapshot-note + .snapshot-note { margin-top: -8px; }
+  /* The live chip is a link to the annotator's job; offline it is a frozen status. */
+  .cast-toolbar span.annotation-link { border: 1px solid var(--border); padding: 0.15rem 0.55rem; }
 "#;
 
 /// Assemble the whole-job page from the session's metadata and the per-proc exports
@@ -75,7 +96,25 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
   // The workflow DAG (with its start/finish terminals) and the fleet comparison tables
   // are server-rendered markup styled by the shared stylesheet, so the export embeds them
   // as-is. Shared viewport controls keep this frozen state explorable without live updates.
-  let workflow = workflow_graph_html(session, now);
+  let annotations: std::collections::BTreeMap<usize, &'static str> = session
+    .procs
+    .iter()
+    .zip(exports)
+    .filter_map(|(proc, export)| export.annotation().map(|status| (proc.index, status)))
+    .collect();
+  let workflow = workflow_graph_html_annotated(session, now, &annotations);
+  // Annotation lands after a run ends. A snapshot taken mid-annotation says so, so the
+  // missing summaries and chapters read as timing, not as loss.
+  let annotating = annotations.values().filter(|status| **status == "running").count();
+  let pending_note = if annotating == 0 {
+    String::new()
+  } else {
+    format!(
+      "<p class=\"snapshot-note\">{annotating} recording{plural} still being annotated when this snapshot was taken — download it again later for {their} summary and chapters.</p>\n",
+      plural = if annotating == 1 { " was" } else { "s were" },
+      their = if annotating == 1 { "its" } else { "their" },
+    )
+  };
   let errors = super::report::report_section_html(session, ReportSection::Errors);
   let results = super::report::report_section_html(session, ReportSection::Results);
   let log = super::report::report_section_html(session, ReportSection::Log);
@@ -126,7 +165,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
 </dl>
 </div>
 <p class="snapshot-note">Offline snapshot prepared by {prepared_by} — everything below plays without a network.</p>
-{errors}{results}{workflow}{log}<div class="procs">
+{pending_note}{errors}{results}{workflow}{log}<div class="procs">
 {sections}</div>
 </main>
 <script>{workflow_view_js}
@@ -176,6 +215,7 @@ document.querySelectorAll('details.proc').forEach((det) => det.addEventListener(
     workflow_view_js = WORKFLOW_VIEW_JS,
     extra_css = EXPORT_EXTRA_CSS,
     prepared_by = prepared_by,
+    pending_note = pending_note,
     errors = errors,
     results = results,
     log = log,
@@ -238,18 +278,27 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
   let elapsed = proc_elapsed_phrase(proc, now_unix_secs());
   let diff = export.diff_html();
   let body = match export {
-    CastExport::Cast { summary, chapters, .. } => {
+    CastExport::Cast { summary, chapters, annotation, .. } => {
       let summary_html = match summary.as_deref().filter(|s| !s.is_empty()) {
         Some(s) => format!("<div class=\"cast-summary\">{}</div>\n", esc(s)),
         None => String::new(),
       };
       let chapter_keys = if chapters.is_empty() { "" } else { " · [/] chapter · c chapters" };
+      // The live page's chip links to the annotator's job; that page is not in the file,
+      // so the snapshot keeps the status and drops the link.
+      let annotation_chip = match annotation {
+        Some(status) => {
+          format!("<span class=\"annotation-link annotation-link--{status}\">{}</span>", annotation_label(status))
+        }
+        None => String::new(),
+      };
       format!(
         "<div class=\"cast\" data-proc=\"{idx}\">\n{summary_html}<div class=\"cast-toolbar\">\
-<span class=\"cast-keys dim\">space · ←/→ seek · &lt;/&gt; speed{chapter_keys} · f fullscreen</span></div>\n\
+<span class=\"cast-keys dim\">space · ←/→ seek · &lt;/&gt; speed{chapter_keys} · f fullscreen</span>{annotation_chip}</div>\n\
 <div class=\"cast-player\"></div>\n</div>\n{diff}",
         idx = proc.index,
         chapter_keys = chapter_keys,
+        annotation_chip = annotation_chip,
         diff = diff_embed_html(diff),
       )
     }

@@ -802,7 +802,19 @@ fn session_export_response(
   let Some(session) = { lock_store(store).sessions.get(id).cloned() }.or_else(|| archived_session(db, id)) else {
     return (404, "job not found".into(), None);
   };
-  let exports: Vec<html::CastExport> = session.procs.iter().map(gather_proc_export).collect();
+  // The annotate procs live on this session (post-run annotation) or on their own
+  // internal one; the lookup needs the store, so it precedes the unlocked file I/O.
+  let exports: Vec<html::CastExport> = session
+    .procs
+    .iter()
+    .map(|proc| {
+      let annotation_status = match (proc.kind, proc.cast_path.as_deref()) {
+        (ProcKind::Annotate, _) | (_, None) => None,
+        (_, Some(cast)) => annotation_for_cast(store, cast).map(|(_, _, status)| status),
+      };
+      gather_proc_export(proc, annotation_status)
+    })
+    .collect();
   // The snapshot freezes lifecycle, duration, and workflow-node states at this instant.
   let page = html::session_export_page(&session, &exports, now_unix_secs());
   (200, page, Some(format!("attachment; filename=\"scsh-job-{id}.html\"")))
@@ -813,7 +825,8 @@ fn session_export_response(
 /// the note explaining why there is nothing to embed. Never an error — a vanished file, a
 /// frameless cast, and a proc that was never recorded all degrade to notes. When the proc
 /// has a packed commits-diff on disk, its HTML rides along for offline review.
-fn gather_proc_export(proc: &ProcRecord) -> html::CastExport {
+/// `annotation_status` is the recording's annotate-proc state at export time, if any.
+fn gather_proc_export(proc: &ProcRecord, annotation_status: Option<&'static str>) -> html::CastExport {
   let diff_html = proc
     .diff_path
     .as_deref()
@@ -835,7 +848,7 @@ fn gather_proc_export(proc: &ProcRecord) -> html::CastExport {
     Some(a) => (Some(a.summary), a.chapters.into_iter().map(|c| (c.t, c.title)).collect()),
     None => (None, Vec::new()),
   };
-  html::CastExport::Cast { ndjson, summary, chapters, diff_html }
+  html::CastExport::Cast { ndjson, summary, chapters, diff_html, annotation: annotation_status }
 }
 
 /// `GET /cast/<session>/<proc>/chapters` — the cast's analysis sidecar

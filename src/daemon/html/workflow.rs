@@ -34,6 +34,16 @@ struct LaidOut {
 
 /// Job dependency graph HTML (every session with skills and/or image builds), or empty.
 pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
+  workflow_graph_html_annotated(session, now, &std::collections::BTreeMap::new())
+}
+
+/// The graph with each task node carrying its recording's annotation state (`proc index`
+/// → `"ok"` / `"fail"` / `"running"`), the label the live page derives from annotate procs
+/// in the browser. The offline snapshot has no browser-side lookup, so the server supplies
+/// the map; the live server-side render passes none and lets the client fill it in.
+pub(crate) fn workflow_graph_html_annotated(
+  session: &Session, now: u64, annotations: &std::collections::BTreeMap<usize, &'static str>,
+) -> String {
   let Some(meta) = effective_workflow_meta(session) else {
     return String::new();
   };
@@ -80,7 +90,8 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
     let state = display_state(session, &meta, node, now);
     present.insert(state);
     counts.tally(state);
-    nodes_html.push_str(&node_html(session, &meta, node, pos, now));
+    let annotation = node.proc_index.and_then(|i| annotations.get(&i)).copied();
+    nodes_html.push_str(&node_html(session, &meta, node, pos, now, annotation));
   }
   nodes_html.push_str(&bookend_html(&finish, false));
 
@@ -639,7 +650,10 @@ fn status_stack_rank(state: WorkflowDisplayState) -> u8 {
   }
 }
 
-fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, pos: &LaidOut, now: u64) -> String {
+fn node_html(
+  session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, pos: &LaidOut, now: u64,
+  annotation: Option<&'static str>,
+) -> String {
   let state = display_state(session, meta, node, now);
   let proc = node.proc_index.and_then(|i| session.procs.iter().find(|p| p.index == i));
   let is_build = node.id == "build_base" || node.id.starts_with("build_");
@@ -716,9 +730,10 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
   format!(
     r#"<a class="chamfer wf-node wf-{state}{build_class}" href="{href}" id="wf-node-{id}" data-workflow-step="{id}" data-wf-state="{state}"{proc_attr} style="left:{x:.1}px;top:{y:.1}px;width:{w:.0}px;min-height:{h:.0}px" data-tip="{tip}"{tip_running} aria-label="{aria}">
 <span class="wf-state"><span class="wf-ico" aria-hidden="true">{ico}</span><span class="wf-state-label">{label}</span><span class="wf-state-elapsed">{state_elapsed}</span>{attempt_html}</span>
-<span class="wf-id">{title_esc}{gate}</span>
+<span class="wf-id">{title_esc}{gate}</span>{annotation}
 <span class="wf-meta dim">{meta}</span>
 </a>"#,
+    annotation = annotation.map(wf_annotation_html).unwrap_or_default(),
     state = state.as_str(),
     build_class = build_class,
     href = href,
@@ -739,6 +754,22 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
     gate = gate,
     meta = meta_bits.join(" · "),
   )
+}
+
+/// The annotation label under a task title — the same copy `wfAnnotationHtml` renders in
+/// the browser, minus the live ellipsis animation: a snapshot's "annotating" is a frozen
+/// fact about the moment it was taken.
+pub(crate) fn wf_annotation_html(status: &'static str) -> String {
+  format!(r#"<span class="wf-annotation wf-annotation--{status}">{}</span>"#, annotation_label(status))
+}
+
+/// Copy for one annotation state, shared by the graph node and the recording toolbar.
+pub(crate) fn annotation_label(status: &str) -> &'static str {
+  match status {
+    "running" => "🖊 annotating",
+    "ok" => "✓ annotation complete",
+    _ => "✗ annotation failed",
+  }
 }
 
 fn node_display_title(id: &str) -> String {
