@@ -1656,6 +1656,7 @@ fn offline_export_advertises_chapter_keys_only_when_chapters_exist() {
     summary: None,
     chapters: vec![],
     diff_html: None,
+    annotation: None,
   }];
   let html = session_export_page(session, &no_chapters, 100);
   assert!(!html.contains("c chapters"), "an empty chapter panel must not be advertised: {html}");
@@ -1665,9 +1666,52 @@ fn offline_export_advertises_chapter_keys_only_when_chapters_exist() {
     summary: None,
     chapters: vec![(0.0, "Start".into())],
     diff_html: None,
+    annotation: None,
   }];
   let html = session_export_page(session, &with_chapters, 100);
   assert!(html.contains("[/] chapter · c chapters"), "real chapters advertise their keyboard controls: {html}");
+}
+
+/// The live toolbar chip links to the annotator's job; that page is not in the snapshot,
+/// so the chip becomes a frozen status. A snapshot taken while annotation was still
+/// running says so at the top, so absent summaries and chapters read as timing.
+#[test]
+fn offline_export_carries_annotation_status() {
+  use super::session_export::CastExport;
+  let store = store_with_cast_proc(ProcStatus::Ok);
+  let session = store.sessions.get("castab").unwrap();
+  let cast = |annotation: Option<&'static str>| {
+    [CastExport::Cast {
+      ndjson: "{\"version\":3,\"term\":{\"cols\":10,\"rows\":3}}\n[0.1,\"o\",\"hello\"]\n".into(),
+      summary: None,
+      chapters: vec![],
+      diff_html: None,
+      annotation,
+    }]
+  };
+  let html = session_export_page(session, &cast(None), 100);
+  assert!(!html.contains(r#"<span class="annotation-link"#), "no annotate proc, no chip: {html}");
+  assert!(!html.contains("still being annotated"));
+
+  let html = session_export_page(session, &cast(Some("ok")), 100);
+  let toolbar = html.split(r#"<div class="cast-toolbar">"#).nth(1).and_then(|s| s.split("</div>").next()).expect("toolbar");
+  assert!(
+    toolbar.contains(r#"<span class="annotation-link annotation-link--ok">✓ annotation complete</span>"#),
+    "the chip is a status, not a link: {toolbar}"
+  );
+  assert!(!toolbar.contains("<a class=\"annotation-link"), "offline chips never link to a job page");
+  assert!(!html.contains("still being annotated"));
+
+  let html = session_export_page(session, &cast(Some("fail")), 100);
+  assert!(html.contains(r#"annotation-link--fail">✗ annotation failed</span>"#), "{html}");
+
+  let html = session_export_page(session, &cast(Some("running")), 100);
+  assert!(html.contains(r#"annotation-link--running">🖊 annotating</span>"#), "{html}");
+  assert!(
+    html.contains("1 recording was still being annotated when this snapshot was taken"),
+    "mid-annotation snapshots explain the missing chapters: {html}"
+  );
+  assert!(!html.contains(r#"<span class="annotation-dots"#), "a frozen status has no live ellipsis");
 }
 
 #[test]
@@ -1891,10 +1935,24 @@ fn offline_export_includes_workflow_graph() {
     report: Vec::new(),
   };
   let exports = [
-    CastExport::Note { text: "no recording".into(), diff_html: None },
+    CastExport::Cast {
+      ndjson: "{\"version\":3,\"term\":{\"cols\":10,\"rows\":3}}\n[0.1,\"o\",\"hello\"]\n".into(),
+      summary: Some("Added the numbers.".into()),
+      chapters: vec![(0.0, "Start".into())],
+      diff_html: None,
+      annotation: Some("ok"),
+    },
     CastExport::Note { text: "no recording".into(), diff_html: None },
   ];
   let html = session_export_page(&session, &exports, 100);
+  // The live graph labels each annotated task under its title; the snapshot has no
+  // browser-side lookup, so the label is server-rendered from the export's states.
+  let add_node = html.split(r#"id="wf-node-add""#).nth(1).and_then(|s| s.split("</a>").next()).expect("add node");
+  assert!(
+    add_node.contains(r#"<span class="wf-annotation wf-annotation--ok">✓ annotation complete</span>"#),
+    "annotated task node carries the label: {add_node}"
+  );
+  assert!(!html.contains(r#"wf-annotation--ok">✓ annotation complete</span>"#.repeat(2).as_str()));
   assert!(html.contains(r#"id="workflow-graph""#), "export carries the workflow card: {html}");
   assert!(html.contains(r#"class="chamfer wf-bookend wf-start""#), "graph keeps its start bookend");
   assert!(html.contains(r#"class="chamfer wf-bookend wf-finish""#), "graph keeps its finish bookend");
