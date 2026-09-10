@@ -1391,8 +1391,8 @@ function wfJobOutcome(session, nowUnix) {
   const terminal = p => p.status === 'ok' || p.status === 'graceful' || p.status === 'fail' || p.status === 'skipped';
   const finalizing = life.class === 'running' && skills.length > 0 && skills.every(terminal);
   const text = finalizing ? 'Finalizing recordings' :
-    (({running:'Job running',completed:'Job succeeded',failed:'Job failed',
-      cancelled:'Job cancelled'})[life.class] || ('Job ' + life.label));
+    (({running:'Job running',final_annotations:'Finalizing annotations',completed:'Job succeeded',
+      failed:'Job failed',cancelled:'Job cancelled'})[life.class] || ('Job ' + life.label));
   return { className: life.class, text };
 }
 function wfJobOutcomeHtml(session, nowUnix) {

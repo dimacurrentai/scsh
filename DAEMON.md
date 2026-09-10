@@ -163,7 +163,13 @@ appears as post-skill **annotate** procs on the same job (before the session end
 standalone `scsh annotate-cast` may register a short `(internal)` session instead.
 Background annotations run **fully detached** (their own session, no controlling
 terminal), so the launching terminal or agent harness tearing down its process group
-cannot kill an annotation that is doing its job. An annotate row whose process still
+cannot kill an annotation that is doing its job. A job whose tasks all succeeded is not
+**completed** while those detached annotators are still running: the daemon reports it as
+**final annotations** (lifecycle `final_annotations` in the API, the orange badge in the
+UI) until the last one settles, so "completed" always means the recordings carry their
+summaries and chapters. `GET /job/<id>/export.html` waits that state out (up to 20
+minutes) before assembling the snapshot; `?nowait=1` takes the job as it is, and the
+snapshot then labels each unfinished annotation as such. An annotate row whose process still
 vanished mid-work (crash, reboot) settles as `annotation_interrupted` — distinct from a
 real model watchdog `annotation_timed_out` — and its stale `.annotating` marker expires
 after 15 minutes, so the recording is re-annotated by a later run instead of staying

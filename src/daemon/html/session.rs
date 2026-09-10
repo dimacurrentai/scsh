@@ -4,17 +4,20 @@ use super::escape::esc;
 use super::fleet::fleet_sections_by_anchor;
 use super::layout::wrap_page;
 use super::proc::{cast_embed_html, proc_elapsed_phrase, proc_has_cast, proc_meta_html, summary_stats_html};
-use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html};
+use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html_for};
 use crate::daemon::model::{ProcKind, ProcStatus, ReportSection, Session, SessionLifecycle, Store};
 use crate::daemon::paths::now_unix_secs;
 
 pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
-  Some(session_page_for(store.sessions.get(session_id)?, store.port))
+  let session = store.sessions.get(session_id)?;
+  Some(session_page_for(session, store.port, store.lifecycle_of(session, now_unix_secs())))
 }
 
-/// The session page from a session record alone — the render path shared by live sessions
-/// (looked up in the store) and archived ones (read back from the store DB after eviction).
-pub fn session_page_for(session: &Session, port: u16) -> String {
+/// The session page from a session record and its daemon-reported lifecycle — the render
+/// path shared by live sessions (looked up in the store, whose annotate children can hold
+/// the job in `final annotations`) and archived ones (read back from the store DB after
+/// eviction, where the record alone decides).
+pub fn session_page_for(session: &Session, port: u16, lifecycle: SessionLifecycle) -> String {
   let now = now_unix_secs();
   let mut procs_html = String::new();
   let mut fleet_sections = fleet_sections_by_anchor(session);
@@ -88,8 +91,7 @@ pub fn session_page_for(session: &Session, port: u16) -> String {
     }
   }
   let id = esc(&session.id);
-  let session_meta = session_meta_html(session, now);
-  let lifecycle = session.lifecycle_status(now);
+  let session_meta = session_meta_html(session, now, lifecycle);
   let pending = chapters_pending_count(session);
   // Snapshot sits above Force stop in the island’s top-right. Mid-run → incomplete;
   // finished but chapters still landing → chapters pending; else job snapshot.
@@ -143,7 +145,7 @@ pub fn session_page_for(session: &Session, port: u16) -> String {
   } else {
     String::new()
   };
-  let workflow = workflow_graph_html(session, now);
+  let workflow = workflow_graph_html_for(session, now, lifecycle, &std::collections::BTreeMap::new());
   // What the tasks said about the job: errors, then results, above the graph; the log below.
   let errors = super::report::report_section_html(session, ReportSection::Errors);
   let results = super::report::report_section_html(session, ReportSection::Results);
@@ -307,7 +309,7 @@ pub(crate) fn chapters_pending_count(session: &Session) -> usize {
 fn session_export_label(lifecycle: SessionLifecycle, pending: usize) -> &'static str {
   if lifecycle == SessionLifecycle::Running {
     "Incomplete job ⬇"
-  } else if pending > 0 {
+  } else if lifecycle == SessionLifecycle::FinalAnnotations || pending > 0 {
     "Chapters pending ⬇"
   } else {
     "Job snapshot ⬇"
@@ -457,9 +459,8 @@ fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::
   )
 }
 
-fn session_meta_html(session: &Session, now: u64) -> String {
+fn session_meta_html(session: &Session, now: u64, lifecycle: SessionLifecycle) -> String {
   use super::format::format_duration_secs;
-  let lifecycle = session.lifecycle_status(now);
   let started = format!("{} UTC", crate::runtime::format_utc_timestamp(session.started_at));
   let ended = session_ended_text(session, lifecycle);
   let duration = session.duration_secs(now).map(format_duration_secs).unwrap_or_else(|| "—".into());

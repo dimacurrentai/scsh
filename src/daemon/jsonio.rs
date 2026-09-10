@@ -1,24 +1,31 @@
 //! JSON read/write for daemon state — std-only, no serde.
 
 use super::model::{
-  OutputLine, ProcKind, ProcRecord, ProcStatus, ReportEntry, ReportSection, Session, SkillMeta, Store,
+  OutputLine, ProcKind, ProcRecord, ProcStatus, ReportEntry, ReportSection, Session, SessionLifecycle, SkillMeta, Store,
 };
 use crate::json::{parse, quote, Value};
 
-fn sessions_json(map: &std::collections::BTreeMap<String, Session>, now: u64) -> String {
-  if map.is_empty() {
+fn sessions_json(store: &Store, now: u64) -> String {
+  if store.sessions.is_empty() {
     return "{}".to_string();
   }
   let mut parts = Vec::new();
-  for (id, s) in map {
-    parts.push(format!("{}: {}", quote(id), session_json(s, true, Some(now))));
+  for (id, s) in &store.sessions {
+    parts.push(format!("{}: {}", quote(id), session_json(s, true, Some(store.lifecycle_of(s, now)))));
   }
   format!("{{ {} }}", parts.join(", "))
 }
 
-pub fn session_json_api(s: &Session) -> String {
-  // Live view for HTTP + WebSocket ticks: include the synthesized job graph (builds + skills).
-  session_json(s, true, Some(crate::daemon::paths::now_unix_secs()))
+/// Live view for HTTP + WebSocket ticks: the synthesized job graph (builds + skills) and
+/// the daemon-authoritative lifecycle, which needs the store to see annotate children.
+pub fn session_json_api(store: &Store, s: &Session) -> String {
+  session_json(s, true, Some(store.lifecycle_of(s, crate::daemon::paths::now_unix_secs())))
+}
+
+/// The live view of an archived session: evicted from the store, so no child session can
+/// still be annotating it and its own record decides the lifecycle.
+pub fn archived_session_json_api(s: &Session) -> String {
+  session_json(s, true, Some(s.lifecycle_status(crate::daemon::paths::now_unix_secs())))
 }
 
 /// Persistable session JSON (authored `workflow` only — no synthesized build nodes).
@@ -53,7 +60,7 @@ fn tick_json_with_sessions(store: &Store, now: u64, include_sessions: bool) -> S
     None => "null".to_string(),
   };
   let sessions_part =
-    if include_sessions { format!(", \"sessions\": {}", sessions_json(&store.sessions, now)) } else { String::new() };
+    if include_sessions { format!(", \"sessions\": {}", sessions_json(store, now)) } else { String::new() };
   format!(
     "{{ \"type\": \"tick\", \"now_secs\": {now}, \"uptime_secs\": {uptime}, \"mode\": {}, \"port\": {}, \
 \"active_clients\": {}, \"alive_clients\": {alive}, \"shutdown_in_secs\": {shutdown_json}, \"scsh_version\": {}, \
@@ -79,7 +86,7 @@ pub fn cast_growth_json(session: &str, proc: usize, duration: f64, running: bool
   )
 }
 
-fn session_json(s: &Session, effective_workflow: bool, lifecycle_at: Option<u64>) -> String {
+fn session_json(s: &Session, effective_workflow: bool, lifecycle: Option<SessionLifecycle>) -> String {
   let profile = match &s.profile {
     Some(p) => quote(p),
     None => "null".to_string(),
@@ -145,8 +152,7 @@ fn session_json(s: &Session, effective_workflow: bool, lifecycle_at: Option<u64>
       opt_str(&sup.restarted_as),
     )
   };
-  let lifecycle = lifecycle_at.map(|now| {
-    let state = s.lifecycle_status(now);
+  let lifecycle = lifecycle.map(|state| {
     format!(", \"lifecycle\": {}, \"lifecycle_label\": {}", quote(state.css_class()), quote(state.label()))
   });
   // The live view carries each contribution rendered, so the page can mount it as it lands
@@ -478,7 +484,7 @@ mod tests {
     assert!(!stored.contains("\"html\""), "the store keeps markdown only");
     let back = parse_session_json(&stored).unwrap();
     assert_eq!(back.report, session.report);
-    let live = session_json_api(&session);
+    let live = archived_session_json_api(&session);
     assert!(
       live.contains(r#""html": "<h2>Done</h2><p>&lt;b&gt;not html&lt;/b&gt;</p>""#),
       "rendered and escaped: {live}"
@@ -648,7 +654,7 @@ mod tests {
     let legacy = parse_session_json(&session_json_store(&session)).unwrap();
     assert!(legacy.workflow.is_none());
     // Live API synthesizes a graph from skills/procs even without authored workflow.
-    let live = session_json_api(&session);
+    let live = archived_session_json_api(&session);
     assert!(!live.contains(", \"workflow\":"), "empty session has no effective graph: {live}");
     assert!(live.contains("\"lifecycle\":"), "live API carries the daemon-authoritative lifecycle: {live}");
     assert!(!session_json_store(&session).contains("\"lifecycle\":"), "derived lifecycle is not persisted");
