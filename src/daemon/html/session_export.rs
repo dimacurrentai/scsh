@@ -13,7 +13,9 @@
 //! small boot script mounts the players with the exact options the live page uses
 //! (`fit: 'both'`, idle compression, chapter markers, player-owned fullscreen,
 //! focus-on-open). Live-only machinery — WebSocket, Live toggle, reload, downloads,
-//! Force stop — simply is not there (and `LIVE_ONLY_CSS` is not inlined). The boot
+//! Force stop — simply is not there (and `LIVE_ONLY_CSS` is not inlined). The whole-job
+//! commits diff the live `⇄ all commits` button opens rides along the same way as the
+//! per-step diffs, in a sandboxed `srcdoc` iframe under the job meta. The boot
 //! scripts tolerate a copy re-saved from the browser ("Save as"), which serializes the
 //! live DOM: mounted players and graph state come back as inert markup and are reset
 //! before anything binds. Packed
@@ -75,15 +77,19 @@ impl CastExport {
 const EXPORT_EXTRA_CSS: &str = r#"
   .snapshot-note { color: var(--text-muted); font-size: 0.85rem; margin: -8px 0 16px; }
   .snapshot-note + .snapshot-note { margin-top: -8px; }
+  details.job-diff { margin: 0 0 1rem; }
   /* The live chip is a link to the annotator's job; offline it is a frozen status. */
   .cast-toolbar span.annotation-link { border: 1px solid var(--border); padding: 0.15rem 0.55rem; }
 "#;
 
 /// Assemble the whole-job page from the session's metadata and the per-proc exports
-/// (`exports[i]` belongs to `session.procs[i]` — board order). `now` is the export
-/// instant: lifecycle, duration, and the workflow-node states freeze at it. Pure beyond
-/// that: all file I/O (casts, sidecars, diffs) happened in the caller.
-pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now: u64) -> String {
+/// (`exports[i]` belongs to `session.procs[i]` — board order). `job_diff` is the packed
+/// end-to-end commits diff of the whole job, when the run produced one. `now` is the
+/// export instant: lifecycle, duration, and the workflow-node states freeze at it. Pure
+/// beyond that: all file I/O (casts, sidecars, diffs) happened in the caller.
+pub(crate) fn session_export_page(
+  session: &Session, exports: &[CastExport], job_diff: Option<&str>, now: u64,
+) -> String {
   let id = esc(&session.id);
   // Parity with the live job page: the lede (kind · lifecycle · task count) and the full
   // meta (ended, duration) ride along, so the offline copy answers "did it succeed, and
@@ -120,6 +126,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
       their = if annotating == 1 { "its" } else { "their" },
     )
   };
+  let job_diff = job_diff_embed_html(job_diff);
   let errors = super::report::report_section_html(session, ReportSection::Errors);
   let results = super::report::report_section_html(session, ReportSection::Results);
   let log = super::report::report_section_html(session, ReportSection::Log);
@@ -170,7 +177,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
 </dl>
 </div>
 <p class="snapshot-note">Offline snapshot prepared by {prepared_by} — everything below plays without a network.</p>
-{pending_note}{errors}{results}{workflow}{log}<div class="procs">
+{pending_note}{job_diff}{errors}{results}{workflow}{log}<div class="procs">
 {sections}</div>
 </main>
 <script>{workflow_view_js}
@@ -221,6 +228,7 @@ document.querySelectorAll('details.proc').forEach((det) => det.addEventListener(
     extra_css = EXPORT_EXTRA_CSS,
     prepared_by = prepared_by,
     pending_note = pending_note,
+    job_diff = job_diff,
     errors = errors,
     results = results,
     log = log,
@@ -262,6 +270,20 @@ fn diff_embed_html(diff_html: Option<&str>) -> String {
   };
   format!(
     r#"<details class="chamfer proc-diff"><summary>⇄ commits diff</summary><iframe sandbox="allow-scripts allow-same-origin" srcdoc="{srcdoc}"></iframe></details>
+"#,
+    srcdoc = srcdoc_attr(html),
+  )
+}
+
+/// The whole job's end-to-end commits diff — every step's commits as one review page —
+/// under the job meta, where the live page's `⇄ all commits` button sits. Same sandboxed
+/// embedding as a step's diff; absent when the run packed none.
+fn job_diff_embed_html(diff_html: Option<&str>) -> String {
+  let Some(html) = diff_html.filter(|h| !h.is_empty()) else {
+    return String::new();
+  };
+  format!(
+    r#"<details class="chamfer proc-diff job-diff"><summary>⇄ all commits — the end-to-end diff this job brought into the branch</summary><iframe sandbox="allow-scripts allow-same-origin" srcdoc="{srcdoc}"></iframe></details>
 "#,
     srcdoc = srcdoc_attr(html),
   )
