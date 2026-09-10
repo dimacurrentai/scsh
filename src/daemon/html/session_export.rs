@@ -3,7 +3,8 @@
 //!
 //! The page is a REPLICA of the live job page: the same stylesheet (`layout::PAGE_CSS`),
 //! the same lede and full meta (ended, duration), the same workflow DAG and fleet
-//! comparison sections (static, frozen at export time), the same purple island and
+//! comparison sections (state frozen at export time, graph controls still interactive),
+//! the same purple island and
 //! collapsible per-run rows — text-log procs keep their timestamped lines — and the same
 //! `beecast-player` —
 //! one shared bundle, one player per recording, mounted from inline data (no iframes, no
@@ -25,6 +26,7 @@ use super::layout::{FAVICON_LINK, PAGE_CSS};
 use super::proc::{proc_elapsed_phrase, proc_meta_html};
 use super::session::{session_ended_text, session_lede_html};
 use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html};
+use super::workflow_view_js::WORKFLOW_VIEW_JS;
 use crate::daemon::model::{ProcRecord, ReportSection, Session};
 use crate::daemon::paths::now_unix_secs;
 use crate::json::quote;
@@ -68,7 +70,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
   let duration = session.duration_secs(now).map(format_duration_secs).unwrap_or_else(|| "—".into());
   // The workflow DAG (with its start/finish terminals) and the fleet comparison tables
   // are server-rendered markup styled by the shared stylesheet, so the export embeds them
-  // as-is — the static state at export time, no live-update wiring.
+  // as-is. Shared viewport controls keep this frozen state explorable without live updates.
   let workflow = workflow_graph_html(session, now);
   let errors = super::report::report_section_html(session, ReportSection::Errors);
   let results = super::report::report_section_html(session, ReportSection::Results);
@@ -122,6 +124,18 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
 {errors}{results}{workflow}{log}<div class="procs">
 {sections}</div>
 </main>
+<script>{workflow_view_js}
+initWorkflowGraphView(step => {{
+  const target = document.getElementById('task-' + step);
+  const det = target && target.closest('details.proc');
+  if (!det) return;
+  det.open = true;
+  location.hash = 'task-' + encodeURIComponent(step);
+  det.scrollIntoView({{ block: 'start' }});
+  const summary = det.querySelector('summary');
+  if (summary) summary.focus({{ preventScroll: true }});
+}});
+</script>
 <script>{player_js}</script>
 <script>
 const CASTS = {data};
@@ -149,6 +163,7 @@ document.querySelectorAll('details.proc').forEach((det) => det.addEventListener(
     css = PAGE_CSS,
     player_css = super::PLAYER_CSS,
     player_js = super::PLAYER_JS,
+    workflow_view_js = WORKFLOW_VIEW_JS,
     extra_css = EXPORT_EXTRA_CSS,
     errors = errors,
     results = results,
