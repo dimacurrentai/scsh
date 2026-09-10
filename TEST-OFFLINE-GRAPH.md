@@ -22,4 +22,8 @@ The shared viewport in `src/daemon/html/workflow_view_js.rs` serves live job pag
 
    **Predict:** live updates keep working and preserve the viewer's chosen zoom. The tighter axis determines Fit; vertical panning works for a tall graph just as horizontal panning works for a wide one.
 
+6. Open the downloaded snapshot in Chrome, choose **File → Save Page As…** (Webpage, Complete), and open the saved copy directly. Repeat after saving while the large view was open.
+
+   **Predict:** the copy is a serialization of the live DOM, yet it behaves as the original: the graph opens fitted, zoom and dragging work, the large view opens and closes, and each recorded row holds exactly one player whose ⛶ button and `f` key fill the screen with a centered terminal. Saving while expanded yields a copy that opens collapsed.
+
 Stop the isolated daemon with the same environment and `scsh daemon stop`, close any automated browser, and remove its temporary state. Never stop the developer's default daemon. All checks must pass on both page types; record browser/version and failures when reporting results.
