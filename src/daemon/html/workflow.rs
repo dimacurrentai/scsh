@@ -33,16 +33,15 @@ struct LaidOut {
 }
 
 /// Job dependency graph HTML (every session with skills and/or image builds), or empty.
-pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
-  workflow_graph_html_annotated(session, now, &std::collections::BTreeMap::new())
-}
-
 /// The graph with each task node carrying its recording's annotation state (`proc index`
 /// → `"ok"` / `"fail"` / `"running"`), the label the live page derives from annotate procs
 /// in the browser. The offline snapshot has no browser-side lookup, so the server supplies
 /// the map; the live server-side render passes none and lets the client fill it in.
-pub(crate) fn workflow_graph_html_annotated(
-  session: &Session, now: u64, annotations: &std::collections::BTreeMap<usize, &'static str>,
+/// `lifecycle` is the job's daemon-reported state: the store can hold a job in
+/// `final annotations` after its own record already reads completed.
+pub(crate) fn workflow_graph_html_for(
+  session: &Session, now: u64, lifecycle: SessionLifecycle,
+  annotations: &std::collections::BTreeMap<usize, &'static str>,
 ) -> String {
   let Some(meta) = effective_workflow_meta(session) else {
     return String::new();
@@ -59,7 +58,6 @@ pub(crate) fn workflow_graph_html_annotated(
   let height = layout.iter().chain([&start, &finish]).map(|n| n.y + n.h).fold(0.0_f64, f64::max) + PAD;
   let by_id: std::collections::BTreeMap<&str, &LaidOut> = layout.iter().map(|n| (n.id.as_str(), n)).collect();
 
-  let lifecycle = session.lifecycle_status(now);
   let edges_svg = render_edges(&meta, &by_id, &start, &finish);
   let loop_islands = loop_islands_html(&layout, &crate::daemon::workflow::workflow_loop_plans(session), lifecycle);
 
@@ -143,6 +141,7 @@ fn job_outcome_html(session: &Session, lifecycle: SessionLifecycle) -> String {
   } else {
     match lifecycle {
       SessionLifecycle::Running => "Job running",
+      SessionLifecycle::FinalAnnotations => "Finalizing annotations",
       SessionLifecycle::Completed => "Job succeeded",
       SessionLifecycle::Failed => "Job failed",
       SessionLifecycle::Cancelled => "Job cancelled",
@@ -756,9 +755,9 @@ fn node_html(
   )
 }
 
-/// The annotation label under a task title — the same copy `wfAnnotationHtml` renders in
-/// the browser, minus the live ellipsis animation: a snapshot's "annotating" is a frozen
-/// fact about the moment it was taken.
+/// The annotation label under a task title — the copy `wfAnnotationHtml` renders in the
+/// browser for finished states. A snapshot is a frozen file, so an annotation the export
+/// did not wait out is "unfinished", never the live page's animated "annotating".
 pub(crate) fn wf_annotation_html(status: &'static str) -> String {
   format!(r#"<span class="wf-annotation wf-annotation--{status}">{}</span>"#, annotation_label(status))
 }
@@ -766,7 +765,7 @@ pub(crate) fn wf_annotation_html(status: &'static str) -> String {
 /// Copy for one annotation state, shared by the graph node and the recording toolbar.
 pub(crate) fn annotation_label(status: &str) -> &'static str {
   match status {
-    "running" => "🖊 annotating",
+    "running" => "⏳ annotation unfinished",
     "ok" => "✓ annotation complete",
     _ => "✗ annotation failed",
   }

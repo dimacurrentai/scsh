@@ -227,6 +227,11 @@ pub(crate) const PAGE_CSS: &str = r#"
     background: var(--green); color: var(--green);
   }
   .session-status.completed::before { background: var(--surface); }
+  /* Tasks done, annotations still landing: not yet the green "completed". */
+  .session-status.final_annotations {
+    background: var(--orange); color: var(--orange);
+  }
+  .session-status.final_annotations::before { background: var(--surface); }
   .badge--green {
     background: var(--green); color: var(--green);
   }
@@ -419,8 +424,10 @@ pub(crate) const PAGE_CSS: &str = r#"
     font-size: 0.75rem; font-weight: 700;
     letter-spacing: 0.01em;
   }
-  .workflow-outcome--running { color: var(--orange); background: var(--orange); }
-  .workflow-outcome--running::before { background: color-mix(in srgb, var(--orange) 12%, var(--surface)); }
+  .workflow-outcome--running, .workflow-outcome--final_annotations { color: var(--orange); background: var(--orange); }
+  .workflow-outcome--running::before, .workflow-outcome--final_annotations::before {
+    background: color-mix(in srgb, var(--orange) 12%, var(--surface));
+  }
   .workflow-outcome--completed { color: var(--green); background: var(--green); }
   .workflow-outcome--completed::before { background: color-mix(in srgb, var(--green) 12%, var(--surface)); }
   .workflow-outcome--failed, .workflow-outcome--cancelled { color: var(--red); background: var(--red); }

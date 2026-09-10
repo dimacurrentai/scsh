@@ -121,7 +121,7 @@ pub fn index_page_for(store: &Store, filter: Option<IndexFilter>, tab: IndexTab)
   for session in &listed {
     let default_listed = listed_by_default(&job_kinds(session));
     let overflow = default_listed && shown >= JOBS_PAGE_SIZE;
-    rows.push_str(&index_session_row(session, now, overflow, !default_listed));
+    rows.push_str(&index_session_row(session, store.lifecycle_of(session, now), now, overflow, !default_listed));
     if default_listed {
       shown += 1;
     } else {
@@ -488,7 +488,7 @@ fn internal_panel(store: &Store, now: u64, filter: Option<&IndexFilter>) -> Stri
       let links = g
         .iter()
         .map(|s| {
-          let lc = s.lifecycle_status(now);
+          let lc = store.lifecycle_of(s, now);
           format!(
             "<div class=\"repo-job\"><span class=\"chamfer session-status {cls}\"><span>{label}</span></span> <a class=\"job-id\" href=\"/job/{id}\">{id}</a> <span class=\"dim\">{age}</span></div>",
             id = esc(&s.id),
@@ -582,7 +582,7 @@ fn repo_jobs_rows(store: &Store, now: u64, filter: Option<&IndexFilter>) -> Stri
           let links = g
             .iter()
             .map(|s| {
-              let lc = s.lifecycle_status(now);
+              let lc = store.lifecycle_of(s, now);
               format!(
                 "<div class=\"repo-job\"><span class=\"chamfer session-status {cls}\"><span>{label}</span></span> <a class=\"job-id\" href=\"/job/{id}\">{id}</a> <span class=\"dim\">{age}</span></div>",
                 id = esc(&s.id),
@@ -705,8 +705,9 @@ fn jobs_load_more_row(hidden: usize) -> String {
   )
 }
 
-fn index_session_row(session: &Session, now: u64, overflow: bool, filtered: bool) -> String {
-  let lifecycle = session.lifecycle_status(now);
+fn index_session_row(
+  session: &Session, lifecycle: SessionLifecycle, now: u64, overflow: bool, filtered: bool,
+) -> String {
   let id = esc(&session.id);
   let profile = esc(session.profile.as_deref().unwrap_or("default"));
   let n_procs = session.procs.len();

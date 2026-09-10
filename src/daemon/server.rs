@@ -585,7 +585,12 @@ fn handle_connection(
       && (req.path.starts_with("/job/") || req.path.starts_with("/session/"))
       && bare_path.ends_with("/export.html")
     {
-      let (status, body, disposition) = session_export_response(bare_path, store, db);
+      // The snapshot is complete only once the job's annotations have landed; a request
+      // during `final annotations` waits for them. `?nowait=1` takes the job as it is.
+      let nowait =
+        req.path.split_once('?').is_some_and(|(_, q)| q.split('&').any(|kv| kv == "nowait" || kv == "nowait=1"));
+      let max_wait = if nowait { std::time::Duration::ZERO } else { EXPORT_ANNOTATION_WAIT };
+      let (status, body, disposition) = session_export_response_after_annotations(bare_path, store, db, max_wait);
       write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref(), close)?;
     } else if req.method == "GET" && req.path.starts_with("/cast/") && !bare_path.ends_with("/play") {
       let (status, body, disposition) = cast_response(&req.path, store, db);
@@ -779,6 +784,41 @@ fn export_response(bare_path: &str, store: &Arc<Mutex<Store>>, db: Option<&Store
     Ok(page) => (200, page, Some(format!("attachment; filename=\"{stem}.html\""))),
     Err(e) => (404, format!("cannot export this recording: {e}"), None),
   }
+}
+
+/// How long `/job/<id>/export.html` waits for a job's in-flight annotations before
+/// exporting it as it is. Annotation is one model call per recording; a job stuck longer
+/// than this has an annotator that will settle as failed on its own.
+pub(crate) const EXPORT_ANNOTATION_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// Block until no detached annotate session of `id` is still running, or `max_wait`
+/// elapses. Each request runs on its own thread, so waiting here holds nothing else up.
+fn wait_for_annotations(store: &Arc<Mutex<Store>>, id: &str, max_wait: std::time::Duration) {
+  let deadline = std::time::Instant::now() + max_wait;
+  loop {
+    let in_flight = lock_store(store).annotation_in_flight(id, now_unix_secs());
+    if !in_flight || std::time::Instant::now() >= deadline {
+      return;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(250));
+  }
+}
+
+/// [`session_export_response`] once the job's annotations have landed (bounded by
+/// `max_wait`), so a snapshot of a completed job carries every summary and chapter list.
+fn session_export_response_after_annotations(
+  bare_path: &str, store: &Arc<Mutex<Store>>, db: Option<&StoreDb>, max_wait: std::time::Duration,
+) -> (u16, String, Option<String>) {
+  let id = bare_path
+    .strip_prefix("/job/")
+    .or_else(|| bare_path.strip_prefix("/session/"))
+    .unwrap_or("")
+    .strip_suffix("/export.html")
+    .unwrap_or("");
+  if !max_wait.is_zero() {
+    wait_for_annotations(store, id, max_wait);
+  }
+  session_export_response(bare_path, store, db)
 }
 
 /// `GET /job/<id>/export.html` — EVERY recording of the job assembled into ONE
@@ -1145,7 +1185,9 @@ fn route(
       };
       // An evicted session renders from its archived row: same page, read-only by nature
       // (its run ended long ago, so there is nothing live to mutate anyway).
-      let page = page.or_else(|| archived_session(db, id).map(|s| html::session_page_for(&s, port)));
+      let page = page.or_else(|| {
+        archived_session(db, id).map(|s| html::session_page_for(&s, port, s.lifecycle_status(now_unix_secs())))
+      });
       if let Some(page) = page {
         (200, page, "text/html; charset=utf-8", false)
       } else {
@@ -1283,9 +1325,9 @@ fn route(
       let id = path.strip_prefix("/api/v1/session/").unwrap_or("");
       let json = {
         let store = lock_store(store);
-        store.sessions.get(id).map(crate::daemon::jsonio::session_json_api)
+        store.sessions.get(id).map(|s| crate::daemon::jsonio::session_json_api(&store, s))
       }
-      .or_else(|| archived_session(db, id).map(|s| crate::daemon::jsonio::session_json_api(&s)));
+      .or_else(|| archived_session(db, id).map(|s| crate::daemon::jsonio::archived_session_json_api(&s)));
       match json {
         Some(json) => (200, json, "application/json", false),
         None => (404, "{\"error\":\"not found\"}".into(), "application/json", false),
@@ -5670,6 +5712,94 @@ mod tests {
     session.ended_at = None;
     assert!(settle_out_of_work_sessions(&mut guard, 50 + SESSION_NO_WORK_TIMEOUT_SECS * 10).is_empty());
     assert!(guard.sessions["busyjob"].ended_at.is_none());
+  }
+
+  /// A snapshot requested during `final annotations` waits for the detached annotator,
+  /// then exports a job whose recordings carry their annotation. `?nowait=1` (a zero
+  /// wait) takes the job as it is and labels the unfinished annotation honestly.
+  #[test]
+  fn session_export_waits_for_in_flight_annotation() {
+    let now = now_unix_secs();
+    let dir = std::env::temp_dir().join(format!("scsh-export-wait-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cast = dir.join("add-20260711-114749-utc-waited.cast");
+    std::fs::write(&cast, "{\"version\":3,\"term\":{\"cols\":10,\"rows\":3}}\n[0.5,\"o\",\"hi\"]\n").unwrap();
+    let cast_path = cast.to_string_lossy().into_owned();
+    let store = store_with_export_session("waited", vec![export_test_proc(0, "claude: add", Some(cast_path.clone()))]);
+    let mut annotate = export_test_proc(0, "annotate · add", None);
+    annotate.kind = ProcKind::Annotate;
+    annotate.status = ProcStatus::Running;
+    annotate.annotate_target = Some(cast_path.clone());
+    store.lock().unwrap().insert_session(
+      "waitann".into(),
+      Session {
+        id: "waitann".into(),
+        started_at: now,
+        ended_at: None,
+        profile: Some("annotate".into()),
+        kind: Some("annotate".into()),
+        repo: INTERNAL_REPO.into(),
+        branch: String::new(),
+        skills: Vec::new(),
+        procs: vec![annotate],
+        last_seen_at: now,
+        client_connected: true,
+        run_pid: None,
+        workflow: None,
+        parent_session: Some("waited".into()),
+        supervisor: Default::default(),
+        report: Vec::new(),
+      },
+    );
+    assert!(store.lock().unwrap().annotation_in_flight("waited", now));
+
+    // Without waiting, the snapshot is honest about what it could not have.
+    let (status, page, _) =
+      session_export_response_after_annotations("/job/waited/export.html", &store, None, std::time::Duration::ZERO);
+    assert_eq!(status, 200);
+    assert!(page.contains("· final annotations ·"), "lede reports the daemon's state: {page}");
+    assert!(page.contains("⏳ annotation unfinished"), "{page}");
+    assert!(page.contains("1 recording was still being annotated"), "{page}");
+    assert!(!page.contains("annotating</span>"), "a frozen file never says annotating");
+
+    // The annotator settles 400ms in; the waiting export returns only after that.
+    let settle = Arc::clone(&store);
+    let sidecar = dir.join("add-20260711-114749-utc-waited.chapters.json");
+    std::thread::spawn(move || {
+      std::thread::sleep(std::time::Duration::from_millis(400));
+      std::fs::write(&sidecar, r#"{"summary":"Added.","chapters":[{"t":0,"title":"Start"}]}"#).unwrap();
+      let mut guard = settle.lock().unwrap();
+      let child = guard.sessions.get_mut("waitann").unwrap();
+      child.procs[0].status = ProcStatus::Ok;
+      child.ended_at = Some(now_unix_secs());
+    });
+    let started = std::time::Instant::now();
+    let (status, page, _) = session_export_response_after_annotations(
+      "/job/waited/export.html",
+      &store,
+      None,
+      std::time::Duration::from_secs(10),
+    );
+    assert_eq!(status, 200);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(350), "the export waited for the annotator");
+    assert!(page.contains("· completed ·"), "the job completed once annotated: {page}");
+    assert!(page.contains("✓ annotation complete"), "{page}");
+    assert!(page.contains("Added."), "the summary that landed during the wait is embedded: {page}");
+    assert!(!page.contains("still being annotated"));
+
+    // A bounded wait gives up on an annotator that never settles, again honestly.
+    store.lock().unwrap().sessions.get_mut("waitann").unwrap().ended_at = None;
+    store.lock().unwrap().sessions.get_mut("waitann").unwrap().procs[0].status = ProcStatus::Running;
+    let started = std::time::Instant::now();
+    let (_, page, _) = session_export_response_after_annotations(
+      "/job/waited/export.html",
+      &store,
+      None,
+      std::time::Duration::from_millis(600),
+    );
+    assert!(started.elapsed() >= std::time::Duration::from_millis(550), "waited out the bound");
+    assert!(page.contains("⏳ annotation unfinished"), "{page}");
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   #[test]

@@ -1706,7 +1706,8 @@ fn offline_export_carries_annotation_status() {
   assert!(html.contains(r#"annotation-link--fail">✗ annotation failed</span>"#), "{html}");
 
   let html = session_export_page(session, &cast(Some("running")), 100);
-  assert!(html.contains(r#"annotation-link--running">🖊 annotating</span>"#), "{html}");
+  assert!(html.contains(r#"annotation-link--running">⏳ annotation unfinished</span>"#), "{html}");
+  assert!(!html.contains("annotating</span>"), "a frozen file never claims to be annotating right now");
   assert!(
     html.contains("1 recording was still being annotated when this snapshot was taken"),
     "mid-annotation snapshots explain the missing chapters: {html}"
@@ -2933,6 +2934,56 @@ fn session_page_header_offers_the_session_export_download() {
   assert!(bare.contains("session-export"), "job snapshot remains available without a recording");
 }
 
+/// A job's detached annotate child holds the page in `final annotations`: the lede, the
+/// graph outcome, and the snapshot button all say so instead of "completed".
+#[test]
+fn session_page_reports_final_annotations_while_a_child_annotates() {
+  let mut store = store_with_cast_proc(ProcStatus::Ok);
+  let now = crate::daemon::paths::now_unix_secs();
+  {
+    let job = store.sessions.get_mut("castab").unwrap();
+    job.ended_at = Some(now.saturating_sub(5));
+    job.last_seen_at = now.saturating_sub(5);
+  }
+  let cast_path = store.sessions.get("castab").unwrap().procs[0].cast_path.clone();
+  let mut annotate = store.sessions.get("castab").unwrap().procs[0].clone();
+  annotate.kind = ProcKind::Annotate;
+  annotate.status = ProcStatus::Running;
+  annotate.cast_path = None;
+  annotate.annotate_target = cast_path;
+  store.insert_session(
+    "annkid".into(),
+    Session {
+      id: "annkid".into(),
+      started_at: now,
+      ended_at: None,
+      profile: Some("annotate".into()),
+      kind: Some("annotate".into()),
+      repo: crate::daemon::server::INTERNAL_REPO.into(),
+      branch: String::new(),
+      skills: Vec::new(),
+      procs: vec![annotate],
+      last_seen_at: now,
+      client_connected: true,
+      run_pid: None,
+      workflow: None,
+      parent_session: Some("castab".into()),
+      supervisor: Default::default(),
+      report: Vec::new(),
+    },
+  );
+  let html = session_page(&store, "castab").expect("session page");
+  assert!(html.contains("· final annotations ·"), "lede names the state: {html}");
+  assert!(html.contains(r#"data-lifecycle="final_annotations""#), "meta carries the class");
+  assert!(html.contains("Chapters pending ⬇"), "snapshot button warns before download: {html}");
+  assert!(!html.contains("· completed ·"), "not completed yet");
+
+  store.sessions.get_mut("annkid").unwrap().procs[0].status = ProcStatus::Ok;
+  store.sessions.get_mut("annkid").unwrap().ended_at = Some(now);
+  let html = session_page(&store, "castab").expect("session page");
+  assert!(html.contains("· completed ·"), "the child settling completes the job: {html}");
+}
+
 #[test]
 fn live_client_js_counts_alive_clients_and_shutdown() {
   let js = live_client_js();
@@ -3937,7 +3988,7 @@ fn workflow_loop_island_advertises_future_iterations() {
 
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
   let do_while = session_for("demo-loop-do-while");
-  let api = crate::daemon::jsonio::session_json_api(&do_while);
+  let api = crate::daemon::jsonio::archived_session_json_api(&do_while);
   assert!(api.contains(r#""workflow_loops": [{ "id": "compare", "max_iterations": 25, "exact": false }]"#));
   store.sessions.insert("loopmore".into(), do_while);
   let open_ended = session_page(&store, "loopmore").expect("do-while page");

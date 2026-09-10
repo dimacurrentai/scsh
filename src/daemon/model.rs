@@ -75,6 +75,10 @@ impl DaemonMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionLifecycle {
   Running,
+  /// Every task succeeded, but the recordings' annotations — detached child sessions the
+  /// run started as each cast landed — are still in flight. The job is not done until
+  /// they are: a snapshot taken now would lack summaries and chapters.
+  FinalAnnotations,
   Completed,
   Failed,
   Cancelled,
@@ -84,6 +88,7 @@ impl SessionLifecycle {
   pub fn label(self) -> &'static str {
     match self {
       SessionLifecycle::Running => "running",
+      SessionLifecycle::FinalAnnotations => "final annotations",
       SessionLifecycle::Completed => "completed",
       SessionLifecycle::Failed => "failed",
       SessionLifecycle::Cancelled => "cancelled",
@@ -93,6 +98,7 @@ impl SessionLifecycle {
   pub fn css_class(self) -> &'static str {
     match self {
       SessionLifecycle::Running => "running",
+      SessionLifecycle::FinalAnnotations => "final_annotations",
       SessionLifecycle::Completed => "completed",
       SessionLifecycle::Failed => "failed",
       SessionLifecycle::Cancelled => "cancelled",
@@ -628,6 +634,29 @@ impl Store {
 
   pub fn proc_mut(&mut self, session_id: &str, proc_index: usize) -> Option<&mut ProcRecord> {
     self.session_mut(session_id).and_then(|s| s.procs.iter_mut().find(|p| p.index == proc_index))
+  }
+
+  /// Whether a detached annotate session started for this job is still running. Post-run
+  /// annotation registers its own `(internal)` session with the job as parent, so the
+  /// job's record alone cannot tell; only the store can.
+  pub fn annotation_in_flight(&self, id: &str, now: u64) -> bool {
+    self.sessions.values().any(|child| {
+      child.parent_session.as_deref() == Some(id)
+        && child.procs.iter().any(|p| p.kind == ProcKind::Annotate)
+        && child.lifecycle_status(now) == SessionLifecycle::Running
+    })
+  }
+
+  /// [`Session::lifecycle_status`] as the daemon reports it: a job whose tasks all
+  /// succeeded stays in `FinalAnnotations` until its annotate children finish, so
+  /// "completed" always means the recordings carry their summaries and chapters.
+  pub fn lifecycle_of(&self, session: &Session, now: u64) -> SessionLifecycle {
+    let base = session.lifecycle_status(now);
+    if base == SessionLifecycle::Completed && self.annotation_in_flight(&session.id, now) {
+      SessionLifecycle::FinalAnnotations
+    } else {
+      base
+    }
   }
 
   pub fn insert_session(&mut self, id: String, session: Session) {
@@ -1394,6 +1423,94 @@ mod tests {
     assert_eq!(session.lifecycle_status(150 + SESSION_IDLE_TIMEOUT_SECS), SessionLifecycle::Running);
     assert_eq!(session.lifecycle_status(150 + SESSION_IDLE_TIMEOUT_SECS + 1), SessionLifecycle::Failed);
     assert_eq!(session.duration_secs(150 + SESSION_IDLE_TIMEOUT_SECS + 1), Some(50 + SESSION_IDLE_TIMEOUT_SECS));
+  }
+
+  /// Post-run annotation is a detached child session; the parent's own record reads
+  /// completed the moment its tasks end. The store holds the job in `final annotations`
+  /// until that child settles, and the live API reports the same.
+  #[test]
+  fn final_annotations_holds_a_completed_job_while_its_annotate_child_runs() {
+    let now = crate::daemon::paths::now_unix_secs();
+    let proc = |kind: ProcKind, status: ProcStatus| ProcRecord {
+      index: 0,
+      previous_attempt: None,
+      label: "row".into(),
+      kind,
+      status,
+      skill_name: None,
+      harness: None,
+      model: None,
+      started_at: Some(1),
+      note: None,
+      detail: None,
+      fail_reason: None,
+      elapsed: Some(2.0),
+      lines: Vec::new(),
+      container_name: None,
+      container_runtime: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
+      annotate_target: Some("/r/casts/add.cast".into()),
+      phase: None,
+      phase_until: None,
+    };
+    let session = |id: &str, parent: Option<&str>, ended_at: Option<u64>, procs: Vec<ProcRecord>| Session {
+      id: id.into(),
+      started_at: 1,
+      ended_at,
+      profile: None,
+      kind: None,
+      repo: "/r".into(),
+      branch: "main".into(),
+      skills: Vec::new(),
+      procs,
+      last_seen_at: now,
+      client_connected: false,
+      run_pid: None,
+      workflow: None,
+      parent_session: parent.map(str::to_string),
+      supervisor: Default::default(),
+      report: Vec::new(),
+    };
+    let mut store = Store::new(DaemonMode::Persistent, 7274, now);
+    store.insert_session("job".into(), session("job", None, Some(10), vec![proc(ProcKind::Skill, ProcStatus::Ok)]));
+    store.insert_session(
+      "ann".into(),
+      session("ann", Some("job"), None, vec![proc(ProcKind::Annotate, ProcStatus::Running)]),
+    );
+    let job = store.sessions.get("job").unwrap();
+    assert_eq!(job.lifecycle_status(now), SessionLifecycle::Completed, "the record alone cannot see the child");
+    assert!(store.annotation_in_flight("job", now));
+    assert_eq!(store.lifecycle_of(job, now), SessionLifecycle::FinalAnnotations);
+    let live = crate::daemon::jsonio::session_json_api(&store, job);
+    assert!(live.contains("\"lifecycle\": \"final_annotations\""), "live API reports the state: {live}");
+    assert!(live.contains("\"lifecycle_label\": \"final annotations\""), "{live}");
+
+    // The child settling — success or failure — releases the parent to its own outcome.
+    store.sessions.get_mut("ann").unwrap().procs[0].status = ProcStatus::Fail;
+    store.sessions.get_mut("ann").unwrap().ended_at = Some(now);
+    let job = store.sessions.get("job").unwrap();
+    assert!(!store.annotation_in_flight("job", now));
+    assert_eq!(store.lifecycle_of(job, now), SessionLifecycle::Completed);
+
+    // A child that is not annotating (or belongs to another job) holds nothing.
+    store.sessions.get_mut("ann").unwrap().ended_at = None;
+    store.sessions.get_mut("ann").unwrap().procs[0].status = ProcStatus::Running;
+    store.sessions.get_mut("ann").unwrap().procs[0].kind = ProcKind::Skill;
+    assert!(!store.annotation_in_flight("job", now));
+    store.sessions.get_mut("ann").unwrap().procs[0].kind = ProcKind::Annotate;
+    store.sessions.get_mut("ann").unwrap().parent_session = Some("other".into());
+    assert!(!store.annotation_in_flight("job", now));
+
+    // Only a completed job is held: a failed one is failed, annotations or not.
+    store.sessions.get_mut("ann").unwrap().parent_session = Some("job".into());
+    store.sessions.get_mut("job").unwrap().procs[0].status = ProcStatus::Fail;
+    let job = store.sessions.get("job").unwrap();
+    assert!(store.annotation_in_flight("job", now));
+    assert_eq!(store.lifecycle_of(job, now), SessionLifecycle::Failed);
   }
 
   #[test]

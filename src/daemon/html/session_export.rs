@@ -29,9 +29,9 @@ use super::format::format_duration_secs;
 use super::layout::{FAVICON_LINK, PAGE_CSS};
 use super::proc::{proc_elapsed_phrase, proc_meta_html};
 use super::session::{session_ended_text, session_lede_html};
-use super::workflow::{annotation_label, proc_task_anchor_html, proc_task_attrs, workflow_graph_html_annotated};
+use super::workflow::{annotation_label, proc_task_anchor_html, proc_task_attrs, workflow_graph_html_for};
 use super::workflow_view_js::WORKFLOW_VIEW_JS;
-use crate::daemon::model::{ProcRecord, ReportSection, Session};
+use crate::daemon::model::{ProcRecord, ReportSection, Session, SessionLifecycle};
 use crate::daemon::paths::now_unix_secs;
 use crate::json::quote;
 
@@ -88,7 +88,19 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
   // Parity with the live job page: the lede (kind · lifecycle · task count) and the full
   // meta (ended, duration) ride along, so the offline copy answers "did it succeed, and
   // how long did it take" without the daemon.
-  let lifecycle = session.lifecycle_status(now);
+  // The record alone reads completed while detached annotators still run; the export
+  // learned their states from the daemon, so it reports the job the way the daemon does.
+  let annotations: std::collections::BTreeMap<usize, &'static str> = session
+    .procs
+    .iter()
+    .zip(exports)
+    .filter_map(|(proc, export)| export.annotation().map(|status| (proc.index, status)))
+    .collect();
+  let annotating = annotations.values().filter(|status| **status == "running").count();
+  let lifecycle = match session.lifecycle_status(now) {
+    SessionLifecycle::Completed if annotating > 0 => SessionLifecycle::FinalAnnotations,
+    other => other,
+  };
   let lede = session_lede_html(session, lifecycle);
   let when = format!("{} UTC", crate::runtime::format_utc_timestamp(session.started_at));
   let ended = session_ended_text(session, lifecycle);
@@ -96,16 +108,9 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
   // The workflow DAG (with its start/finish terminals) and the fleet comparison tables
   // are server-rendered markup styled by the shared stylesheet, so the export embeds them
   // as-is. Shared viewport controls keep this frozen state explorable without live updates.
-  let annotations: std::collections::BTreeMap<usize, &'static str> = session
-    .procs
-    .iter()
-    .zip(exports)
-    .filter_map(|(proc, export)| export.annotation().map(|status| (proc.index, status)))
-    .collect();
-  let workflow = workflow_graph_html_annotated(session, now, &annotations);
-  // Annotation lands after a run ends. A snapshot taken mid-annotation says so, so the
-  // missing summaries and chapters read as timing, not as loss.
-  let annotating = annotations.values().filter(|status| **status == "running").count();
+  let workflow = workflow_graph_html_for(session, now, lifecycle, &annotations);
+  // The daemon waits for annotation before exporting; a snapshot taken with `?nowait=1`
+  // says how many recordings it left unfinished, so absent summaries read as timing.
   let pending_note = if annotating == 0 {
     String::new()
   } else {
