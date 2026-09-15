@@ -14,8 +14,7 @@ Pull request descriptions contain summary and implementation-detail prose only. 
 
 ## Exact Beecast and Packdiff versions
 
-Use exact versions for the first-party Beecast crates and Packdiff integration. Pin
-`beecast-player` and `beecast-page` with Cargo's exact `=X.Y.Z` syntax, and write Packdiff
-installation commands as `cargo install packdiff --version X.Y.Z --locked`. Never use a
-range, an unversioned install command, or “latest”. Upgrade every manifest, lockfile, code
-hint, test, and documentation reference together so the repository names one exact version.
+Use exact versions for the first-party Beecast and Packdiff crates. Pin `beecast-player`,
+`beecast-page`, and `packdiff` with Cargo's exact `=X.Y.Z` syntax. Never use a range or
+“latest”. Upgrade every manifest, lockfile, test, and documentation reference together so
+the repository names one exact version.

@@ -37,6 +37,11 @@ beecast-player = "=0.10.9"
 # recording, embedding the same player as the live pages. Its only dependency is
 # `beecast-player`, so nothing third-party rides in.
 beecast-page = "=0.10.7"
+# The first-party commits-diff packer, as a library: every step's commits and the whole
+# job's become one self-contained review page each, and the job page renders markdown with
+# its safety-first subset. No default features — the binary and its terminal progress bars
+# stay out; `cargo install scsh` is the whole install.
+packdiff = { version = "=0.9.2", default-features = false }
 
 # Tuned for a small, self-contained release binary. `cargo test` uses the dev
 # profile (unwinding), so these settings do not affect the test run.

@@ -4,7 +4,6 @@
 //! the live script can fill it in place as contributions land.
 
 use super::escape::esc;
-use super::markdown;
 use crate::daemon::model::{ReportEntry, ReportSection, Session};
 
 /// The accent stripe each section wears: red for errors, green for results, cyan for the log.
@@ -57,7 +56,7 @@ pub(crate) fn report_entries_html(entries: &[&ReportEntry]) -> String {
       } else {
         String::new()
       };
-      format!("<section class=\"report-entry\"{proc}>{caption}{}</section>", markdown::to_html(&e.markdown))
+      format!("<section class=\"report-entry\"{proc}>{caption}{}</section>", super::markdown_to_html(&e.markdown))
     })
     .collect()
 }
