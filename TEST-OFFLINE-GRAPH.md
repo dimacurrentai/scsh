@@ -8,7 +8,7 @@ The shared viewport in `src/daemon/html/workflow_view_js.rs` serves live job pag
 
 2. On each page, click the zoom-percentage button to reset to **100%**, then **+** until the graph exceeds its viewport. Drag empty graph space left and right; use horizontal trackpad scrolling. Click **Fit**, then **−** and **+**.
 
-   **Predict:** dragging and horizontal scrolling reach both ends of the graph; Fit restores the complete graph; the zoom percentage changes with the buttons. The surrounding document stays in place. At the fitted minimum, zoom-out is disabled.
+   **Predict:** dragging and horizontal scrolling reach both ends of the graph; Fit restores the complete graph; the zoom percentage changes with the buttons. The surrounding document stays in place. At the fitted minimum, zoom-out is disabled. At every zoom the status legend stays in its own row above the graph viewport, right-aligned, and never covers a node. Unticking **Legend** (left of **−**, ticked by default) removes that row and gives its height to the graph; ticking it brings the legend back.
 
 3. Open **Full screen**, resize the browser, and click **Fit**. Check at desktop and phone widths (for example 1280 px and 390 px). Close using **Close**, **Escape**, and a click outside the modal. Use Tab and Shift+Tab while expanded.
 

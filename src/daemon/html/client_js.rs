@@ -1832,6 +1832,7 @@ function wfBuildGraphHtml(session, nowUnix) {
     wfJobOutcomeHtml(session, nowUnix) +
     '<p class="workflow-summary dim">' + wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix)) + '</p>' +
     '<div class="workflow-zoom" aria-label="Graph view controls">' +
+    '<label class="chamfer wf-legend-toggle"><input type="checkbox" data-wf-legend checked> Legend</label>' +
     '<button type="button" class="chamfer" data-wf-zoom-out aria-label="Zoom out">−</button>' +
     '<button type="button" class="chamfer" data-wf-zoom-reset>100%</button>' +
     '<button type="button" class="chamfer" data-wf-zoom-in aria-label="Zoom in">+</button>' +
