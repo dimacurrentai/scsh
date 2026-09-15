@@ -119,6 +119,7 @@ fn run(args: &[String]) -> i32 {
     Mode::Gc => gc_cmd(&cli.gc),
     Mode::AnnotateCasts => annotate_casts_cmd(&cli.annotate_paths, cli.json),
     Mode::ExportCasts => export_casts_cmd(&cli.export_paths, cli.output.as_deref(), cli.json),
+    Mode::ExportJob => export_job_cmd(cli.export_job.as_deref(), cli.output.as_deref(), cli.export_nowait, cli.json),
     Mode::BuildImages => {
       build_images_cmd(&cli.build_harnesses, cli.build_force, cli.build_rebuild_base, cli.failures.session.clone())
     }
@@ -415,6 +416,86 @@ fn export_error(as_json: bool, code: i32, message: &str) -> i32 {
   code
 }
 
+/// How long `export-job` lets the daemon hold the request while the job's annotators finish:
+/// the daemon's own 20-minute ceiling plus a margin, so the CLI never gives up before it does.
+const EXPORT_JOB_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(22 * 60);
+
+/// `export-job <id> [-o <file>] [--nowait]`: download the job's complete offline HTML
+/// snapshot — the page `GET /job/<id>/export.html` serves, with every recording, annotation,
+/// result, and the whole-job commits diff embedded — from the running daemon. By default the
+/// daemon waits for the job's in-flight annotators (the same wait the job page's export link
+/// makes); `--nowait` takes the job as it is. Lands as `scsh-job-<id>.html` in the current
+/// directory unless `-o` names a path; `-o -` streams the page to stdout. Exit 0 on success,
+/// 1 when the daemon is down or the job is unknown, 2 for a usage error.
+fn export_job_cmd(id: Option<&str>, output: Option<&str>, nowait: bool, json_flag: bool) -> i32 {
+  use std::io::IsTerminal;
+  let streaming = output == Some("-");
+  let as_json = !streaming && (json_flag || !std::io::stdout().is_terminal());
+  let Some(id) = id.filter(|id| !id.is_empty()) else {
+    return export_job_error(as_json, 2, "give the job id, e.g. scsh export-job abcdef (the id from the job's URL)");
+  };
+  if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    return export_job_error(as_json, 2, &format!("'{id}' is not a job id — expect letters, digits, '-' or '_'"));
+  }
+  let port = daemon::daemon_port();
+  if !daemon::Client::daemon_alive() {
+    return export_job_error(
+      as_json,
+      1,
+      &format!(
+        "session browser daemon is not running on {} — start it with: scsh daemon start",
+        daemon::base_url(port)
+      ),
+    );
+  }
+  let path = if nowait { format!("/job/{id}/export.html?nowait=1") } else { format!("/job/{id}/export.html") };
+  if !as_json && !streaming && !nowait {
+    hint("waiting for the job's annotations to settle (up to 20 min; --nowait snapshots the job as it is)");
+  }
+  let (status, body) = match daemon::daemon_get_download(port, &path, EXPORT_JOB_READ_TIMEOUT) {
+    Ok(answer) => answer,
+    Err(problem) => return export_job_error(as_json, 1, &format!("job {id}: {problem}")),
+  };
+  match status {
+    200 => {}
+    404 => return export_job_error(as_json, 1, &format!("job '{id}' not found on {}", daemon::base_url(port))),
+    other => return export_job_error(as_json, 1, &format!("job {id}: the daemon answered HTTP {other}")),
+  }
+  let out_name = if streaming {
+    use std::io::Write;
+    let mut stdout = std::io::stdout();
+    if let Err(e) = stdout.write_all(body.as_bytes()).and_then(|()| stdout.flush()) {
+      return export_job_error(as_json, 1, &format!("cannot stream the page: {e}"));
+    }
+    "stdout".to_string()
+  } else {
+    let out_path = output.map(std::path::PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("scsh-job-{id}.html")));
+    if let Err(e) = atomic_write(&out_path, body.as_bytes()) {
+      return export_job_error(as_json, 1, &format!("cannot write {}: {e}", out_path.display()));
+    }
+    out_path.display().to_string()
+  };
+  let bytes = body.len();
+  if as_json {
+    println!("{{ \"job\": {}, \"output\": {}, \"bytes\": {bytes} }}", json::quote(id), json::quote(&out_name));
+  } else if streaming {
+    eprintln!("\u{2713} job {id} \u{2192} stdout ({bytes} bytes)");
+  } else {
+    ok(&format!("job {id} \u{2192} {out_name} ({bytes} bytes)"));
+  }
+  0
+}
+
+/// Report an `export-job` failure in the active mode, mirroring [`export_error`].
+fn export_job_error(as_json: bool, code: i32, message: &str) -> i32 {
+  if as_json {
+    println!("{{ \"Error\": {{ \"message\": {} }} }}", json::quote(message));
+  } else {
+    eprintln!("export-job: {message}");
+  }
+  code
+}
+
 /// After a run, annotate the recordings it produced (best-effort, in parallel), so chapters
 /// and summaries appear in the session browser. Also copy new chapters onto matching
 /// `.sccache` cast copies so a later cache hit replays chapters with the recording.
@@ -698,6 +779,9 @@ enum Mode {
   /// Render cast recordings into self-contained offline HTML player pages
   /// (`export-cast <cast>… [-o <file>]`).
   ExportCasts,
+  /// Download a job's complete offline HTML snapshot from the running daemon
+  /// (`export-job <id> [-o <file>] [--nowait]`).
+  ExportJob,
   /// Build the base and/or harness images outside a run (`build-images [harness…]`), streaming
   /// into the session browser — the daemon's images panel spawns this command.
   BuildImages,
@@ -773,6 +857,7 @@ const COMMAND_NAMES: &[&str] = &[
   "gc",
   "annotate-cast",
   "export-cast",
+  "export-job",
   "version",
 ];
 
@@ -798,6 +883,7 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
     "gc" => "gc",
     "annotate-cast" | "annotate-casts" | "annotate" => "annotate-cast",
     "export-cast" | "export-casts" | "export" => "export-cast",
+    "export-job" | "export-jobs" => "export-job",
     "version" => "version",
     _ => return None,
   };
@@ -825,8 +911,12 @@ struct Cli {
   annotate_paths: Vec<String>,
   /// Cast files for `export-cast` (positional).
   export_paths: Vec<String>,
-  /// `export-cast -o <file>`: the output path for the (single) cast; `-` streams to stdout.
+  /// `export-cast -o <file>` / `export-job -o <file>`: the output path; `-` streams to stdout.
   output: Option<String>,
+  /// The job id for `export-job` (positional).
+  export_job: Option<String>,
+  /// `export-job --nowait`: snapshot the job as it is instead of waiting for its annotators.
+  export_nowait: bool,
   verbose: bool,
   json: bool,
   failures: FailuresOpts,
@@ -892,6 +982,8 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut sources: Vec<String> = Vec::new();
   let mut annotate_paths: Vec<String> = Vec::new();
   let mut export_paths: Vec<String> = Vec::new();
+  let mut export_job: Option<String> = None;
+  let mut export_nowait = false;
   let mut output: Option<String> = None;
   let mut verbose = false;
   let mut json = false;
@@ -1059,6 +1151,14 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       // `export-cast <cast>… [-o <file>]`: render each recording (+ its chapters sidecar)
       // into one self-contained offline HTML player page next to it.
       "export-cast" | "export-casts" => Some(Mode::ExportCasts),
+      // `export-job <id> [-o <file>] [--nowait]`: download the job's complete offline HTML
+      // snapshot (every recording, annotation, result, and the whole-job commits diff) from
+      // the running daemon — the same page the job page's export link serves.
+      "export-job" | "export-jobs" => Some(Mode::ExportJob),
+      "--nowait" => {
+        export_nowait = true;
+        None
+      }
       "-o" | "--output" => {
         i += 1;
         let value = args.get(i).ok_or("-o needs a path (or `-` for stdout), e.g. scsh export-cast foo.cast -o -")?;
@@ -1322,6 +1422,14 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         export_paths.push(other.to_string());
         None
       }
+      // After `export-job`, the one bare token is the job id.
+      other if matches!(mode, Some(Mode::ExportJob)) && !other.starts_with('-') => {
+        if export_job.is_some() {
+          return Err(format!("export-job takes exactly one job id (got a second one: '{other}')"));
+        }
+        export_job = Some(other.to_string());
+        None
+      }
       // After `build-images`, each bare token is a harness name (empty = every harness).
       other if matches!(mode, Some(Mode::BuildImages)) && !other.starts_with('-') => {
         build_harnesses.push(other.to_string());
@@ -1364,10 +1472,19 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if json
     && !matches!(
       mode,
-      Mode::List | Mode::Probe | Mode::Quota { .. } | Mode::Daemon { .. } | Mode::AnnotateCasts | Mode::ExportCasts
+      Mode::List
+        | Mode::Probe
+        | Mode::Quota { .. }
+        | Mode::Daemon { .. }
+        | Mode::AnnotateCasts
+        | Mode::ExportCasts
+        | Mode::ExportJob
     )
   {
-    return Err("--json only applies to 'list', 'probe', 'quota', 'daemon', 'annotate-cast', and 'export-cast'".into());
+    return Err(
+      "--json only applies to 'list', 'probe', 'quota', 'daemon', 'annotate-cast', 'export-cast', and 'export-job'"
+        .into(),
+    );
   }
   if (failures.reason.is_some() || failures.stats) && !matches!(mode, Mode::Failures) {
     return Err("--reason/--stats only apply to 'failures'".into());
@@ -1401,8 +1518,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if !annotate_paths.is_empty() && !matches!(mode, Mode::AnnotateCasts) {
     return Err("cast paths only apply to 'annotate-cast'".into());
   }
-  if output.is_some() && !matches!(mode, Mode::ExportCasts) {
-    return Err("-o only applies to 'export-cast' (e.g. `scsh export-cast foo.cast -o -`)".into());
+  if output.is_some() && !matches!(mode, Mode::ExportCasts | Mode::ExportJob) {
+    return Err("-o only applies to 'export-cast' or 'export-job' (e.g. `scsh export-cast foo.cast -o -`)".into());
+  }
+  if export_nowait && !matches!(mode, Mode::ExportJob) {
+    return Err("--nowait only applies to 'export-job' (e.g. `scsh export-job abcdef --nowait`)".into());
   }
   if def.is_some() && !matches!(mode, Mode::Run) {
     return Err("--def only applies to 'run' (e.g. `scsh run --def add`)".into());
@@ -1434,6 +1554,8 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     annotate_paths,
     export_paths,
     output,
+    export_job,
+    export_nowait,
     verbose,
     json,
     failures,
@@ -10004,6 +10126,20 @@ fn print_help_command(name: &str) {
         ("", "no third-party code or license in any page. See LICENSE.md."),
       ],
     ),
+    "export-job" => (
+      "download a job's complete offline HTML snapshot",
+      "scsh export-job <id> [-o <file>] [--nowait] [--json]",
+      &[
+        ("<id>", "The job id from its URL (http://127.0.0.1:7274/job/<id>); needs the daemon running."),
+        ("-o <file>", "Output path (default scsh-job-<id>.html in the current dir); `-o -` streams to stdout."),
+        ("--nowait", "Snapshot the job as it is; by default the daemon first waits (up to 20 min) for"),
+        ("", "the job's in-flight annotators, so \"completed\" recordings carry summaries and chapters."),
+        ("--json", "{job, output, bytes} JSON; on by default when stdout is not a TTY."),
+        ("(contents)", "One self-contained page: every recording with its player, annotations, results,"),
+        ("", "and the whole-job commits diff — the same file the job page's export link downloads."),
+        ("SCSH_DAEMON_PORT", "The daemon's port (default 7274)."),
+      ],
+    ),
     "version" => {
       ("print the version", "scsh version", &[("(no flags)", "Print the version with the build's git hash.")])
     }
@@ -10069,6 +10205,10 @@ fn print_help_overview() {
   help_row("gc [--apply]", "Reclaim old $SCSH_HOME/sessions/ dirs (dry-run default; --days/--keep/--legacy).");
   help_row("annotate-cast <cast…>", "Summarize + chapter recordings via Codex / Luna (--json).");
   help_row("export-cast <cast…>", "Render recordings to self-contained offline HTML pages (-o, --json).");
+  help_row(
+    "export-job <id>",
+    "Download a job's complete offline HTML snapshot from the daemon (-o, --nowait, --json).",
+  );
   help_row("version", "Print the version (with the build's git hash).");
   help_row("help [topic]", "Show this help, or one of the topics below.");
   println!();
