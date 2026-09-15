@@ -7774,14 +7774,28 @@ fn integrate_commits(
   }
 }
 
-/// Pack the commits a step just brought in into one self-contained HTML review page
-/// (`packdiff`, if it is on the PATH) under the session's durable artifact root
-/// (`$SCSH_HOME/sessions/<session>/diffs/`), and register it with the daemon so the job
-/// page grows a "⇄ commits diff" chip on that step's row. Best-effort residue: no packdiff,
-/// no readable range, or a pack failure skips with a hint — never a run failure.
+/// Pack the commits `from..to` of `root` into one self-contained HTML review page, using
+/// packdiff as a library — nothing to install beside scsh, no process to start.
 ///
-/// Invokes packdiff in machine mode (`--json`): stdout is a single `{ "Packed": … }` or
-/// error document (packdiff 0.9.1). Progress stays on stderr and is discarded.
+/// `..` is the literal range: `from` is the branch tip the commits landed on (or their
+/// merge base on the saved-branch path), so merge-base resolution has nothing to add. The
+/// notes author is pinned to scsh's own bot: a skill-committed PR-DESCRIPTION.md is
+/// bot-authored (every clone commit is), and packdiff lifts the notes author's description
+/// into the page's Description panel — regardless of the host env.
+fn pack_commits_page(root: &Path, from: &str, to: &str, title: String) -> Result<String, packdiff::Error> {
+  let mut opts = packdiff::PackOptions::new(root.to_string_lossy(), from, to);
+  opts.merge_base = false;
+  opts.title = Some(title);
+  opts.notes_email = Some(SCSH_COMMIT_EMAIL.to_string());
+  // `&()`: no progress reporting — packing runs between steps, off the user's terminal.
+  packdiff::pack(&opts, &()).map(|out| out.html)
+}
+
+/// Pack the commits a step just brought in into one self-contained HTML review page under
+/// the session's durable artifact root (`$SCSH_HOME/sessions/<session>/diffs/`), and
+/// register it with the daemon so the job page grows a "⇄ commits diff" chip on that step's
+/// row. Best-effort residue: no readable range or a pack failure skips with a hint — never a
+/// run failure.
 fn pack_step_diff(
   root: &Path, session_id: &str, skill: &ResolvedInvocation, outcome: &SkillRun, range: Option<(String, String)>,
   daemon_client: Option<&daemon::Client>,
@@ -7795,43 +7809,23 @@ fn pack_step_diff(
   }
   let out = dir.join(format!("{}-p{}.html", runtime::sanitize_component(&skill.name), outcome.proc_index));
   let title = format!("scsh job {session_id} · {} commits", skill.name);
-  // `..` = the literal range: `from` is the branch tip the commits landed on (or their
-  // merge base on the saved-branch path), so merge-base resolution has nothing to add.
-  // The notes author is pinned to scsh's own bot: a skill-committed PR-DESCRIPTION.md is
-  // bot-authored (every clone commit is), and packdiff lifts the notes author's
-  // description into the page's Description panel — regardless of the host env.
-  let result = Command::new("packdiff")
-    .arg(format!("{from}..{to}"))
-    .args(["-C", &root.to_string_lossy(), "-o", &out.to_string_lossy(), "--title", &title, "--json"])
-    .env("PACKDIFF_SYSTEM_USER_EMAIL", SCSH_COMMIT_EMAIL)
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .output();
-  match result {
-    Ok(output) if output.status.success() && out.is_file() => {
+  let packed = pack_commits_page(root, &from, &to, title)
+    .map_err(|e| e.to_string())
+    .and_then(|html| std::fs::write(&out, html).map_err(|e| format!("cannot write {}: {e}", out.display())));
+  match packed {
+    Ok(()) => {
       ok(&format!("{}: commits diff packed — {}", skill.name, out.display()));
       if let Some(c) = daemon_client {
         c.proc_diff(outcome.proc_index, &out.to_string_lossy());
       }
     }
-    Ok(output) => {
-      let detail = packdiff_failure_detail(&output.stdout);
-      hint(&format!(
-        "{}: packdiff could not pack the commits diff (skipped{})",
-        skill.name,
-        detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default()
-      ));
-    }
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-      hint(
-        "packdiff not found — `rustup target add wasm32-unknown-unknown && cargo install packdiff --version 0.9.1 --locked` to browse each step's commits from the job page",
-      );
-    }
-    Err(e) => hint(&format!("{}: packdiff failed to start — {e}", skill.name)),
+    Err(reason) => hint(&format!("{}: could not pack the commits diff (skipped: {reason})", skill.name)),
   }
 }
 
+/// Pack every commit the whole job brought into the branch (`from..to`) into
+/// `$SCSH_HOME/sessions/<session>/diffs/job.html` — the page behind the job page's
+/// "⇄ all commits" button and the "all commits" section of the offline export.
 fn pack_job_diff(root: &Path, session_id: &str, from: &str, to: &str) {
   if from == to {
     return;
@@ -7843,69 +7837,17 @@ fn pack_job_diff(root: &Path, session_id: &str, from: &str, to: &str) {
   let out = dir.join("job.html");
   let next = dir.join("job.next.html");
   let title = format!("scsh job {session_id} · all commits");
-  let result = Command::new("packdiff")
-    .arg(format!("{from}..{to}"))
-    .args(["-C", &root.to_string_lossy(), "-o", &next.to_string_lossy(), "--title", &title, "--json"])
-    .env("PACKDIFF_SYSTEM_USER_EMAIL", SCSH_COMMIT_EMAIL)
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .output();
-  if result.is_ok_and(|output| output.status.success() && next.is_file()) {
-    if std::fs::rename(&next, &out).is_ok() {
-      ok(&format!("whole-job commits diff packed — {}", out.display()));
-    }
-  } else {
-    let _ = std::fs::remove_file(next);
-  }
-}
-
-/// Pull a short reason out of packdiff's machine-mode error document (or `None`).
-fn packdiff_failure_detail(stdout: &[u8]) -> Option<String> {
-  let text = std::str::from_utf8(stdout).ok()?.trim();
-  if text.is_empty() {
-    return None;
-  }
-  // Prefer the typed `message` field when present; otherwise the top-level variant name.
-  if let Some(i) = text.find("\"message\"") {
-    let after = &text[i + "\"message\"".len()..];
-    if let Some(rest) = after.trim_start().strip_prefix(':') {
-      let rest = rest.trim_start();
-      if let Some(s) = rest.strip_prefix('"') {
-        let mut out = String::new();
-        let mut chars = s.chars();
-        while let Some(c) = chars.next() {
-          match c {
-            '\\' => match chars.next() {
-              Some('n') => out.push('\n'),
-              Some('t') => out.push('\t'),
-              Some('"') => out.push('"'),
-              Some('\\') => out.push('\\'),
-              Some(o) => {
-                out.push('\\');
-                out.push(o);
-              }
-              None => break,
-            },
-            '"' => break,
-            other => out.push(other),
-          }
-        }
-        if !out.is_empty() {
-          return Some(out);
-        }
+  match pack_commits_page(root, from, to, title) {
+    Ok(html) => {
+      // Written beside and renamed over, so a reader of `job.html` never sees a partial page.
+      if std::fs::write(&next, html).is_ok() && std::fs::rename(&next, &out).is_ok() {
+        ok(&format!("whole-job commits diff packed — {}", out.display()));
+      } else {
+        let _ = std::fs::remove_file(&next);
       }
     }
+    Err(e) => hint(&format!("whole-job commits diff could not be packed (skipped: {e})")),
   }
-  // `{ "UnknownRef": { ... } }` → `UnknownRef`
-  let trimmed = text.trim_start().trim_start_matches('{').trim_start();
-  if let Some(key) = trimmed.strip_prefix('"') {
-    let name: String = key.chars().take_while(|c| *c != '"').collect();
-    if !name.is_empty() && name != "Packed" {
-      return Some(name);
-    }
-  }
-  None
 }
 
 /// A distinct branch name for commits that couldn't be rebased cleanly:
@@ -11939,26 +11881,6 @@ steps:
   // pinned down in CI. (The full container round-trip is shown in DEMO.md.)
 
   #[test]
-  fn packdiff_failure_detail_reads_machine_mode_errors() {
-    let unknown = br#"{
-  "UnknownRef": {
-    "repo": "/tmp/r",
-    "ref": "nope",
-    "message": "unknown ref in \"/tmp/r\": nope",
-    "stage": "ref",
-    "exit_code": 4
-  }
-}"#;
-    assert_eq!(packdiff_failure_detail(unknown).as_deref(), Some("unknown ref in \"/tmp/r\": nope"));
-    assert_eq!(
-      packdiff_failure_detail(br#"{ "NotAGitRepository": { "stage": "repo", "exit_code": 3 } }"#).as_deref(),
-      Some("NotAGitRepository")
-    );
-    assert_eq!(packdiff_failure_detail(br#"{ "Packed": { "out": "x.html" } }"#), None);
-    assert_eq!(packdiff_failure_detail(b""), None);
-  }
-
-  #[test]
   fn cached_skill_run_carries_result_json_for_workflow_outputs() {
     // A workflow consumes validated outputs after each wave. A cache hit must carry both the
     // original JSON and the already-validated fields, or the DAG cannot bind downstream inputs.
@@ -12023,6 +11945,24 @@ steps:
     assert_eq!(n, "scsh/incoming/add-20231114-221320-utc-abcdef1");
     // A messy skill name is sanitized into a valid ref component.
     assert!(incoming_branch_name("My Skill!", "S", "deadbeef").starts_with("scsh/incoming/my-skill-S-utc-"));
+  }
+
+  #[test]
+  fn pack_commits_page_renders_the_range_offline() {
+    // packdiff is a library here: a scratch repository, no binary on the PATH, and the page
+    // comes back self-contained — the comment engine inlined, the changed file in the diff.
+    let r = repo("pack-page");
+    let base = head(&r);
+    std::fs::write(r.join("feature.txt"), "hello from a step\n").unwrap();
+    g(&r, &["add", "-A"]);
+    g(&r, &["commit", "-qm", "add feature"]);
+    let html = pack_commits_page(&r, &base, &head(&r), "scsh job t · add commits".into()).expect("packs");
+    assert!(html.contains("<title>scsh job t · add commits</title>"), "carries the given title");
+    assert!(html.contains("application/wasm-base64"), "the comment engine rides inline");
+    assert!(html.contains("feature.txt") && html.contains("hello from a step"), "the commit's change is in the page");
+    // An unresolvable ref is a typed error, not a panic or a swallowed empty page.
+    let err = pack_commits_page(&r, "nope", &head(&r), "t".into()).expect_err("unknown ref fails");
+    assert!(err.to_string().contains("nope"), "the error names the ref: {err}");
   }
 
   #[test]

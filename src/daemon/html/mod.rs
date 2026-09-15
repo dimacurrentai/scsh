@@ -9,7 +9,6 @@ mod fleet;
 mod format;
 mod index;
 mod layout;
-mod markdown;
 mod proc;
 mod report;
 mod session;
@@ -18,9 +17,10 @@ mod stats;
 mod workflow;
 mod workflow_view_js;
 
-/// Render a task's markdown contribution for the job page (packdiff's safety-first subset).
+/// Render a task's markdown contribution for the job page: packdiff's safety-first subset,
+/// the same renderer its review pages use for comments.
 pub(crate) fn markdown_to_html(text: &str) -> String {
-  markdown::to_html(text)
+  packdiff::dto::markdown::to_html(text)
 }
 
 pub use cast::{cast_player_page, cast_player_page_for, PLAYER_CSS, PLAYER_JS};
