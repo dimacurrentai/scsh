@@ -197,6 +197,9 @@ scsh version               Show the version (with the build's git short hash, +`
 scsh daemon start|stop|restart|status
                            Session browser on http://127.0.0.1:7274 (override with SCSH_DAEMON_PORT).
                            scsh run auto-starts an ephemeral daemon and prints a session URL.
+scsh export-job <id>       Download a job's complete offline HTML snapshot from the running daemon
+                           (recordings, annotations, results, whole-job commits diff) — the file the
+                           job page's export link serves. -o <file> | -o - (stdout), --nowait, --json.
 ```
 
 See [`DAEMON.md`](DAEMON.md) for the session browser API and demo script.

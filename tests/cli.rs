@@ -287,6 +287,7 @@ fn help_covers_every_command_and_exit_codes() {
     ("annotate", "scsh annotate-cast"), // alias resolves to `annotate-cast`
     ("export-cast", "scsh export-cast"),
     ("export", "scsh export-cast"), // alias resolves to `export-cast`
+    ("export-job", "scsh export-job"),
   ] {
     let r = scsh(&d, &["help", topic]);
     assert_eq!(r.code, 0, "help {topic} exit: {}", r.out);
@@ -1421,6 +1422,122 @@ fn daemon_restart() {
   assert!(html.contains("data-tab=\"jobs\""), "got: {}", html);
   let stop = daemon_cmd(&d, &home, port, "stop");
   assert!(stop.status.success(), "daemon stop: {}", String::from_utf8_lossy(&stop.stderr));
+}
+
+/// `scsh export-job` over the daemon: a registered job exports as one HTML page in every
+/// output mode, an unknown id is a clean failure, and a missing daemon is reported, not hung.
+#[test]
+fn export_job_downloads_the_snapshot_from_the_daemon() {
+  let d = unique_dir("export-job");
+  let home = d.join(".scsh");
+  let port = unused_local_port();
+  let _guard = DaemonTestGuard { dir: d.clone(), home: home.clone(), port };
+  let start = daemon_cmd(&d, &home, port, "start");
+  assert!(start.status.success(), "daemon start: {}", String::from_utf8_lossy(&start.stderr));
+  for _ in 0..40 {
+    if daemon_cmd(&d, &home, port, "status").status.success() {
+      break;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+  }
+  let repo = d.join("repo");
+  std::fs::create_dir_all(&repo).unwrap();
+  let body = format!(
+    "{{\"session\":\"abcdef\",\"repo\":{},\"branch\":\"main\",\"skills\":[]}}",
+    json_string(&repo.display().to_string())
+  );
+  assert!(daemon_http_post("/api/v1/session/start", &body, port), "register the job");
+  let export = |args: &[&str]| {
+    let output = Command::new(bin())
+      .args(args)
+      .env("SCSH_DAEMON_PORT", port.to_string())
+      .env("SCSH_HOME", &home)
+      .current_dir(&d)
+      .output()
+      .expect("run scsh export-job");
+    (
+      output.status.code().unwrap_or(-1),
+      String::from_utf8_lossy(&output.stdout).into_owned(),
+      String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+  };
+  // Default output name, JSON report (stdout is a pipe here).
+  let (code, out, err) = export(&["export-job", "abcdef"]);
+  assert_eq!(code, 0, "stdout: {out}\nstderr: {err}");
+  assert!(out.contains("\"job\": \"abcdef\"") && out.contains("\"output\": \"scsh-job-abcdef.html\""), "got: {out}");
+  let page = std::fs::read_to_string(d.join("scsh-job-abcdef.html")).expect("the snapshot file");
+  assert!(page.starts_with("<!DOCTYPE html>") && page.contains("abcdef"), "got: {}", &page[..page.len().min(200)]);
+  assert!(out.contains(&format!("\"bytes\": {}", page.len())), "got: {out}");
+  // `-o <file>` and `--nowait`.
+  let (code, out, _) = export(&["export-job", "abcdef", "--nowait", "-o", "custom.html"]);
+  assert_eq!(code, 0, "got: {out}");
+  // Each snapshot freezes its own instant, so compare structure, not bytes.
+  let custom = std::fs::read_to_string(d.join("custom.html")).expect("-o must write the page");
+  assert!(custom.starts_with("<!DOCTYPE html>") && custom.contains("<title>scsh job abcdef</title>"), "got: {out}");
+  // `-o -` streams the page itself to stdout; the note goes to stderr.
+  let (code, out, err) = export(&["export-job", "abcdef", "-o", "-"]);
+  assert_eq!(code, 0, "stderr: {err}");
+  assert!(
+    out.starts_with("<!DOCTYPE html>") && out.contains("<title>scsh job abcdef</title>"),
+    "stdout must be the page"
+  );
+  assert!(!d.join("scsh-job-abcdef.html").metadata().unwrap().modified().unwrap().elapsed().unwrap().is_zero());
+  assert!(err.contains("job abcdef") && err.contains("stdout"), "got: {err}");
+  // An unknown job is exit 1 with the daemon's verdict, and no file.
+  let (code, out, _) = export(&["export-job", "nosuch"]);
+  assert_eq!(code, 1);
+  assert!(out.contains("job 'nosuch' not found"), "got: {out}");
+  assert!(!d.join("scsh-job-nosuch.html").exists(), "a failed export must leave no file");
+  // No daemon on the port: a prompt exit 1, not a hang.
+  let stop = daemon_cmd(&d, &home, port, "stop");
+  assert!(stop.status.success(), "daemon stop: {}", String::from_utf8_lossy(&stop.stderr));
+  let (code, out, _) = export(&["export-job", "abcdef"]);
+  assert_eq!(code, 1);
+  assert!(out.contains("daemon is not running") && out.contains("scsh daemon start"), "got: {out}");
+}
+
+/// `export-job` usage errors: a missing or malformed id, two ids, and flags on the wrong command.
+#[test]
+fn export_job_rejects_bad_usage() {
+  let d = unique_dir("export-job-usage");
+  let r = scsh(&d, &["export-job"]);
+  assert_eq!(r.code, 2);
+  assert!(r.out.contains("give the job id"), "got: {}", r.out);
+  let r = scsh(&d, &["export-job", "../etc"]);
+  assert_eq!(r.code, 2);
+  assert!(r.out.contains("is not a job id"), "got: {}", r.out);
+  let r = scsh(&d, &["export-job", "abcdef", "ghijkl"]);
+  assert_eq!(r.code, 2);
+  assert!(r.out.contains("exactly one job id"), "got: {}", r.out);
+  let r = scsh(&d, &["export-cast", "x.cast", "--nowait"]);
+  assert_eq!(r.code, 2);
+  assert!(r.out.contains("--nowait only applies to 'export-job'"), "got: {}", r.out);
+}
+
+fn json_string(s: &str) -> String {
+  format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn daemon_http_post(path: &str, body: &str, port: u16) -> bool {
+  use std::io::{Read, Write};
+  use std::net::TcpStream;
+  use std::time::Duration;
+  let Ok(mut stream) =
+    TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), Duration::from_millis(500))
+  else {
+    return false;
+  };
+  stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+  let req = format!(
+    "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+    body.len()
+  );
+  if stream.write_all(req.as_bytes()).is_err() {
+    return false;
+  }
+  let mut resp = String::new();
+  let _ = stream.read_to_string(&mut resp);
+  resp.starts_with("HTTP/1.1 200")
 }
 
 struct DaemonTestGuard {

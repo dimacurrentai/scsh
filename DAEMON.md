@@ -171,7 +171,10 @@ cannot kill an annotation that is doing its job. A job whose tasks all succeeded
 UI) until the last one settles, so "completed" always means the recordings carry their
 summaries and chapters. `GET /job/<id>/export.html` waits that state out (up to 20
 minutes) before assembling the snapshot; `?nowait=1` takes the job as it is, and the
-snapshot then labels each unfinished annotation as such. An annotate row whose process still
+snapshot then labels each unfinished annotation as such. From a terminal, `scsh export-job
+<id>` downloads that same snapshot (`-o <file>`, `-o -` for stdout, `--nowait` for the
+as-is variant, `--json` for a `{job, output, bytes}` report) and exits 1 when the daemon
+is down or the job is unknown. An annotate row whose process still
 vanished mid-work (crash, reboot) settles as `annotation_interrupted` — distinct from a
 real model watchdog `annotation_timed_out` — and its stale `.annotating` marker expires
 after 15 minutes, so the recording is re-annotated by a later run instead of staying

@@ -206,6 +206,31 @@ pub fn daemon_get_body(port: u16, path: &str) -> Option<String> {
   resp.split("\r\n\r\n").nth(1).map(str::to_string)
 }
 
+/// GET `path` from the local daemon as a download: the status code and the body, whatever
+/// the status. Unlike [`daemon_get_body`] this keeps non-200 answers (a 404's text is the
+/// reason the caller reports) and takes its own read timeout, because a snapshot export can
+/// legitimately block while the daemon waits for a job's annotators to finish. `Err` is the
+/// transport failure — the daemon is unreachable, or the response was cut off.
+pub fn daemon_get_download(port: u16, path: &str, read_timeout: Duration) -> Result<(u16, String), String> {
+  let addr: SocketAddr = format!("127.0.0.1:{port}").parse().map_err(|e| format!("bad daemon address: {e}"))?;
+  let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500))
+    .map_err(|e| format!("cannot connect to the daemon on {addr}: {e}"))?;
+  stream.set_read_timeout(Some(read_timeout)).ok();
+  stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+  let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+  stream.write_all(req.as_bytes()).map_err(|e| format!("cannot send the request: {e}"))?;
+  let mut resp = Vec::new();
+  stream.read_to_end(&mut resp).map_err(|e| format!("the daemon did not finish answering: {e}"))?;
+  let resp = String::from_utf8_lossy(&resp).into_owned();
+  let (head, body) = resp.split_once("\r\n\r\n").ok_or_else(|| "malformed response from the daemon".to_string())?;
+  let status = head
+    .strip_prefix("HTTP/1.1 ")
+    .and_then(|rest| rest.split(' ').next())
+    .and_then(|code| code.parse::<u16>().ok())
+    .ok_or_else(|| format!("malformed status line from the daemon: {}", head.lines().next().unwrap_or_default()))?;
+  Ok((status, body.to_string()))
+}
+
 /// Daemon mode from the cross-process mode marker, when present and valid.
 pub fn read_persisted_mode(port: u16) -> Option<super::model::DaemonMode> {
   let text = std::fs::read_to_string(mode_file(port)).ok()?;
