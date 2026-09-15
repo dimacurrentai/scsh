@@ -3110,7 +3110,7 @@ fn live_client_js_shows_connecting_on_ws_close() {
 #[test]
 fn wrap_page_connecting_status_uses_blue() {
   use super::layout::wrap_page;
-  let html = wrap_page("scsh sessions", 7274, None, None, "", "<p>body</p>");
+  let html = wrap_page("scsh sessions", None, None, "", "<p>body</p>");
   assert!(html.contains("class=\"chamfer daemon-status connecting\""));
   assert!(html.contains(".daemon-status.connecting .dot { background: var(--cyan);"));
   assert!(!html.contains("fonts.googleapis.com"), "offline-first: no CDN fonts (WEB-UI §5)");
@@ -3131,7 +3131,7 @@ fn wrap_page_connecting_status_uses_blue() {
 fn every_daemon_page_carries_the_inline_favicon() {
   use super::layout::wrap_page;
   // A data: URI, so the dashboard and the standalone player page stay request-free.
-  let html = wrap_page("scsh sessions", 7274, None, None, "", "<p>body</p>");
+  let html = wrap_page("scsh sessions", None, None, "", "<p>body</p>");
   assert!(html.contains("<link rel=\"icon\" href=\"data:image/svg+xml,"), "dashboard favicon");
   let player = cast_player_page(&store_with_cast_proc(ProcStatus::Ok), "castab", 0).expect("player page");
   assert!(player.contains("<link rel=\"icon\" href=\"data:image/svg+xml,"), "player-page favicon");
@@ -3139,9 +3139,22 @@ fn every_daemon_page_carries_the_inline_favicon() {
 }
 
 #[test]
+fn wrap_page_live_socket_follows_the_page_origin() {
+  use super::layout::wrap_page;
+  // A dashboard reached through a proxy or an SSH tunnel must open its live socket against
+  // the daemon that served it. A loopback host baked in by the server would instead connect
+  // to whatever runs on the viewer's own machine and overwrite the page with its jobs.
+  let html = wrap_page("scsh sessions", None, None, "", "<p>body</p>");
+  assert!(html.contains("+ location.host + '/ws'"), "socket host comes from the page origin");
+  assert!(html.contains("location.protocol === 'https:' ? 'wss://' : 'ws://'"), "scheme follows the page");
+  assert!(!html.contains("ws://127.0.0.1"), "no loopback host baked into the page");
+  assert!(!html.contains("WS_PORT"), "no server-injected port constant");
+}
+
+#[test]
 fn wrap_page_serves_valid_css_braces() {
   use super::layout::wrap_page;
-  let html = wrap_page("scsh sessions", 7274, None, None, "Hello lede", "<p>body</p>");
+  let html = wrap_page("scsh sessions", None, None, "Hello lede", "<p>body</p>");
   assert!(html.contains(":root {"));
   assert!(!html.contains(":root {{"));
   assert!(html.contains(".daemon-status {"));

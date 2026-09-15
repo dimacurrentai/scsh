@@ -107,7 +107,6 @@ pub fn index_page_with_filter(store: &Store, filter: Option<IndexFilter>) -> Str
 pub(crate) const JOBS_PAGE_SIZE: usize = 50;
 
 pub fn index_page_for(store: &Store, filter: Option<IndexFilter>, tab: IndexTab) -> String {
-  let port = store.port;
   let now = now_unix_secs();
   let filter_repo = filter.as_ref().map(|f| f.repo_path());
   let sessions = sessions_for_index(&store.sessions, now);
@@ -200,7 +199,7 @@ tabindex=\"{setup_i}\" class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
     stats = super::stats::stats_panel(),
     images = images_panel()
   );
-  wrap_page("scsh", port, None, tab.crumb(), "", &body)
+  wrap_page("scsh", None, tab.crumb(), "", &body)
 }
 
 /// One red "✕ stop all <harness> (n)" button per harness with running skill containers, so a

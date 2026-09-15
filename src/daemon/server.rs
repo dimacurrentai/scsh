@@ -1182,15 +1182,11 @@ fn route(
     path if path.starts_with("/job/") || path.starts_with("/session/") => {
       // Canonical page URL is `/job/<id>`; `/session/<id>` is kept as a compatibility alias.
       let id = path.strip_prefix("/job/").or_else(|| path.strip_prefix("/session/")).unwrap_or("");
-      let (page, port) = {
-        let store = lock_store(store);
-        (html::session_page(&store, id), store.port)
-      };
+      let page = html::session_page(&lock_store(store), id);
       // An evicted session renders from its archived row: same page, read-only by nature
       // (its run ended long ago, so there is nothing live to mutate anyway).
-      let page = page.or_else(|| {
-        archived_session(db, id).map(|s| html::session_page_for(&s, port, s.lifecycle_status(now_unix_secs())))
-      });
+      let page = page
+        .or_else(|| archived_session(db, id).map(|s| html::session_page_for(&s, s.lifecycle_status(now_unix_secs()))));
       if let Some(page) = page {
         (200, page, "text/html; charset=utf-8", false)
       } else {
