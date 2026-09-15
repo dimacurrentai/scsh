@@ -303,8 +303,9 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   brought into the caller's branch (one self-contained HTML file: the diff, commits, and
   in-browser comments). Renders inline in a tab; `?dl=1` for a download attachment. Exists
   only for commit-enabled steps whose commits were integrated while `packdiff` (0.9.1
-  required; `cargo install packdiff --version 0.9.1 --locked`) was on the
-  PATH of the `scsh run` host; 404 otherwise. Commits authored as the scsh bot are the
+  required; its build needs the wasm target, so install with
+  `rustup target add wasm32-unknown-unknown && cargo install packdiff --version 0.9.1 --locked`)
+  was on the PATH of the `scsh run` host; 404 otherwise. Commits authored as the scsh bot are the
   change's notes rather than code under review: `PR-DESCRIPTION.md` lifts into the page's
   Description panel, and each `PR-DECISION-<topic>.md` — what the `gorgeous-pipeline`
   journal step recorded as settled — lifts into its own commentable panel under Decisions
