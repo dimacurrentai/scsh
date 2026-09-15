@@ -446,15 +446,18 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .workflow-summary a.wf-jump:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
   .workflow-visual { position: relative; min-height: 0; }
+  /* The legend sits in flow ABOVE the viewport, right-aligned, so no zoom or pan can slide
+     a node under it; the toolbar's Legend checkbox hides it and gives the row back. */
   .workflow-legend {
     --cut: 5px; --bw: 1px;
-    position: absolute; z-index: 4; top: 0.75rem; right: 0.75rem;
-    list-style: none; margin: 0; padding: 0.35rem 0.55rem; display: flex; flex-wrap: wrap;
-    justify-content: flex-end; gap: 0.35rem 0.85rem; max-width: calc(100% - 1.5rem);
+    position: relative; width: fit-content; max-width: 100%;
+    list-style: none; margin: 0 0 0.5rem auto; padding: 0.35rem 0.55rem; display: flex; flex-wrap: wrap;
+    justify-content: flex-end; gap: 0.35rem 0.85rem;
     color: var(--text-muted); background: var(--border);
     font-size: 0.78rem;
   }
   .workflow-legend::before { background: rgba(22,27,34,0.92); }
+  .workflow-card.wf-legend-hidden .workflow-legend { display: none; }
   .workflow-legend .wf-ico { margin-right: 0.2rem; }
   .wf-leg-running { color: var(--orange); }
   .wf-leg-terminating { color: var(--orange); }
@@ -504,6 +507,15 @@ pub(crate) const PAGE_CSS: &str = r#"
   .workflow-zoom button:hover:not(:disabled) { color: var(--text); background: #3a4558; }
   .workflow-zoom button:disabled { color: #545d69; cursor: default; opacity: 0.62; }
   .workflow-zoom button:focus-visible { filter: brightness(1.3); outline: none; }
+  .workflow-zoom .wf-legend-toggle {
+    --cut: 4px; --bw: 1px;
+    display: inline-flex; align-items: center; gap: 0.35rem; min-height: 2rem; padding: 0.2rem 0.55rem;
+    color: var(--text-muted); background: var(--border); cursor: pointer; user-select: none;
+  }
+  .workflow-zoom .wf-legend-toggle::before { background: var(--surface); }
+  .workflow-zoom .wf-legend-toggle:hover { color: var(--text); background: #3a4558; }
+  .workflow-zoom .wf-legend-toggle:focus-within { filter: brightness(1.3); }
+  .workflow-zoom .wf-legend-toggle input { margin: 0; accent-color: var(--cyan); }
   .workflow-zoom [data-wf-zoom-reset] { width: 4.6rem; }
   .workflow-zoom [data-wf-zoom-fit] { width: 3rem; }
   .workflow-zoom [data-wf-expand] { width: 6.4rem; }
@@ -517,7 +529,8 @@ pub(crate) const PAGE_CSS: &str = r#"
     /* clip-path clips box-shadows; drop-shadow follows the chamfered outline instead */
     filter: drop-shadow(0 24px 80px rgba(0,0,0,0.65));
   }
-  .workflow-card.wf-expanded .workflow-visual { flex: 1 1 auto; display: flex; min-height: 0; }
+  .workflow-card.wf-expanded .workflow-visual { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+  .workflow-card.wf-expanded .workflow-legend { flex: 0 0 auto; align-self: flex-end; }
   .workflow-card.wf-expanded .workflow-scroll { flex: 1 1 auto; height: auto; min-height: 0; }
   /* Loop island: dashed ring via 45° stripes on the outer chamfer layer. */
   .wf-loop-island {

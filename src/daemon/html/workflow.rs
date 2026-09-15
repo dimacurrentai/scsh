@@ -99,7 +99,7 @@ pub(crate) fn workflow_graph_html_for(
 <h2 class="workflow-title">Job graph</h2>
 {outcome}
 <p class="workflow-summary dim">{summary}</p>
-<div class="workflow-zoom" aria-label="Graph view controls"><button type="button" class="chamfer" data-wf-zoom-out aria-label="Zoom out">−</button><button type="button" class="chamfer" data-wf-zoom-reset>100%</button><button type="button" class="chamfer" data-wf-zoom-in aria-label="Zoom in">+</button><button type="button" class="chamfer" data-wf-zoom-fit>Fit</button><button type="button" class="chamfer" data-wf-expand aria-label="Open graph in large view" aria-pressed="false">Full screen</button></div>
+<div class="workflow-zoom" aria-label="Graph view controls"><label class="chamfer wf-legend-toggle"><input type="checkbox" data-wf-legend checked> Legend</label><button type="button" class="chamfer" data-wf-zoom-out aria-label="Zoom out">−</button><button type="button" class="chamfer" data-wf-zoom-reset>100%</button><button type="button" class="chamfer" data-wf-zoom-in aria-label="Zoom in">+</button><button type="button" class="chamfer" data-wf-zoom-fit>Fit</button><button type="button" class="chamfer" data-wf-expand aria-label="Open graph in large view" aria-pressed="false">Full screen</button></div>
 </div>
 <div class="workflow-visual">
 {legend}

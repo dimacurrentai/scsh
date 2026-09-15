@@ -3549,8 +3549,13 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(!graph_head.contains("workflow-legend"), "task legend must not read as part of the job-level header");
   assert!(
     graph_visual.find("workflow-legend") < graph_visual.find("workflow-scroll"),
-    "legend overlays the visual before its scroll viewport"
+    "legend sits in flow above its scroll viewport, never over the nodes"
   );
+  assert!(
+    graph_head.find("data-wf-legend") < graph_head.find("data-wf-zoom-out"),
+    "the Legend checkbox sits left of the zoom-out button"
+  );
+  assert!(graph_head.contains(r#"<input type="checkbox" data-wf-legend checked>"#), "Legend is checked by default");
 
   {
     let session = store.sessions.get_mut("arith1").unwrap();
@@ -4182,4 +4187,25 @@ fn jobs_table_carries_filter_facets_and_the_strip() {
   assert!(js.contains("const JOB_KIND_DEFAULTS = { single: true, host: true, quota: false }"), "client defaults mirror the server");
   assert!(js.contains("data-job-kinds=\"' + esc(jobKinds(session).join(' '))"), "live rows carry the facets");
   assert!(js.contains("tr.jobs-filtered") || html.contains("tr.jobs-filtered"), "hidden rows are class-driven");
+}
+
+/// The status legend never covers a node: it lives in flow above the graph viewport (not
+/// absolutely positioned over it), and the toolbar's Legend checkbox, checked by default and
+/// placed left of the zoom-out button on both render paths, hides it via a class the shared
+/// view script derives from the checkbox.
+#[test]
+fn job_graph_legend_sits_above_the_viewport_and_can_be_hidden() {
+  let css = super::layout::PAGE_CSS;
+  let legend_rule = css.split(".workflow-legend {").nth(1).and_then(|r| r.split('}').next()).expect("legend rule");
+  assert!(!legend_rule.contains("position: absolute"), "legend must not float over the graph: {legend_rule}");
+  assert!(legend_rule.contains("margin: 0 0 0.5rem auto"), "legend is right-aligned in flow: {legend_rule}");
+  assert!(css.contains(".workflow-card.wf-legend-hidden .workflow-legend { display: none; }"));
+  assert!(css.contains(".workflow-card.wf-expanded .workflow-visual { flex: 1 1 auto; display: flex; flex-direction: column;"));
+  let toggle = r#"<label class="chamfer wf-legend-toggle"><input type="checkbox" data-wf-legend checked> Legend</label>"#;
+  let client = super::client_js::live_client_js();
+  let client_toolbar = client.split("Graph view controls").nth(1).and_then(|r| r.split("</div></div>").next()).unwrap();
+  assert!(client_toolbar.find(toggle) < client_toolbar.find("data-wf-zoom-out"), "client mirror: {client_toolbar}");
+  let view = super::workflow_view_js::WORKFLOW_VIEW_JS;
+  assert!(view.contains("root.querySelector('[data-wf-legend]')"), "the shared view script binds the checkbox");
+  assert!(view.contains("root.classList.toggle('wf-legend-hidden', !legendToggle.checked)"));
 }

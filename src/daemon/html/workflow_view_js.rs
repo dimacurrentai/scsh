@@ -36,6 +36,15 @@ function initWorkflowGraphView(activateTask) {
   const reset = root.querySelector('[data-wf-zoom-reset]');
   const zoomOut = root.querySelector('[data-wf-zoom-out]');
   const expand = root.querySelector('[data-wf-expand]');
+  // The Legend checkbox (checked by default) shows or hides the status legend above the
+  // viewport. The class is derived from the checkbox on every bind, so a snapshot re-saved
+  // with the legend hidden opens with it shown again, matching the checkbox it serialized.
+  const legendToggle = root.querySelector('[data-wf-legend]');
+  if (legendToggle) {
+    const applyLegend = () => root.classList.toggle('wf-legend-hidden', !legendToggle.checked);
+    legendToggle.addEventListener('change', applyLegend);
+    applyLegend();
+  }
   const applyExpanded = (expanded, focusButton) => {
     workflowExpanded = expanded;
     root.classList.toggle('wf-expanded', expanded);
