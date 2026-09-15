@@ -7703,7 +7703,7 @@ fn pack_step_diff(
     }
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
       hint(
-        "packdiff not found — `cargo install packdiff --version 0.9.1 --locked` to browse each step's commits from the job page",
+        "packdiff not found — `rustup target add wasm32-unknown-unknown && cargo install packdiff --version 0.9.1 --locked` to browse each step's commits from the job page",
       );
     }
     Err(e) => hint(&format!("{}: packdiff failed to start — {e}", skill.name)),
