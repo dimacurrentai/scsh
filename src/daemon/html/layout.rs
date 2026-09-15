@@ -1233,7 +1233,7 @@ fn scsh_version_html() -> String {
 pub(crate) const FAVICON_LINK: &str = "<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpolygon points='3 0 13 0 16 3 16 13 13 16 3 16 0 13 0 3' fill='%230d1117'/%3E%3Ctext x='3.5' y='12.5' font-size='11' fill='%2358a6ff'%3E%E2%9D%AF%3C/text%3E%3C/svg%3E\">";
 
 pub(crate) fn wrap_page(
-  title: &str, port: u16, session_id: Option<&str>, index_crumb: Option<(&str, &str)>, lede: &str, body: &str,
+  title: &str, session_id: Option<&str>, index_crumb: Option<(&str, &str)>, lede: &str, body: &str,
 ) -> String {
   let session_js = match session_id {
     Some(id) => format!("const SESSION_ID = {};", quote_js(id)),
@@ -1274,7 +1274,6 @@ pub(crate) fn wrap_page(
 </div>
 {player_js}
 <script>
-const WS_PORT = {port};
 const PROJECTS_DIR = {projects_dir};
 {session_js}
 {live_js}
@@ -1293,7 +1292,6 @@ const PROJECTS_DIR = {projects_dir};
     projects_dir = quote_js(&crate::daemon::paths::projects_dir().to_string_lossy()),
     body = body,
     player_js = player_js,
-    port = port,
     session_js = session_js,
     live_js = live_client_js()
   )

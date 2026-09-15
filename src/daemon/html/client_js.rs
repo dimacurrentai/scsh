@@ -2443,7 +2443,9 @@ function connectWs() {
   // stream with a lagging one and make every duration on the page see-saw.
   if (ws) { try { ws.onclose = null; ws.onmessage = null; ws.onerror = null; ws.close(); } catch (_) {} }
   setDaemonStatus('connecting', 'connecting…', null);
-  ws = new WebSocket('ws://127.0.0.1:' + WS_PORT + '/ws');
+  // Same origin as the page: a proxied or tunnelled dashboard must talk to the daemon that
+  // served it, not to whatever happens to listen on the viewer's own loopback port.
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.onopen = () => { reconnectMs = 400; setDaemonStatus('connecting', 'connecting…', null); };
   ws.onmessage = (ev) => { try { onWsMessage(JSON.parse(ev.data)); } catch (_) {} };
   ws.onclose = () => {

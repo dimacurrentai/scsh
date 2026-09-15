@@ -10,14 +10,14 @@ use crate::daemon::paths::now_unix_secs;
 
 pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let session = store.sessions.get(session_id)?;
-  Some(session_page_for(session, store.port, store.lifecycle_of(session, now_unix_secs())))
+  Some(session_page_for(session, store.lifecycle_of(session, now_unix_secs())))
 }
 
 /// The session page from a session record and its daemon-reported lifecycle — the render
 /// path shared by live sessions (looked up in the store, whose annotate children can hold
 /// the job in `final annotations`) and archived ones (read back from the store DB after
 /// eviction, where the record alone decides).
-pub fn session_page_for(session: &Session, port: u16, lifecycle: SessionLifecycle) -> String {
+pub fn session_page_for(session: &Session, lifecycle: SessionLifecycle) -> String {
   let now = now_unix_secs();
   let mut procs_html = String::new();
   let mut fleet_sections = fleet_sections_by_anchor(session);
@@ -175,7 +175,7 @@ pub fn session_page_for(session: &Session, port: u16, lifecycle: SessionLifecycl
     workflow = workflow,
     procs = procs_html,
   );
-  wrap_page(&format!("job {}", session.id), port, Some(&session.id), None, &lede, &body)
+  wrap_page(&format!("job {}", session.id), Some(&session.id), None, &lede, &body)
 }
 
 fn container_runtime_name(runtime: Option<&str>) -> &'static str {
