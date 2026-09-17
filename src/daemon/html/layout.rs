@@ -979,27 +979,13 @@ pub(crate) const PAGE_CSS: &str = r#"
   .image-build-btn:hover:not(:disabled)::before { background: rgba(88, 166, 255, 0.12); }
   .image-build-btn:disabled { cursor: default; opacity: 0.55; }
   /* Diff chip stays on the summary row (right edge). */
-  a.proc-diff, span.proc-diff {
+  a.proc-diff {
     margin-left: auto; align-self: center; flex-shrink: 0; white-space: nowrap;
     font-size: 0.75rem; line-height: 1.4; text-decoration: none;
     min-width: 10.5rem; height: 1.85rem; padding: 0 0.75rem;
     text-align: center; box-sizing: border-box;
   }
   a.proc-diff:hover { text-decoration: none; }
-  /* Offline export: packed commits-diff embedded as a sandboxed iframe (not the live chip). */
-  details.proc-diff {
-    --cut: 8px; --bw: 1px;
-    margin: 0.5rem 0;
-    background: var(--border); padding: 0.25rem 0.55rem;
-  }
-  details.proc-diff::before { background: var(--surface); }
-  details.proc-diff > summary {
-    cursor: pointer; list-style: none; color: var(--cyan); font-size: 0.85rem;
-  }
-  details.proc-diff iframe {
-    width: 100%; min-height: 28rem; border: 1px solid var(--border);
-    margin: 0.4rem 0 0.25rem; background: #fff;
-  }
   /* Bottom-center toast — brief, non-blocking feedback (e.g. invalid project name). */
   .toast {
     --cut: 6px; --bw: 1px;

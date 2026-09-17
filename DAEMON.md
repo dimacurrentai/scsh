@@ -121,8 +121,10 @@ code or license rides in the browser UI). It has:
   self-contained offline page** (`scsh-session-<id>.html`) — a summary header plus every
   recording embedded as its own per-cast export page (annotated casts keep their summary
   and chapters; procs without a recording become note rows). Every packed commits diff
-  rides along as a sandboxed embedded page: each step's under its row, and the whole job's
-  end-to-end diff (what `⇄ all commits` opens) under the job meta. Shown whenever any proc
+  rides along inside the file and opens as the entire page, behind the live page's own
+  buttons (`⇄ commits diff` on a step's row, `⇄ all commits` in the job meta); the diff's
+  Back button — or the browser's — returns to the job. Copies re-saved with the browser's
+  "Save as" behave the same. Shown whenever any proc
   has a registered cast.
 
 ## In-progress recordings
