@@ -6404,6 +6404,9 @@ mod tests {
     // daemon writes the initial `running` receipt; the workflow's own publish host step writes
     // the terminal one. Here the spawned run exits non-zero before publishing, so the reaper
     // backstop marks the receipt `failed` and the job is labeled as a GitHub review.
+    // `SCSH_BIN` is process-global: without the lock this test's `exit 3` stub became the
+    // binary a concurrently running jobs/start or jobs/restart test spawned.
+    let _env = crate::runtime::test_env_lock();
     let dir = clean_repo("browser-review");
     let nonce = crate::runtime::random_nonce_6();
     let stub = std::env::temp_dir().join(format!("scsh-browser-review-{nonce}.sh"));
