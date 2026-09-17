@@ -5810,14 +5810,14 @@ mod tests {
     with_scsh_home(&home, || {
       let (status, page, _) = session_export_response("/job/jobdif/export.html", &store, None);
       assert_eq!(status, 200);
-      assert!(!page.contains(r#"proc-diff job-diff">"#), "no packed whole-job diff, no section");
+      assert!(!page.contains(r##"href="#diff-all""##), "no packed whole-job diff, no button");
       let dir = crate::runtime::session_diffs_dir("jobdif");
       std::fs::create_dir_all(&dir).unwrap();
       std::fs::write(dir.join("job.html"), "<html><body><p>whole job</p></body></html>").unwrap();
       let (status, page, _) = session_export_response("/job/jobdif/export.html", &store, None);
       assert_eq!(status, 200);
-      assert!(page.contains(r#"<details class="chamfer proc-diff job-diff">"#), "{page}");
-      assert!(page.contains("<p>whole job<\\/p>"), "the diff page rides in the srcdoc: {page}");
+      assert!(page.contains(r##"job-diff" href="#diff-all""##), "{page}");
+      assert!(page.contains("<p>whole job<\\/p>"), "the diff page rides in the DIFFS block: {page}");
     });
     let _ = std::fs::remove_dir_all(&home);
   }
@@ -5984,7 +5984,7 @@ mod tests {
     assert!(!page.contains("<script>alert(1)</script>"), "script payload must not go live");
     assert!(page.contains("<\\/iframe>"), "the payload's closing tags are JSON-escaped");
     assert!(page.contains("<\\/script>"), "the payload's </script> is JSON-escaped");
-    assert_eq!(page.matches("</script>").count(), 3, "only the graph, player, and recording script blocks close");
+    assert_eq!(page.matches("</script>").count(), 4, "only the graph, player, recording, and diff script blocks close");
     let _ = std::fs::remove_dir_all(&dir);
   }
 

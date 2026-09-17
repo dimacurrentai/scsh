@@ -1764,44 +1764,42 @@ fn offline_export_embeds_commits_diff_when_present() {
   let hostile = r#"<html><body></script><p>diff</p></body></html>"#;
   let exports = [CastExport::Note { text: "no recording".into(), diff_html: Some(hostile.into()) }];
   let html = session_export_page(&session, &exports, None, 100);
-  assert!(html.contains(r#"<span class="proc-diff""#), "summary carries static commits-diff chip");
-  assert!(html.contains(r#"<details class="chamfer proc-diff">"#), "body embeds the packed diff");
-  assert!(html.contains("srcdoc="), "diff rides in an iframe srcdoc");
   assert!(
-    html.contains(r#"sandbox="allow-scripts allow-same-origin""#),
-    "packdiff 0.9.1 needs scripts + same-origin for WASM/localStorage: {html}"
+    html.contains(r##"<a class="chamfer btn btn--purple btn--sm proc-diff" href="#diff-0""##),
+    "the summary row carries the live page's commits-diff button: {html}"
   );
-  assert!(html.contains("<\\/"), "hostile </ is broken for srcdoc like CASTS");
+  assert!(html.contains(r#"const DIFFS = {"0": "#), "the packed page rides in the DIFFS block: {html}");
+  assert!(!html.contains("srcdoc=\""), "no diff is parsed until it is opened — and then as the whole page");
+  assert!(html.contains("<\\/script><p>diff"), "a hostile </ is JSON-escaped inside the script block");
   assert!(!html.contains("</script><p>diff"), "raw </script> must not appear unescaped");
 }
 
 /// The live job page links the whole job's end-to-end commits diff (`/diff/<id>/all`);
-/// the snapshot embeds that page under the job meta, sandboxed like a step's diff, and
-/// omits the section when the run packed none.
+/// the snapshot carries that page and opens it the same way — the same button in the meta
+/// card, the diff as the entire page — and omits both when the run packed none.
 #[test]
 fn offline_export_embeds_the_whole_job_commits_diff() {
   let store = store_with_cast_proc(ProcStatus::Ok);
   let session = store.sessions.get("castab").unwrap();
   let html = session_export_page(session, &[], None, 100);
-  assert!(!html.contains(r#"proc-diff job-diff">"#), "no whole-job diff, no section: {html}");
+  assert!(!html.contains(r##"href="#diff-all""##), "no whole-job diff, no button: {html}");
+  assert!(html.contains("const DIFFS = {};"), "{html}");
 
   let hostile = r#"<html><body></script><p>all commits</p></body></html>"#;
   let html = session_export_page(session, &[], Some(hostile), 100);
-  let section = html
-    .split(r#"<details class="chamfer proc-diff job-diff">"#)
-    .nth(1)
-    .and_then(|s| s.split("</details>").next())
-    .expect("whole-job diff section");
-  assert!(section.starts_with("<summary>⇄ all commits"), "{section}");
-  assert!(section.contains(r#"sandbox="allow-scripts allow-same-origin" srcdoc=""#), "{section}");
-  assert!(section.contains("<\\/script>"), "hostile </ is broken for srcdoc: {section}");
+  let card = html.split(r#"<div class="chamfer card card--accent-left-purple">"#).nth(1).expect("meta card");
+  assert!(
+    card.starts_with(r##"<div class="session-actions"><a class="chamfer btn btn--purple btn--sm job-diff" href="#diff-all""##),
+    "the button sits in the meta card, where the live page has it: {card}"
+  );
+  assert!(html.contains(r#"const DIFFS = {"all": "#), "{html}");
+  assert!(html.contains("<\\/script><p>all commits"), "a hostile </ is JSON-escaped inside the script block");
   assert!(!html.contains("</script><p>all commits"), "raw </script> never appears unescaped");
-  let meta_at = html.find(r#"<dl class="session-meta">"#).unwrap();
-  let diff_at = html.find(r#"proc-diff job-diff">"#).unwrap();
-  let procs_at = html.find(r#"<div class="procs">"#).unwrap();
-  assert!(meta_at < diff_at && diff_at < procs_at, "the section sits under the meta, above the recordings");
+  // Back must work: the hash is the navigation, and the frame is not sandboxed away from it.
+  assert!(html.contains("window.addEventListener('hashchange', syncDiffPage);"), "{html}");
+  assert!(!html.contains("sandbox="), "a sandboxed frame cannot traverse the job page's history");
   let html = session_export_page(session, &[], Some(""), 100);
-  assert!(!html.contains(r#"proc-diff job-diff">"#), "an empty page is no diff");
+  assert!(!html.contains(r##"href="#diff-all""##), "an empty page is no diff");
 }
 
 #[test]

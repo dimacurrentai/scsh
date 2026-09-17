@@ -13,16 +13,15 @@
 //! small boot script mounts the players with the exact options the live page uses
 //! (`fit: 'both'`, idle compression, chapter markers, player-owned fullscreen,
 //! focus-on-open). Live-only machinery — WebSocket, Live toggle, reload, downloads,
-//! Force stop — simply is not there (and `LIVE_ONLY_CSS` is not inlined). The whole-job
-//! commits diff the live `⇄ all commits` button opens rides along the same way as the
-//! per-step diffs, in a sandboxed `srcdoc` iframe under the job meta. The boot
+//! Force stop — simply is not there (and `LIVE_ONLY_CSS` is not inlined). The commits
+//! diffs open the way the live page opens them — as the ENTIRE page, behind the same
+//! `⇄ all commits` / `⇄ commits diff` buttons — except that the packdiff pages ride inside
+//! the file (one JSON block, like the casts) and the "navigation" is a `#diff-<key>` hash:
+//! a full-viewport `srcdoc` frame takes the page over, and packdiff's own Back button (or
+//! the browser's) pops the hash and returns to the job. The boot
 //! scripts tolerate a copy re-saved from the browser ("Save as"), which serializes the
-//! live DOM: mounted players and graph state come back as inert markup and are reset
-//! before anything binds. Packed
-//! commits-diff pages (when present) ride as sandboxed
-//! `srcdoc` iframes (`allow-scripts allow-same-origin` so packdiff's in-page WASM comment
-//! engine and localStorage work — packdiff 0.9.1 document-first review) so the snapshot
-//! stays a single file. The note under the meta names the scsh version that prepared
+//! live DOM: mounted players, graph state, and an open diff come back as inert markup and
+//! are reset before anything binds. Everything stays a single file. The note under the meta names the scsh version that prepared
 //! the file and links it to the crate on crates.io.
 
 use super::escape::esc;
@@ -77,7 +76,14 @@ impl CastExport {
 const EXPORT_EXTRA_CSS: &str = r#"
   .snapshot-note { color: var(--text-muted); font-size: 0.85rem; margin: -8px 0 16px; }
   .snapshot-note + .snapshot-note { margin-top: -8px; }
-  details.job-diff { margin: 0 0 1rem; }
+  /* The live page's corner for the job buttons (its rule is live-only CSS). */
+  .session-actions { position: absolute; top: 0.7rem; right: 0.85rem; z-index: 2; margin: 0; }
+  .session-actions .job-diff { min-width: 10.5rem; box-sizing: border-box; height: 1.85rem; }
+  /* A commits diff takes the whole page over, like the live page's navigation to it. */
+  iframe.diff-page {
+    position: fixed; inset: 0; z-index: 3000; width: 100%; height: 100%;
+    border: 0; background: #fff;
+  }
   /* The live chip is a link to the annotator's job; offline it is a frozen status. */
   .cast-toolbar span.annotation-link { border: 1px solid var(--border); padding: 0.15rem 0.55rem; }
 "#;
@@ -126,7 +132,8 @@ pub(crate) fn session_export_page(
       their = if annotating == 1 { "its" } else { "their" },
     )
   };
-  let job_diff = job_diff_embed_html(job_diff);
+  let job_diff = job_diff.filter(|html| !html.is_empty());
+  let job_diff_btn = job_diff_btn_html(job_diff.is_some());
   let errors = super::report::report_section_html(session, ReportSection::Errors);
   let results = super::report::report_section_html(session, ReportSection::Results);
   let log = super::report::report_section_html(session, ReportSection::Log);
@@ -134,7 +141,11 @@ pub(crate) fn session_export_page(
   let mut fleet_sections = fleet_sections_by_anchor(session);
   let mut sections = String::new();
   let mut data_entries: Vec<String> = Vec::new();
+  let mut diff_entries: Vec<String> = job_diff.map(|html| format!("\"all\": {}", quote(html))).into_iter().collect();
   for (proc, export) in session.procs.iter().zip(exports) {
+    if let Some(html) = export.diff_html().filter(|html| !html.is_empty()) {
+      diff_entries.push(format!("\"{}\": {}", proc.index, quote(html)));
+    }
     sections.push_str(&proc_section(session, proc, export));
     if let Some(fleets) = fleet_sections.remove(&proc.index) {
       sections.push_str(&fleets);
@@ -151,8 +162,9 @@ pub(crate) fn session_export_page(
     }
   }
   // `</` never appears in the inline script: JSON strings escape it as `<\/`, so a hostile
-  // recording (a literal `</script>`) cannot terminate the block.
+  // recording or diff (a literal `</script>`) cannot terminate the block.
   let data = format!("[{}]", data_entries.join(",\n")).replace("</", "<\\/");
+  let diffs = format!("{{{}}}", diff_entries.join(",\n")).replace("</", "<\\/");
   format!(
     r#"<!DOCTYPE html>
 <html lang="en">
@@ -166,7 +178,7 @@ pub(crate) fn session_export_page(
 <body>
 <main class="page-shell">
 <p class="page-lede">{lede}</p>
-<div class="chamfer card card--accent-left-purple">
+<div class="chamfer card card--accent-left-purple">{job_diff_btn}
 <dl class="session-meta">
 <dt>Job</dt><dd><code>{id}</code></dd>
 <dt>Started</dt><dd>{when}</dd>
@@ -177,7 +189,7 @@ pub(crate) fn session_export_page(
 </dl>
 </div>
 <p class="snapshot-note">Offline snapshot prepared by {prepared_by} — everything below plays without a network.</p>
-{pending_note}{job_diff}{errors}{results}{workflow}{log}<div class="procs">
+{pending_note}{errors}{results}{workflow}{log}<div class="procs">
 {sections}</div>
 </main>
 <script>{workflow_view_js}
@@ -217,6 +229,48 @@ document.querySelectorAll('details.proc').forEach((det) => det.addEventListener(
   if (root) {{ try {{ root.focus({{ preventScroll: true }}); }} catch (_) {{}} }}
 }}));
 </script>
+<script>
+// The packed commits-diff pages, keyed `all` (the whole job) or by proc index. The live
+// page navigates to `/diff/<id>/<key>`; here the page is in the file, so `#diff-<key>` is
+// the navigation: the hash entry is what packdiff's Back button (`history.back()`) and
+// the browser's Back pop, and a reload lands on the same diff.
+const DIFFS = {diffs};
+const JOB_TITLE = document.title;
+function syncDiffPage() {{
+  const key = (location.hash.match(/^#diff-(\w+)$/) || [])[1];
+  const html = key !== undefined && Object.prototype.hasOwnProperty.call(DIFFS, key) ? DIFFS[key] : null;
+  let frame = document.querySelector('iframe.diff-page');
+  if (frame && (html === null || frame.dataset.diff !== key)) {{ frame.remove(); frame = null; }}
+  document.documentElement.style.overflow = html === null ? '' : 'hidden';
+  if (html === null) {{ document.title = JOB_TITLE; return; }}
+  if (frame) return;
+  frame = document.createElement('iframe');
+  frame.className = 'diff-page';
+  frame.dataset.diff = key;
+  // NOT sandboxed: a sandboxed frame may not traverse its parent's history, which is
+  // exactly what packdiff's Back does. The page is scsh's own packdiff output. A srcdoc
+  // document resolves `#fragment` against the PARENT's URL, which breaks packdiff's
+  // `history.replaceState('#…')`; the base keeps its fragments its own.
+  frame.srcdoc = html.replace('<head>', '<head><base href="about:srcdoc">');
+  frame.addEventListener('load', () => {{
+    try {{ document.title = frame.contentDocument.title || JOB_TITLE; }} catch (_) {{}}
+    try {{ frame.contentWindow.focus(); }} catch (_) {{}}
+  }});
+  // First in the body, so a re-saved copy parses the stale frame before this script.
+  document.body.prepend(frame);
+}}
+// A "Save as" copy taken with a diff open carries the frame as inert markup.
+document.querySelectorAll('iframe.diff-page').forEach((frame) => frame.remove());
+// Opened straight on a diff (a reload, a shared `#diff-all` link): put the job under it,
+// so Back has somewhere to return to.
+if (/^#diff-\w+$/.test(location.hash) && history.length === 1) {{
+  const hash = location.hash;
+  history.replaceState(null, '', location.pathname + location.search);
+  location.hash = hash;
+}}
+window.addEventListener('hashchange', syncDiffPage);
+syncDiffPage();
+</script>
 </body>
 </html>
 "#,
@@ -228,7 +282,8 @@ document.querySelectorAll('details.proc').forEach((det) => det.addEventListener(
     extra_css = EXPORT_EXTRA_CSS,
     prepared_by = prepared_by,
     pending_note = pending_note,
-    job_diff = job_diff,
+    job_diff_btn = job_diff_btn,
+    diffs = diffs,
     errors = errors,
     results = results,
     log = log,
@@ -257,41 +312,24 @@ fn snapshot_version_html() -> String {
   }
 }
 
-/// Escape packed-diff HTML for an iframe `srcdoc="…"` attribute: quote/amp for the
-/// attribute, and break `</` sequences the same way CASTS JSON does, so a hostile page
-/// cannot close the attribute or confuse surrounding markup.
-fn srcdoc_attr(html: &str) -> String {
-  html.replace('&', "&amp;").replace('"', "&quot;").replace("</", "<\\/")
-}
-
-fn diff_embed_html(diff_html: Option<&str>) -> String {
-  let Some(html) = diff_html.filter(|h| !h.is_empty()) else {
-    return String::new();
-  };
-  format!(
-    r#"<details class="chamfer proc-diff"><summary>⇄ commits diff</summary><iframe sandbox="allow-scripts allow-same-origin" srcdoc="{srcdoc}"></iframe></details>
-"#,
-    srcdoc = srcdoc_attr(html),
-  )
-}
-
 /// The whole job's end-to-end commits diff — every step's commits as one review page —
-/// under the job meta, where the live page's `⇄ all commits` button sits. Same sandboxed
-/// embedding as a step's diff; absent when the run packed none.
-fn job_diff_embed_html(diff_html: Option<&str>) -> String {
-  let Some(html) = diff_html.filter(|h| !h.is_empty()) else {
-    return String::new();
-  };
-  format!(
-    r#"<details class="chamfer proc-diff job-diff"><summary>⇄ all commits — the end-to-end diff this job brought into the branch</summary><iframe sandbox="allow-scripts allow-same-origin" srcdoc="{srcdoc}"></iframe></details>
-"#,
-    srcdoc = srcdoc_attr(html),
-  )
+/// behind the same button, in the same corner of the meta card, as the live page's
+/// `⇄ all commits`. Absent when the run packed none.
+fn job_diff_btn_html(has_diff: bool) -> String {
+  if has_diff {
+    r##"<div class="session-actions"><a class="chamfer btn btn--purple btn--sm job-diff" href="#diff-all" title="Browse the entire end-to-end commits diff"><span>⇄ all commits</span></a></div>"##.into()
+  } else {
+    String::new()
+  }
 }
 
-fn diff_chip_html(has_diff: bool) -> String {
+/// A step's commits diff: the live page's `⇄ commits diff` button, on the summary row.
+fn proc_diff_btn_html(proc: &ProcRecord, has_diff: bool) -> String {
   if has_diff {
-    r#"<span class="proc-diff" title="Commits diff embedded below">⇄ commits diff</span>"#.into()
+    format!(
+      r##"<a class="chamfer btn btn--purple btn--sm proc-diff" href="#diff-{idx}" title="Browse the commits this step brought into your branch — one self-contained review page"><span>⇄ commits diff</span></a>"##,
+      idx = proc.index,
+    )
   } else {
     String::new()
   }
@@ -303,7 +341,7 @@ fn diff_chip_html(has_diff: bool) -> String {
 fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> String {
   let note = proc.detail.as_deref().or(proc.note.as_deref()).unwrap_or("");
   let elapsed = proc_elapsed_phrase(proc, now_unix_secs());
-  let diff = export.diff_html();
+  let has_diff = export.diff_html().is_some_and(|html| !html.is_empty());
   let body = match export {
     CastExport::Cast { summary, chapters, annotation, .. } => {
       let summary_html = match summary.as_deref().filter(|s| !s.is_empty()) {
@@ -322,17 +360,16 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
       format!(
         "<div class=\"cast\" data-proc=\"{idx}\">\n{summary_html}<div class=\"cast-toolbar\">\
 <span class=\"cast-keys dim\">space · ←/→ seek · &lt;/&gt; speed{chapter_keys} · f fullscreen</span>{annotation_chip}</div>\n\
-<div class=\"cast-player\"></div>\n</div>\n{diff}",
+<div class=\"cast-player\"></div>\n</div>\n",
         idx = proc.index,
         chapter_keys = chapter_keys,
         annotation_chip = annotation_chip,
-        diff = diff_embed_html(diff),
       )
     }
     // Parity with the live page: no text-log body exists anywhere — the cast is the
     // output format — so an unrecorded proc exports as its note row alone.
     CastExport::Note { text, .. } => {
-      format!("<div class=\"detail dim\">{}</div>\n{}", esc(text), diff_embed_html(diff))
+      format!("<div class=\"detail dim\">{}</div>\n", esc(text))
     }
   };
   format!(
@@ -357,7 +394,7 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
     original_link = super::session::original_attempt_link_html(session, proc),
     elapsed = esc(&elapsed),
     note = esc(note),
-    diff_chip = diff_chip_html(diff.is_some()),
+    diff_chip = proc_diff_btn_html(proc, has_diff),
     meta = proc_meta_html(proc),
   )
 }
