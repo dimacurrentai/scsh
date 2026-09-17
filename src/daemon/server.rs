@@ -823,9 +823,9 @@ fn session_export_response_after_annotations(
 
 /// `GET /job/<id>/export.html` — EVERY recording of the job assembled into ONE
 /// self-contained offline HTML page, served as a download attachment named
-/// `scsh-job-<id>.html`. Each recording embeds as the exact per-cast export page
-/// ([`crate::export::render_page_from_texts`]) in an attribute-escaped `<iframe srcdoc>`
-/// — see [`html::session_export_page`] for the composition rationale. Procs with no cast
+/// `scsh-job-<id>.html`. The recordings ride as inline data and mount in one shared
+/// player bundle, and the packed commits diffs ride along the same way — see
+/// [`html::session_export_page`] for the composition rationale. Procs with no cast
 /// or no frames become note rows, never errors. `/session/…/export.html` remains accepted
 /// as a compatibility alias.
 fn session_export_response(
@@ -5899,9 +5899,6 @@ mod tests {
     assert!(body.contains("\"annotation_status\": \"ok\""), "completed annotation stays linked: {body}");
     let _ = std::fs::remove_dir_all(&dir);
   }
-
-  /// Every `srcdoc="…"` attribute value in the page. `esc` turns every embedded `"` into
-  /// `&quot;`, so the first literal quote after `srcdoc="` is the attribute terminator.
 
   #[test]
   fn session_export_assembles_every_recording_into_one_page() {

@@ -117,10 +117,10 @@ code or license rides in the browser UI). It has:
   (the same rendering `scsh export-cast` does, chapters sidecar folded in when present),
   named `<cast stem>.html`. Hidden until the recording has at least one complete frame —
   the export endpoint 404s on a frameless cast.
-- **⬇ session .html** — in the session-page header: downloads **the entire session as one
-  self-contained offline page** (`scsh-session-<id>.html`) — a summary header plus every
-  recording embedded as its own per-cast export page (annotated casts keep their summary
-  and chapters; procs without a recording become note rows). Every packed commits diff
+- **Job snapshot ⬇** — in the job-page header: downloads **the entire job as one
+  self-contained offline page** (`scsh-job-<id>.html`) — a replica of the job page with
+  every recording playing from inline data in one shared player (annotated casts keep
+  their summary and chapters; procs without a recording become note rows). Every packed commits diff
   rides along inside the file and opens as the entire page, behind the live page's own
   buttons (`⇄ commits diff` on a step's row, `⇄ all commits` in the job meta); the diff's
   Back button — or the browser's — returns to the job. Copies re-saved with the browser's
@@ -300,8 +300,9 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   download attachment named `<cast stem>.html`; 404 with an actionable body until the
   recording has at least one complete frame
 - `GET /job/{id}/export.html` — the ENTIRE job as one self-contained offline HTML
-  page: a summary header plus every recording embedded as its per-cast export page (iframe
-  `srcdoc` composition; procs without a recording become note rows). Served as a download
+  page: a replica of the job page with every recording playing from inline data in one
+  shared player, and every packed commits diff opening as the entire page (procs without
+  a recording become note rows). Served as a download
   attachment named `scsh-job-{id}.html`; 404 with an actionable body when the job
   has no exportable recording yet (`/session/{id}/export.html` still accepted)
 - `GET /diff/{session}/{proc}` — the packdiff-packed review page for the commits that step
