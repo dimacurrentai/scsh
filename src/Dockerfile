@@ -292,7 +292,7 @@ USER agent
 # cursor-agent --version (and npm installs above) scribble into $HOME as root; without the
 # chown, agent cannot mkdir $HOME/.cursor/projects for the workspace-trust marker.
 FROM scsh-base AS scsh-cursor
-ARG CURSOR_AGENT_VERSION=2026.07.09-c59fd9a
+ARG CURSOR_AGENT_VERSION=2026.09.15-d2fe57e
 ENV CURSOR_AGENT_HOME=/usr/local/share/cursor-agent
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \

@@ -684,8 +684,11 @@ pub fn harness_command(
       // SIGTERM (the bundle relaunches itself via `process.kill(-pid, "SIGTERM")`), and its
       // server config can also demand a minimum version and exit. Updating inside a
       // throwaway container built from a version-pinned image is meaningless anyway.
+      // `--force` auto-approves shell and edits. It does not approve MCP servers;
+      // `--approve-mcps` lets configured project and forwarded MCP servers load
+      // without an interactive approval prompt in the unattended container.
       let mut tui = format!(
-        "mkdir -p {trust_dir} && : > {trust_dir}/.workspace-trusted &&          cursor-agent --force --sandbox disabled --disable-auto-update"
+        "mkdir -p {trust_dir} && : > {trust_dir}/.workspace-trusted &&          cursor-agent --force --approve-mcps --sandbox disabled --disable-auto-update"
       );
       if let Some(m) = model {
         tui.push_str(" --model ");
@@ -2626,7 +2629,7 @@ TAG
   fn dockerfile_cursor_stage_points_cursor_home_into_repo_tmp() {
     let df = dockerfile();
     assert!(df.contains("FROM scsh-base AS scsh-cursor"));
-    assert!(df.contains("ARG CURSOR_AGENT_VERSION=2026.07.09-c59fd9a"));
+    assert!(df.contains("ARG CURSOR_AGENT_VERSION=2026.09.15-d2fe57e"));
     // claude is pinned for the same reason, plus one of its own: image rebuilds are keyed on
     // the Dockerfile TEXT, so an UNPINNED `npm install -g` would freeze whichever version was
     // latest the day the image was first built and never move again. Bumping the ARG is the
@@ -3105,8 +3108,11 @@ TAG
     assert!(cmd.contains("--disable-auto-update"), "got: {cmd}");
     // Interactive TUI via scsh-tui-record. Workspace trust is pre-seeded by creating
     // cursor's marker file in-container (no flag/config key exists), not by scraping.
-    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c none tmp/add_cursor.json "), "got: {cmd}");
-    assert!(cmd.contains("cursor-agent --force --sandbox disabled"), "got: {cmd}");
+    assert!(
+      cmd.contains("scsh-tui-record 200 50 double-ctrl-c none tmp/add_cursor.json "),
+      "Cursor completion must follow the configured result path, got: {cmd}"
+    );
+    assert!(cmd.contains("cursor-agent --force --approve-mcps --sandbox disabled"), "got: {cmd}");
     assert!(!cmd.contains("cursor-agent -p"), "got: {cmd}");
     assert!(!cmd.contains("--trust"), "got: {cmd}");
     assert!(cmd.contains(" --model composer-2.5-fast"));
@@ -3115,9 +3121,12 @@ TAG
     assert!(!cmd.contains("send-keys"), "got: {cmd}");
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(
-      cmd.contains("cursor-agent --force --sandbox disabled --disable-auto-update --model composer-2.5-fast -- "),
+      cmd.contains(
+        "cursor-agent --force --approve-mcps --sandbox disabled --disable-auto-update --model composer-2.5-fast -- "
+      ),
       "the Cursor prompt follows an option delimiter: {cmd}"
     );
+    assert!(!cmd.contains("cursor-usage.jsonl"), "Cursor must not require a project-specific hook: {cmd}");
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
     let bare = harness_command(
       Harness::Cursor,
@@ -3128,7 +3137,7 @@ TAG
       crate::config::Terminal::default(),
       &crate::config::SkillDelivery::Repo,
     );
-    assert!(bare.contains("cursor-agent --force --sandbox disabled"));
+    assert!(bare.contains("cursor-agent --force --approve-mcps --sandbox disabled"));
     assert!(!bare.contains(" --model "));
 
     let frontmatter = harness_command(
@@ -3141,7 +3150,8 @@ TAG
       &crate::config::SkillDelivery::DirectPrompt("---\nname: build\n---\nDo the work.".into()),
     );
     assert!(
-      frontmatter.contains("cursor-agent --force --sandbox disabled --disable-auto-update --model auto -- ")
+      frontmatter
+        .contains("cursor-agent --force --approve-mcps --sandbox disabled --disable-auto-update --model auto -- ")
         && frontmatter.contains("name: build"),
       "frontmatter must be positional, never parsed as an option: {frontmatter}"
     );
