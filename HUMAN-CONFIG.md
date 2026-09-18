@@ -51,6 +51,7 @@ login leaves behind, and precisely what `scsh` looks for.
 
 ## cursor-agent — Cursor CLI
 
+- **MCP servers:** `scsh` forwards the host's `mcp.json` alongside `cli-config.json` and runs Cursor with `--approve-mcps`, so configured MCP servers can load without an approval prompt. Project `.cursor/mcp.json` files travel with the committed repository. Configure server credentials and connectivity before starting a run; approval does not supply them.
 - **Install:** `curl https://cursor.com/install -fsS | bash` (the official Cursor Agent
   CLI installer; inside containers `scsh` fetches the same package from
   `downloads.cursor.com`).
