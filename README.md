@@ -139,7 +139,8 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
   [`DAEMON.md`](DAEMON.md)), pointed at the skill's `SKILL.md` — e.g. claude with
   `--permission-mode bypassPermissions` (host `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or
   `~/.claude/.credentials.json`), opencode via `opencode --prompt`, grok via its default Build TUI.
-- **`model`** *(optional)* — the model the harness passes to its tool.
+- **`model`** *(optional)* — the model the harness passes to its tool. Cursor defaults to
+  `cursor-grok-4.6-high-fast` (Grok 4.6 High Fast); an explicit model overrides it.
 - **`result`** *(required)* — a **repo-relative** path the skill must create (keep it
   under the gitignored `tmp/`). A missing result fails the skill. When it appears,
   `scsh` parses it as JSON and prints the message — a `result`/`message` field, or a

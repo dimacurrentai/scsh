@@ -670,6 +670,7 @@ pub fn harness_command(
       wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Auto, result, term)
     }
     Harness::Cursor => {
+      let model = Some(model.unwrap_or(crate::config::CURSOR_DEFAULT_MODEL));
       // Full interactive TUI (no -p): the recording shows the real cursor-agent screen.
       // The ephemeral container is the sandbox; --force auto-approves. cursor's `--trust`
       // is print-mode-only, and its TUI workspace-trust prompt has no flag or seedable
@@ -792,7 +793,7 @@ scsh-tui-record {cols} {rows} {quit} {submit} {result_q} {tui_q}; }} 2>&1 | tee 
 /// Cursor `--model` slugs use hyphen suffixes (`claude-opus-4-8-low`, `gpt-5.5-high`), not
 /// bracket overrides. composer-2.5 only exposes `composer-2.5` and `composer-2.5-fast`.
 fn cursor_model_with_effort(model: &str, effort: Option<&str>) -> String {
-  if model.contains('[') {
+  if model.contains('[') || model == crate::config::CURSOR_DEFAULT_MODEL {
     return model.to_string();
   }
   let Some(effort) = effort else {
@@ -3138,7 +3139,7 @@ TAG
       &crate::config::SkillDelivery::Repo,
     );
     assert!(bare.contains("cursor-agent --force --approve-mcps --sandbox disabled"));
-    assert!(!bare.contains(" --model "));
+    assert!(bare.contains(" --model cursor-grok-4.6-high-fast"));
 
     let frontmatter = harness_command(
       Harness::Cursor,
@@ -3159,6 +3160,10 @@ TAG
 
   #[test]
   fn cursor_model_with_effort_maps_to_cursor_agent_slugs() {
+    assert_eq!(
+      cursor_model_with_effort(crate::config::CURSOR_DEFAULT_MODEL, Some("high")),
+      "cursor-grok-4.6-high-fast"
+    );
     assert_eq!(cursor_model_with_effort("claude-opus-4-8[effort=low]", Some("high")), "claude-opus-4-8[effort=low]");
     assert_eq!(cursor_model_with_effort("composer-2.5", Some("high")), "composer-2.5-fast");
     assert_eq!(cursor_model_with_effort("composer-2.5", Some("low")), "composer-2.5");
