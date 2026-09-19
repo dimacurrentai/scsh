@@ -316,6 +316,16 @@ impl Client {
     }
   }
 
+  pub fn proc_usage(&self, proc_index: usize, usage: &crate::usage::Summary) {
+    let body = format!(
+      "{{ \"session\": {}, \"proc\": {}, \"usage\": {} }}",
+      quote(&self.inner.session_id),
+      proc_index,
+      usage.compact_json()
+    );
+    self.post("/api/v1/proc/usage", &body);
+  }
+
   pub fn proc_finish(
     &self, proc_index: usize, status: ProcStatus, fail_reason: Option<&str>, detail: Option<&str>, elapsed: f64,
   ) {

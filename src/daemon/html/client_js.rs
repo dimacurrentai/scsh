@@ -806,6 +806,38 @@ function procMetaHtml(p) {
   }
   return '';
 }
+function procUsageHtml(p) {
+  if (procIsLive(p.status) || !p.usage || !p.usage.TokenUsage) return '';
+  const u = p.usage.TokenUsage;
+  const t = u.tokens;
+  const compact = n => {
+    n = Number(n);
+    if (n < 1000) return String(n);
+    const units = n < 1e6 ? [n, 'k'] : n < 1e9 ? [Math.floor(n / 1e3), 'm'] : [Math.floor(n / 1e6), 'b'];
+    const whole = Math.floor(units[0] / 1000), tenth = Math.floor((units[0] % 1000) / 100);
+    return String(whole) + (whole < 10 && tenth > 0 ? '.' + tenth : '') + units[1];
+  };
+  const grouped = n => Number(n).toLocaleString('en-US');
+  const parts = [];
+  const details = [];
+  if (t) {
+    const total = Number(t.input) + Number(t.cache_read) + Number(t.cache_write || 0);
+    if (total > 0) parts.push(compact(total) + ' input tokens');
+    if (Number(t.output) > 0) parts.push(compact(t.output) + ' output tokens');
+    if (Number(t.cache_read) > 0) parts.push(compact(t.cache_read) + ' cached tokens');
+    if (Number(t.input) > 0) details.push('Uncached input: ' + grouped(t.input));
+    if (Number(t.cache_read) > 0) details.push('Cache read: ' + grouped(t.cache_read));
+    if (Number(t.cache_write) > 0) details.push('Cache write: ' + grouped(t.cache_write));
+    if (Number(t.output) > 0) details.push('Output: ' + grouped(t.output));
+  } else parts.push('tokens unavailable');
+  if (Number(u.llm_round_trips) > 0) details.push('Model calls: ' + grouped(u.llm_round_trips));
+  if (Number(u.tool_calls) > 0) details.push('Tool calls: ' + grouped(u.tool_calls));
+  if (Number(u.llm_round_trips) > 0) parts.push(String(u.llm_round_trips) + ' LLM call' + (Number(u.llm_round_trips) === 1 ? '' : 's'));
+  if (Number(u.tool_calls) > 0) parts.push(String(u.tool_calls) + ' tool call' + (Number(u.tool_calls) === 1 ? '' : 's'));
+  if (!u.complete) { parts.push('partial'); details.push('Partial accounting'); }
+  if (!parts.length) parts.push('No measured cost');
+  return '<div class="proc-usage dim" title="' + esc(details.join(' · ')) + '"><strong>cost</strong> ' + esc(parts.join(' · ')) + '</div>';
+}
 function procIsLive(status) {
   return status === 'running' || status === 'waiting';
 }
@@ -982,6 +1014,12 @@ function updateProcFields(det, p, nowUnix) {
   } else if (hasCast(p)) {
     ensureProcSnapshot(det, p);
   }
+  const usageBlock = det.querySelector('.proc-usage');
+  const usageHtml = procUsageHtml(p);
+  if (usageHtml) {
+    if (usageBlock) usageBlock.outerHTML = usageHtml;
+    else det.insertAdjacentHTML('beforeend', usageHtml);
+  } else if (usageBlock) usageBlock.remove();
   const metaBlock = det.querySelector('.proc-meta');
   const metaHtml = procMetaHtml(p);
   if (metaHtml) {
@@ -1362,7 +1400,7 @@ function procHtml(p, isOpen, nowUnix) {
     ' <span class="meta" data-proc-elapsed="' + esc(String(p.index)) + '">' + esc(elapsedText) + '</span>' + retryLinkHtml(session, p) + originalAttemptLinkHtml(session, p) + ' ' +
     '<span class="note dim">' + esc(p.note || '') + '</span></summary>';
   return summaryOpen + procMetaHtml(p) + '<div class="detail">' + esc(p.detail || '') + '</div>' +
-    container + body + '</details>';
+    container + body + procUsageHtml(p) + '</details>';
 }
 function workflowStepIdForProc(p) {
   const session = SESSION_ID && liveSessions ? liveSessions[SESSION_ID] : null;

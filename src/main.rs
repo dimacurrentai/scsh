@@ -26,6 +26,7 @@ mod sha1;
 mod sha256;
 mod stats;
 mod ui;
+mod usage;
 mod version;
 
 use std::path::{Path, PathBuf};
@@ -5631,6 +5632,7 @@ fn build_and_run(
         annotate_target: None,
         phase: None,
         phase_until: None,
+        usage: o.usage.clone(),
       });
     }
     let _ = fleet::write_rollups(&session_id, &fake_procs);
@@ -5850,6 +5852,8 @@ struct SkillRun {
   /// seconds), if the provider said. The retry loops wait for it instead of spending a backoff
   /// that could never reach it — see [`RetryDecision::LimitWait`].
   limit_resets_at: Option<u64>,
+  /// Normalized per-attempt spend for a supported harness, including unavailable accounting.
+  usage: Option<usage::Summary>,
 }
 
 impl SkillRun {
@@ -5870,6 +5874,7 @@ impl SkillRun {
       workflow_outputs: None,
       graceful_shutdown: false,
       limit_resets_at: None,
+      usage: None,
     }
   }
   fn ok(
@@ -5905,6 +5910,10 @@ impl SkillRun {
   /// scheduled for when the quota actually returns.
   fn with_limit_reset(mut self, resets_at: Option<u64>) -> SkillRun {
     self.limit_resets_at = resets_at;
+    self
+  }
+  fn with_usage(mut self, usage: Option<usage::Summary>) -> SkillRun {
+    self.usage = usage;
     self
   }
   fn invalid_result(
@@ -6350,8 +6359,16 @@ fn run_one_skill(
     if skill.harness == config::Harness::Codex && codex_auth_enabled() { forward_codex(&run_dir) } else { None };
   let grok_auth =
     if skill.harness == config::Harness::Grok && grok_auth_enabled() { forward_grok(&run_dir) } else { None };
-  let cursor_auth =
-    if skill.harness == config::Harness::Cursor && cursor_auth_enabled() { forward_cursor(&run_dir) } else { false };
+  let cursor_auth = if skill.harness == config::Harness::Cursor {
+    install_cursor_usage_hooks(&run_dir);
+    if cursor_auth_enabled() {
+      forward_cursor(&run_dir)
+    } else {
+      false
+    }
+  } else {
+    false
+  };
   let key_channel = if skill.harness == config::Harness::Claude {
     match HostKeyChannel::create(&run_dir) {
       Ok(channel) => Some(channel),
@@ -6528,6 +6545,7 @@ fn run_one_skill(
     c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
   }
   let result = spinner.run_watched(&run[0], &run[1..], timeout, Some(&watch), Some(&done));
+  let accounting_complete = matches!(&result, Ok((true, ui::screen::Killed::No, _)));
   // A terminal harness process and a completed task are related, but they are not identical.
   // The declared result file is the durable task boundary. Some interactive CLIs finish the
   // requested work, write that result, and then wedge or return a misleading status while their
@@ -6579,9 +6597,13 @@ fn run_one_skill(
   }
   // Run dirs are pruned shortly after the skill ends (on any outcome); keep the recording
   // and logs under $SCSH_HOME (default ~/.scsh) so session export survives throwaway clones.
-  let durable_cast = persist_run_artifacts(session_id, &run_dir, &skill.name, secs);
+  let (durable_cast, usage) =
+    persist_run_artifacts(session_id, &run_dir, &skill.name, skill.harness, secs, accounting_complete);
   if let (Some(c), Some(durable)) = (&daemon_client, &durable_cast) {
     c.proc_cast(spinner.index(), durable);
+  }
+  if let (Some(c), Some(u)) = (&daemon_client, &usage) {
+    c.proc_usage(spinner.index(), u);
   }
   // The run's own status-line capture, read out before the forwarded credentials (and the
   // capture beside them) are scrubbed. Also the last chance to learn when the account's limit
@@ -6634,7 +6656,8 @@ fn run_one_skill(
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::CONTAINER_TIMEOUT, Some(&detail));
       return SkillRun::failed(failure::reason::CONTAINER_TIMEOUT, Some(run_dir_str), Some(log), clone_dir)
-        .with_fail_detail(&why);
+        .with_fail_detail(&why)
+        .with_usage(usage);
     }
     Ok((false, ui::screen::Killed::Inactive, _)) => {
       // The recorded screen froze past the watchdog limit. Cleanup already ran above; retain
@@ -6644,7 +6667,8 @@ fn run_one_skill(
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::CONTAINER_INACTIVE, Some(&detail));
       return SkillRun::failed(failure::reason::CONTAINER_INACTIVE, Some(run_dir_str), Some(log), clone_dir)
-        .with_fail_detail(&why);
+        .with_fail_detail(&why)
+        .with_usage(usage);
     }
     Ok((false, ui::screen::Killed::LimitExhausted { resets_at }, _)) => {
       // The watch asks for the reset while parked; the harvest above reads the same capture one
@@ -6668,7 +6692,8 @@ fn run_one_skill(
       spinner.finish_fail(failure::reason::HARNESS_USAGE_LIMIT, Some(&detail));
       return SkillRun::failed(failure::reason::HARNESS_USAGE_LIMIT, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
-        .with_limit_reset(resets_at);
+        .with_limit_reset(resets_at)
+        .with_usage(usage);
     }
     Ok((false, ui::screen::Killed::StartupStalled { silent }, _)) => {
       // The launch phase stalled: nothing of value was in flight, so the retry loop above
@@ -6687,7 +6712,8 @@ fn run_one_skill(
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::STARTUP_STALLED, Some(&detail));
       return SkillRun::failed(failure::reason::STARTUP_STALLED, Some(run_dir_str), Some(log), clone_dir)
-        .with_fail_detail(&why);
+        .with_fail_detail(&why)
+        .with_usage(usage);
     }
     // Unreachable in practice: the completion watch fires only after confirming the result file,
     // so the recovery arm above has already turned this into a graceful success. Kept explicit
@@ -6699,7 +6725,8 @@ fn run_one_skill(
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::HARNESS_NONZERO, Some(&detail));
       return SkillRun::failed(failure::reason::HARNESS_NONZERO, Some(run_dir_str), Some(log), clone_dir)
-        .with_fail_detail(&why);
+        .with_fail_detail(&why)
+        .with_usage(usage);
     }
     Ok((false, ui::screen::Killed::No, last)) => {
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
@@ -6722,7 +6749,8 @@ fn run_one_skill(
         spinner.finish_fail(failure::reason::HARNESS_USAGE_LIMIT, Some(&detail));
         return SkillRun::failed(failure::reason::HARNESS_USAGE_LIMIT, Some(run_dir_str), Some(log), clone_dir)
           .with_fail_detail(&why)
-          .with_limit_reset(observed_reset_at);
+          .with_limit_reset(observed_reset_at)
+          .with_usage(usage);
       }
       let reason = if failure::harness_reported_overload(&sample) {
         failure::reason::HARNESS_OVERLOADED
@@ -6734,7 +6762,9 @@ fn run_one_skill(
         failure::reason::HARNESS_NONZERO
       };
       spinner.finish_fail(reason, Some(&detail));
-      return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir).with_fail_detail(&why);
+      return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir)
+        .with_fail_detail(&why)
+        .with_usage(usage);
     }
     Err(e) => {
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
@@ -6742,7 +6772,8 @@ fn run_one_skill(
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::CONTAINER_RUN, Some(&detail));
       return SkillRun::failed(failure::reason::CONTAINER_RUN, Some(run_dir_str), Some(log), clone_dir)
-        .with_fail_detail(&why);
+        .with_fail_detail(&why)
+        .with_usage(usage);
     }
   }
 
@@ -6757,7 +6788,8 @@ fn run_one_skill(
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
       return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
-        .with_fail_detail(&why);
+        .with_fail_detail(&why)
+        .with_usage(usage);
     }
   }
   match collect_skill_result(root, &run_dir, &skill.result, secs) {
@@ -6775,7 +6807,8 @@ fn run_one_skill(
           let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
           spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
           return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
-            .with_fail_detail(&why);
+            .with_fail_detail(&why)
+            .with_usage(usage);
         }
       };
       let workflow_outputs = match result_contract.map(|contract| extract_step_outputs(&content, contract)) {
@@ -6788,7 +6821,7 @@ fn run_one_skill(
           // The workflow owns one bounded correction attempt. Return the validation error so its
           // orchestrator can settle this attempt and register a fresh, explicitly linked proc.
           spinner.note("result schema invalid; preparing one correction retry…");
-          return SkillRun::invalid_result(error, run_dir_str, log, clone_dir, content);
+          return SkillRun::invalid_result(error, run_dir_str, log, clone_dir, content).with_usage(usage);
         }
         Some(Ok(outputs)) => Some(outputs),
         None => None,
@@ -6834,16 +6867,18 @@ fn run_one_skill(
       }
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, true);
       if graceful_shutdown_reason.is_some() {
-        SkillRun::graceful(log, clone_dir, Some(content), workflow_outputs)
+        SkillRun::graceful(log, clone_dir, Some(content), workflow_outputs).with_usage(usage)
       } else {
-        SkillRun::ok(log, clone_dir, Some(content), workflow_outputs)
+        SkillRun::ok(log, clone_dir, Some(content), workflow_outputs).with_usage(usage)
       }
     }
     Err(e) => {
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let detail = skill_fail_detail(&e, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
-      SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir).with_fail_detail(&e)
+      SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
+        .with_fail_detail(&e)
+        .with_usage(usage)
     }
   }
 }
@@ -6862,8 +6897,12 @@ fn run_one_skill(
 ///
 /// The timestamp alone is not unique (every skill in one `scsh run` shares `epoch_secs`), so
 /// the random nonce prevents same-second runs from overwriting each other. Returns the durable
-/// cast path (for the session browser) when a recording was copied.
-fn persist_run_artifacts(session_id: &str, run_dir: &Path, skill_name: &str, epoch_secs: u64) -> Option<String> {
+/// cast path (for the session browser) when a recording was copied, plus any native usage
+/// summary harvested from Claude Code, Codex, or Cursor's local records.
+fn persist_run_artifacts(
+  session_id: &str, run_dir: &Path, skill_name: &str, harness: config::Harness, epoch_secs: u64,
+  accounting_complete: bool,
+) -> (Option<String>, Option<usage::Summary>) {
   let stem = format!("{skill_name}-{}-utc-{}", runtime::format_utc_timestamp(epoch_secs), runtime::random_nonce_6());
 
   // Logs: kept for every run (including failures, when they matter most). RUN_LOG_REL is the
@@ -6876,6 +6915,7 @@ fn persist_run_artifacts(session_id: &str, run_dir: &Path, skill_name: &str, epo
       (format!("{}.last", runtime::RUN_LOG_REL), "last.log"),
       (format!("{}.exit", runtime::RUN_LOG_REL), "exit"),
       (format!("{}.tuidebug", runtime::RUN_LOG_REL), "tuidebug"),
+      (format!("{}.cursor-hooks.jsonl", runtime::RUN_LOG_REL), "cursor-hooks.jsonl"),
     ] {
       let src = run_dir.join(&rel);
       if src.is_file() {
@@ -6884,17 +6924,39 @@ fn persist_run_artifacts(session_id: &str, run_dir: &Path, skill_name: &str, epo
     }
   }
 
+  let usage = daemon::usage::from_run_dir(harness, run_dir).map(|mut summary| {
+    summary.complete &= accounting_complete;
+    persist_usage(session_id, skill_name, &stem, &logs_dir, &summary);
+    summary
+  });
+
   // Cast: returned so the daemon can serve/replay/export it after the run dir (and any
   // throwaway caller clone) is gone.
   let cast_src = run_dir.join(runtime::RUN_CAST_REL);
   if !cast_src.is_file() {
-    return None;
+    return (None, usage);
   }
   let casts_dir = runtime::session_casts_dir(session_id);
-  std::fs::create_dir_all(&casts_dir).ok()?;
+  if std::fs::create_dir_all(&casts_dir).is_err() {
+    return (None, usage);
+  }
   let dest = casts_dir.join(format!("{stem}.cast"));
-  std::fs::copy(&cast_src, &dest).ok()?;
-  Some(dest.to_string_lossy().into_owned())
+  if std::fs::copy(&cast_src, &dest).is_err() {
+    return (None, usage);
+  }
+  (Some(dest.to_string_lossy().into_owned()), usage)
+}
+
+/// Normalize the harness's local accounting records into one durable, caller-facing schema.
+fn persist_usage(session_id: &str, skill_name: &str, stem: &str, logs_dir: &Path, summary: &usage::Summary) {
+  if std::fs::create_dir_all(logs_dir).is_ok() {
+    let _ = std::fs::write(logs_dir.join(format!("{stem}.usage.json")), summary.to_json());
+  }
+  let results_dir = runtime::session_results_dir(session_id);
+  if std::fs::create_dir_all(&results_dir).is_ok() {
+    let safe = skill_name.replace('/', "_");
+    let _ = std::fs::write(results_dir.join(format!("{safe}.usage.json")), summary.to_json());
+  }
 }
 
 /// Recreate a skill's result file from a cached `content` (creating parent dirs), so a
@@ -7595,6 +7657,26 @@ fn scrub_grok_credentials(grok_dir: &Path) {
   for name in ["auth.json", "config.toml", "user-settings.json"] {
     let _ = std::fs::remove_file(grok_dir.join(name));
   }
+}
+
+/// Install the user-level Cursor usage hook into the forwarded config home — never into
+/// the skill repo. Same shape as Claude's status-line capture: scsh-owned, best-effort.
+fn install_cursor_usage_hooks(run_dir: &Path) {
+  let dest = run_dir.join(runtime::CURSOR_FORWARD_REL);
+  if std::fs::create_dir_all(&dest).is_err() {
+    return;
+  }
+  let script = dest.join("scsh-cursor-usage.py");
+  if std::fs::write(&script, usage::CURSOR_HOOK_PY).is_err() {
+    return;
+  }
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
+  }
+  let in_container = format!("{}/scsh-cursor-usage.py", runtime::cursor_config_dir_in_container());
+  let _ = std::fs::write(dest.join("hooks.json"), usage::hooks_json(&in_container));
 }
 
 /// Copy the host's Cursor config and OAuth tokens into the run clone's gitignored tmp/.
@@ -10496,13 +10578,17 @@ fn print_help_internals() {
   Cursor skills copy the host ~/.cursor/cli-config.json and optional mcp.json into tmp/.cursor,
   OAuth tokens from ~/.config/cursor/auth.json or the macOS login keychain into tmp/.config/cursor/auth.json,
   CURSOR_API_KEY is forwarded when set, and credentials are scrubbed after exit (opt out: SCSH_NO_CURSOR_AUTH=1). Cursor is
-  the native harness for Cursor Agent models (Composer, etc.).
+  the native harness for Cursor Agent models (Composer, etc.). With no model configured,
+  Cursor uses cursor-grok-4.6-high-fast; its interactive TUI is recorded with asciinema.
+  Claude Code, Codex, and Cursor token usage is collected after each attempt and displayed
+  below its completed recording. External callers get the same versioned TokenUsage schema
+  through session JSON, fleet routes, and results/<invocation>.usage.json. Unavailable counters are null.
   Every skill can use the container's GitHub CLI with the host's existing login: scsh copies
   the host gh hosts.yml into tmp/.config/gh, or forwards GH_TOKEN/GITHUB_TOKEN, then scrubs it
   after exit (opt out: SCSH_NO_GH_AUTH=1).
   Harness runs at full verbosity (OpenCode DEBUG + --print-logs; Claude --verbose --debug;
   Codex RUST_LOG tracing + its final message appended to the log; Grok --debug + its debug
-  log appended; Cursor --output-format stream-json);
+  log appended; Cursor interactive TUI recorded via tmux + asciinema);
   every line is teed to tmp/scsh-run.log and the session browser daemon (opt out: SCSH_QUIET=1).
   A transient infra failure (timeout, provider overload, container/clone error) is retried once on a fresh
   clone (opt out: SCSH_NO_RETRY=1); failures land in `scsh failures` with stable reason codes.
@@ -11320,11 +11406,9 @@ mod tests {
     // Pin SCSH_HOME so the durable dirs land under our temp tree (not the developer's ~/.scsh).
     let prev = std::env::var_os("SCSH_HOME");
     std::env::set_var("SCSH_HOME", &home);
-    let cast = persist_run_artifacts("sessab", &run_dir, "add", 1_700_000_000).unwrap();
-    match prev {
-      Some(v) => std::env::set_var("SCSH_HOME", v),
-      None => std::env::remove_var("SCSH_HOME"),
-    }
+    let (cast, usage) = persist_run_artifacts("sessab", &run_dir, "add", config::Harness::Cursor, 1_700_000_000, true);
+    let cast = cast.expect("cast");
+    assert_eq!(usage.expect("every supported harness attempt has a usage record").tokens, None);
 
     // Everything a session produces lives under ITS OWN id: sessions/<id>/{casts,logs}.
     let casts_dir = home.join("sessions").join("sessab").join("casts");
@@ -11335,6 +11419,26 @@ mod tests {
     let logs = home.join("sessions").join("sessab").join("logs");
     assert_eq!(std::fs::read_to_string(logs.join(format!("{stem}.log"))).unwrap(), "log-bytes");
     assert_eq!(std::fs::read_to_string(logs.join(format!("{stem}.debug.log"))).unwrap(), "debug-bytes");
+
+    std::fs::write(
+      run_dir.join(format!("{}.cursor-hooks.jsonl", runtime::RUN_LOG_REL)),
+      r#"{"hook_event_name":"stop","conversation_id":"c","generation_id":"g1","status":"completed","input_tokens":12,"output_tokens":3,"cache_read_tokens":4,"cache_write_tokens":0}
+"#,
+    )
+    .unwrap();
+    let (cast2, usage) =
+      persist_run_artifacts("sessab", &run_dir, "add", config::Harness::Cursor, 1_700_000_001, false);
+    assert!(cast2.is_some());
+    let usage = usage.expect("Cursor hook stream must produce a summary");
+    assert!(!usage.complete, "an interrupted run retains counters but cannot promise final usage");
+    assert_eq!(usage.llm_round_trips, Some(1));
+    assert_eq!(usage.tokens.as_ref().map(|t| t.input), Some(8));
+    let usage_path = runtime::session_results_dir("sessab").join("add.usage.json");
+    assert!(std::fs::read_to_string(&usage_path).unwrap().contains("\"llm_round_trips\": 1"), "{usage_path:?}");
+    match prev {
+      Some(v) => std::env::set_var("SCSH_HOME", v),
+      None => std::env::remove_var("SCSH_HOME"),
+    }
     let _ = std::fs::remove_dir_all(&base);
   }
 

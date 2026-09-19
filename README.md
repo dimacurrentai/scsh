@@ -141,6 +141,9 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
   `~/.claude/.credentials.json`), opencode via `opencode --prompt`, grok via its default Build TUI.
 - **`model`** *(optional)* — the model the harness passes to its tool. Cursor defaults to
   `cursor-grok-4.6-high-fast` (Grok 4.6 High Fast); an explicit model overrides it.
+  Every Claude Code, Codex, and Cursor attempt normalizes its native token counters into
+  one strict schema, shown below the finished recording and stored beside the result.
+  See [harness usage accounting](HARNESS-USAGE.md).
 - **`result`** *(required)* — a **repo-relative** path the skill must create (keep it
   under the gitignored `tmp/`). A missing result fails the skill. When it appears,
   `scsh` parses it as JSON and prints the message — a `result`/`message` field, or a

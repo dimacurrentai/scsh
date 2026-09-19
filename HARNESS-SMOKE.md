@@ -48,6 +48,14 @@ these harnesses.
    - **Predict:** one fresh `<route>-<YYYYMMDD-HHMMSS>-utc-<nonce>.cast` per succeeded route
      (real interactive TUI; replay with `asciinema play <file>` or the session browser).
 
+7. **Harness usage.** Each Claude Code, Codex, and Cursor route has a matching
+   `~/.scsh/sessions/*/results/<route>.usage.json`.
+   - **Predict:** the strict `TokenUsage` document identifies the harness and source,
+     then reports uncached input, output, cache-read, and cache-write tokens. The same
+     small line appears below the finished recording in the session browser. A route
+     that stopped before its harness emitted accounting says `tokens: null` and
+     `complete: false`; it never invents zero spend.
+
 ## One-command runner
 
 ```sh

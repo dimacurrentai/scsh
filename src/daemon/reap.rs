@@ -177,6 +177,7 @@ mod tests {
         started_at: Some(1),
         elapsed: None,
         lines: vec![],
+        usage: None,
       }],
       workflow: None,
       parent_session: None,
