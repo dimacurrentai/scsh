@@ -22,12 +22,23 @@ from pathlib import Path
 
 try:
     event = json.load(sys.stdin)
+    # Bind this event to the result revision already present when the hook runs.
+    # A later sessionEnd append must not revive an old completed stop.
+    event.pop("scsh_result_revision", None)
+    result = os.environ.get("SCSH_RESULT")
+    if result:
+        try:
+            stat = Path(result).stat()
+            event["scsh_result_revision"] = f"{stat.st_mtime_ns}:{stat.st_size}"
+        except OSError:
+            pass
     path = os.environ.get("SCSH_CURSOR_HOOKS_LOG") or str(Path(__file__).with_name("scsh-cursor-hooks.jsonl"))
     os.umask(0o077)
     with open(path, "a") as log:
         fcntl.flock(log, fcntl.LOCK_EX)
         log.write(json.dumps(event, separators=(",", ":")) + "\n")
         log.flush()
+        os.fsync(log.fileno())
 except Exception:
     pass  # Accounting must never interrupt the agent loop.
 print("{}")
@@ -293,6 +304,8 @@ fn tokens_json(tokens: Option<&Tokens>) -> Value {
 #[derive(Default)]
 struct Conversation {
   generations: BTreeSet<String>,
+  /// Most recent working generation; a delayed stop from an older one cannot finish it.
+  active_generation: Option<String>,
   responses: u64,
   tools: BTreeSet<String>,
   missing_tool_id: bool,
@@ -321,6 +334,9 @@ pub fn cursor_hook_summary(stream: &str) -> Summary {
     if matches!(event_name, "afterAgentResponse" | "stop" | "postToolUse") {
       if let Some(generation) = string(&event, "generation_id") {
         conversation.generations.insert(generation.to_string());
+        if event_name != "stop" {
+          conversation.active_generation = Some(generation.to_string());
+        }
       }
     }
     match event_name {
@@ -330,13 +346,21 @@ pub fn cursor_hook_summary(stream: &str) -> Summary {
         conversation.tokens = hook_tokens(&event);
       }
       "stop" => {
-        conversation.stopped = string(&event, "status").is_none_or(|s| s == "completed");
+        if conversation
+          .active_generation
+          .as_deref()
+          .is_some_and(|active| string(&event, "generation_id") != Some(active))
+        {
+          continue;
+        }
+        conversation.stopped = string(&event, "status") == Some("completed");
         conversation.tokens = hook_tokens(&event);
       }
       "sessionEnd" => {
-        conversation.stopped |= string(&event, "reason").is_none_or(|s| s == "completed");
+        // Session teardown cannot turn an aborted generation into a completed turn.
       }
       "postToolUse" => {
+        conversation.stopped = false;
         if let Some(tool) = string(&event, "tool_use_id").or_else(|| string(&event, "call_id")) {
           conversation.tools.insert(tool.to_string());
         } else {
@@ -376,8 +400,48 @@ pub fn cursor_hook_summary(stream: &str) -> Summary {
   }
 }
 
+/// File freshness alone is insufficient: unrelated hooks may append after an old stop.
+pub(crate) fn cursor_stop_matches_result(stream: &str, revision: &str) -> bool {
+  stream
+    .lines()
+    .rev()
+    .filter_map(|line| json::parse(line).ok())
+    .find(|event| hook_name(event) == Some("stop"))
+    .is_some_and(|event| string(&event, "scsh_result_revision") == Some(revision))
+}
+
 pub(crate) fn unavailable(harness: Harness) -> Summary {
   Summary { harness, complete: false, tokens: None, llm_round_trips: None, tool_calls: None }
+}
+
+/// Native turn boundaries, separate from token snapshots: a tool-call response or
+/// cumulative counter alone does not mean the agent has finished its last turn.
+pub(crate) fn turn_finished(harness: crate::config::Harness, stream: &str) -> bool {
+  let mut finished = false;
+  for line in stream.lines().filter(|line| !line.trim().is_empty()) {
+    let Ok(event) = json::parse(line) else { return false };
+    match harness {
+      crate::config::Harness::Claude => match string(&event, "type") {
+        Some("user") => finished = false,
+        Some("system") if string(&event, "subtype") == Some("turn_duration") => finished = true,
+        Some("assistant") => {
+          finished = field(&event, "message").and_then(|m| string(m, "stop_reason")) == Some("end_turn");
+        }
+        _ => {}
+      },
+      crate::config::Harness::Codex => {
+        if let Some(payload) = field(&event, "payload") {
+          match string(payload, "type") {
+            Some("task_started") => finished = false,
+            Some("task_complete") => finished = true,
+            _ => {}
+          }
+        }
+      }
+      _ => return false,
+    }
+  }
+  finished
 }
 
 /// Claude Code records one `usage` object per assistant response. The forwarded config
@@ -891,5 +955,77 @@ mod tests {
     let indexes: BTreeSet<_> = text.lines().map(|line| count(&json::parse(line).unwrap(), "index").unwrap()).collect();
     assert_eq!(indexes.len(), 8);
     std::fs::remove_dir_all(root).unwrap();
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn cursor_hook_only_records_events_and_never_authorizes_shutdown() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let root = std::env::temp_dir().join(format!("scsh-hook-ready-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&root).unwrap();
+    let log = root.join("hooks.jsonl");
+    let ready = root.join("usage-ready");
+    let result = root.join("result.json");
+    std::fs::write(&result, "{}").unwrap();
+    let run = |payload: &str| {
+      let mut child = Command::new("python3")
+        .args(["-c", CURSOR_HOOK_PY])
+        .env("SCSH_CURSOR_HOOKS_LOG", &log)
+        .env("SCSH_CURSOR_USAGE_READY", &ready)
+        .env("SCSH_RESULT", &result)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+      child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+      assert!(child.wait_with_output().unwrap().status.success());
+    };
+    run(
+      r#"{"hook_event_name":"stop","status":"completed","input_tokens":null,"output_tokens":2,"cache_read_tokens":3,"cache_write_tokens":0}"#,
+    );
+    assert!(!ready.exists(), "incomplete counters must not release teardown");
+    run(
+      r#"{"hook_event_name":"stop","status":"completed","input_tokens":10,"output_tokens":2,"cache_read_tokens":3,"cache_write_tokens":0}"#,
+    );
+    assert!(!ready.exists(), "hooks must never publish a sticky readiness marker");
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(text.lines().count(), 2);
+    let nanos =
+      std::fs::metadata(&result).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    assert!(cursor_stop_matches_result(&text, &format!("{nanos}:2")));
+    assert!(!cursor_stop_matches_result(&text, "another-revision"));
+    let appended = format!(r#"{text}{{"hook_event_name":"sessionEnd","status":"completed"}}"#);
+    assert!(!cursor_stop_matches_result(&appended, "another-revision"));
+    std::fs::remove_dir_all(root).unwrap();
+  }
+
+  #[test]
+  fn resumed_cursor_work_invalidates_a_previous_completed_stop() {
+    let text = format!(
+      r#"{HOOKS}{{"hook_event_name":"postToolUse","conversation_id":"c","generation_id":"g4","tool_use_id":"t4"}}
+{{"hook_event_name":"sessionEnd","conversation_id":"c","reason":"completed"}}
+"#
+    );
+    assert!(!cursor_hook_summary(&text).complete);
+    let stale_stop = format!(
+      r#"{text}{{"hook_event_name":"stop","conversation_id":"c","generation_id":"g3","status":"completed","input_tokens":10,"output_tokens":2,"cache_read_tokens":0,"cache_write_tokens":0}}"#
+    );
+    assert!(!cursor_hook_summary(&stale_stop).complete, "an old generation's late stop cannot finish new work");
+  }
+
+  #[test]
+  fn native_turn_boundaries_reject_resumed_work() {
+    let claude = r#"{"type":"assistant","message":{"stop_reason":"end_turn"}}
+"#;
+    assert!(turn_finished(crate::config::Harness::Claude, claude));
+    assert!(!turn_finished(crate::config::Harness::Claude, &format!("{claude}{{\"type\":\"user\"}}")));
+    let codex = r#"{"type":"event_msg","payload":{"type":"task_complete"}}
+"#;
+    assert!(turn_finished(crate::config::Harness::Codex, codex));
+    assert!(!turn_finished(
+      crate::config::Harness::Codex,
+      &format!("{codex}{{\"payload\":{{\"type\":\"task_started\"}}}}")
+    ));
   }
 }

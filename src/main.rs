@@ -6528,6 +6528,14 @@ fn run_one_skill(
   // Observed live: a `fix` step wrote its result and wedged, burning its full widened 3600s
   // window twice over before dying red and costing the job a supervisor retry.
   let done = ui::screen::DoneWatch {
+    settling: Some({
+      let state = std::sync::Mutex::new(daemon::usage::Completion::new());
+      let dir = run_dir.clone();
+      let result = dir.join(&skill.result);
+      let harness = skill.harness;
+      let required = usage_accounting_required();
+      Box::new(move || state.lock().unwrap().poll(harness, &dir, &result, required))
+    }),
     file: run_dir.join(&skill.result),
     quiet_for: Duration::from_secs(RESULT_QUIESCENCE_SECS),
     confirm: {
@@ -6644,6 +6652,29 @@ fn run_one_skill(
     }
     other => other,
   };
+  let usage_failure = if usage_accounting_required()
+    && matches!(&result, Ok((true, _, _)))
+    && (run_dir.join(format!("{}.usage-error", runtime::RUN_LOG_REL)).is_file()
+      || usage.as_ref().is_none_or(|summary| !summary.complete || summary.tokens.is_none()))
+  {
+    let marker = run_dir.join(format!("{}.usage-error", runtime::RUN_LOG_REL));
+    let marker_detail = std::fs::read_to_string(&marker).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let timed_out = marker_detail.as_deref().is_some_and(|detail| detail.starts_with("timeout:"));
+    let reason =
+      if timed_out { failure::reason::USAGE_ACCOUNTING_TIMEOUT } else { failure::reason::USAGE_ACCOUNTING_UNAVAILABLE };
+    let why = marker_detail.unwrap_or_else(|| {
+      format!("{} finished the task but did not produce complete token accounting", skill.harness.as_str())
+    });
+    Some((reason, why))
+  } else {
+    None
+  };
+  if let Some((reason, why)) = usage_failure {
+    schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
+    let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
+    spinner.finish_fail(reason, Some(&detail));
+    return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir).with_fail_detail(&why).with_usage(usage);
+  }
   match result {
     Ok((true, _, _)) => {
       if let Some(durable) = durable_cast.as_deref() {
@@ -6916,6 +6947,7 @@ fn persist_run_artifacts(
       (format!("{}.exit", runtime::RUN_LOG_REL), "exit"),
       (format!("{}.tuidebug", runtime::RUN_LOG_REL), "tuidebug"),
       (format!("{}.cursor-hooks.jsonl", runtime::RUN_LOG_REL), "cursor-hooks.jsonl"),
+      (format!("{}.usage-error", runtime::RUN_LOG_REL), "usage-error"),
     ] {
       let src = run_dir.join(&rel);
       if src.is_file() {
@@ -6924,8 +6956,13 @@ fn persist_run_artifacts(
     }
   }
 
-  let usage = daemon::usage::from_run_dir(harness, run_dir).map(|mut summary| {
-    summary.complete &= accounting_complete;
+  let final_usage = std::fs::read_to_string(run_dir.join(format!("{}.usage-final", runtime::RUN_LOG_REL)))
+    .ok()
+    .and_then(|text| usage::Summary::from_json(&text));
+  let finalized = final_usage.is_some();
+  let usage = final_usage.or_else(|| daemon::usage::from_run_dir(harness, run_dir)).map(|mut summary| {
+    // Only the host's validated terminal snapshot survives a forced teardown as complete.
+    summary.complete &= finalized || accounting_complete;
     persist_usage(session_id, skill_name, &stem, &logs_dir, &summary);
     summary
   });
@@ -7345,6 +7382,13 @@ fn materialize_branches(run_dir: &std::path::Path) {
 /// Whether scsh forwards Claude credentials into runs (on unless opted out).
 fn claude_auth_enabled() -> bool {
   !matches!(std::env::var("SCSH_NO_CLAUDE_AUTH").ok().as_deref(), Some("1") | Some("true"))
+}
+
+/// Native counters are part of a successful harness run unless the caller explicitly
+/// chooses the lower-latency path. Keep this host-side decision separate from harness verbosity:
+/// quiet output must never mean missing accounting.
+fn usage_accounting_required() -> bool {
+  !matches!(std::env::var("SCSH_NO_USAGE").ok().as_deref(), Some("1") | Some("true"))
 }
 
 /// Whether scsh forwards opencode credentials into runs (on unless opted out).
@@ -10383,6 +10427,10 @@ the run fails only when every selected skill is skipped.",
     "Override git-daemon host IP inside the container (default: ip route gateway).",
   );
   help_row("SCSH_KEEP_RUNS=1", "Keep every /tmp/scsh-*-run-* clone (also skips stale sweep).");
+  help_row(
+    "SCSH_NO_USAGE=1",
+    "Skip required native token accounting and its bounded completion wait for every harness.",
+  );
   help_row("SCSH_NO_OPENCODE_AUTH=1", "Do not forward opencode credentials into containers.");
   help_row("SCSH_NO_CLAUDE_AUTH=1", "Do not forward Claude credentials into containers.");
   help_row("SCSH_NO_CURSOR_AUTH=1", "Do not forward Cursor credentials into containers.");
@@ -10580,9 +10628,14 @@ fn print_help_internals() {
   CURSOR_API_KEY is forwarded when set, and credentials are scrubbed after exit (opt out: SCSH_NO_CURSOR_AUTH=1). Cursor is
   the native harness for Cursor Agent models (Composer, etc.). With no model configured,
   Cursor uses cursor-grok-4.6-high-fast; its interactive TUI is recorded with asciinema.
-  Claude Code, Codex, and Cursor token usage is collected after each attempt and displayed
-  below its completed recording. External callers get the same versioned TokenUsage schema
-  through session JSON, fleet routes, and results/<invocation>.usage.json. Unavailable counters are null.
+  Token usage is required for every successful agent attempt and displayed
+  below its completed recording. Every harness gets a bounded accounting phase before
+  teardown; ordinary watchdogs yield for up to 30 seconds while counters finish. Missing or
+  timed-out counters fail with a dedicated accounting reason. Grok and OpenCode currently
+  have no accounting adapter and require the explicit opt-out.
+  SCSH_NO_USAGE=1 selects the lower-latency path that permits unavailable counters. External
+  callers get the same versioned TokenUsage schema through session JSON, fleet routes, and
+  results/<invocation>.usage.json.
   Every skill can use the container's GitHub CLI with the host's existing login: scsh copies
   the host gh hosts.yml into tmp/.config/gh, or forwards GH_TOKEN/GITHUB_TOKEN, then scrubs it
   after exit (opt out: SCSH_NO_GH_AUTH=1).
@@ -11430,11 +11483,18 @@ mod tests {
       persist_run_artifacts("sessab", &run_dir, "add", config::Harness::Cursor, 1_700_000_001, false);
     assert!(cast2.is_some());
     let usage = usage.expect("Cursor hook stream must produce a summary");
-    assert!(!usage.complete, "an interrupted run retains counters but cannot promise final usage");
+    assert!(!usage.complete, "an interrupted run without a finalized snapshot is incomplete");
     assert_eq!(usage.llm_round_trips, Some(1));
     assert_eq!(usage.tokens.as_ref().map(|t| t.input), Some(8));
     let usage_path = runtime::session_results_dir("sessab").join("add.usage.json");
     assert!(std::fs::read_to_string(&usage_path).unwrap().contains("\"llm_round_trips\": 1"), "{usage_path:?}");
+    let mut finalized = usage;
+    finalized.complete = true;
+    std::fs::write(run_dir.join(format!("{}.usage-final", runtime::RUN_LOG_REL)), finalized.to_json()).unwrap();
+    std::fs::write(run_dir.join(format!("{}.cursor-hooks.jsonl", runtime::RUN_LOG_REL)), "malformed teardown").unwrap();
+    let (_, recovered) =
+      persist_run_artifacts("sessab", &run_dir, "add", config::Harness::Cursor, 1_700_000_002, false);
+    assert_eq!(recovered, Some(finalized), "teardown cannot overwrite the finalized counters");
     match prev {
       Some(v) => std::env::set_var("SCSH_HOME", v),
       None => std::env::remove_var("SCSH_HOME"),

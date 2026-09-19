@@ -353,6 +353,9 @@ fn read_line_tail<R: BufRead>(reader: &mut R, max_bytes: usize) -> std::io::Resu
 /// collection path — copy out, validate against the workflow schema, bounded correction retry —
 /// stays authoritative, so an early stop can never launder a bad result into a pass.
 pub struct DoneWatch {
+  /// Poll the caller's bounded completion protocol before any watchdog. True means the
+  /// task has finished and accounting/clean shutdown owns the remaining time budget.
+  pub settling: Option<Box<dyn Fn() -> bool + Send + Sync>>,
   /// The declared result file, watched for the writer going quiet.
   pub file: std::path::PathBuf,
   /// How long `file`'s stamp must hold still before it counts as finished.
@@ -894,9 +897,20 @@ impl Proc {
       let watch_started = std::time::Instant::now();
       let mut last_activity = watch_started;
       let mut saw_novelty = false;
+      let mut settling_started = false;
       loop {
         if let Some(s) = child.try_wait()? {
           break s;
+        }
+        if done.and_then(|d| d.settling.as_ref()).is_some_and(|poll| poll()) {
+          settling_started = true;
+          thread::sleep(Duration::from_millis(100));
+          continue;
+        }
+        if settling_started {
+          kill_child_tree(&mut child);
+          killed = Killed::Done;
+          break child.wait()?;
         }
         // Read the cast FIRST — the novelty hashes and, when a limit wait is armed, the
         // rendered screen come from the same bytes, and the limit scan below is worthless
@@ -2200,7 +2214,12 @@ mod tests {
     // `exec` so the wedge IS this child: killing a plain `sh` would leave its `sleep`
     // grandchild holding the output pipe, and the join below would wait that out instead.
     let script = format!(r#"echo '{{"message":"done"}}' > {}; exec sleep 30"#, result.display());
-    let done = DoneWatch { file: result.clone(), quiet_for: Duration::from_millis(300), confirm: Box::new(|| true) };
+    let done = DoneWatch {
+      settling: None,
+      file: result.clone(),
+      quiet_for: Duration::from_millis(300),
+      confirm: Box::new(|| true),
+    };
     // An inactivity limit far too long to be what stops this run.
     let watch = ActivityWatch { file: result.clone(), limit: Duration::from_secs(20), startup: None, limit_wait: None };
     let started = Instant::now();
@@ -2208,6 +2227,39 @@ mod tests {
     let _ = std::fs::remove_file(&result);
     assert_eq!(killed, Killed::Done, "a written, quiet result ends the wait");
     assert!(started.elapsed() < Duration::from_secs(10), "stopped on the result, not the 20s watchdog");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn accounting_settlement_outlives_all_ordinary_watchdogs() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("accounting", false);
+    p.start();
+    let file = std::env::temp_dir().join(format!("scsh-settlement-{}", crate::runtime::random_nonce_6()));
+    std::fs::write(&file, "{}").unwrap();
+    let start = Instant::now();
+    let done = DoneWatch {
+      file: file.clone(),
+      quiet_for: Duration::from_millis(10),
+      confirm: Box::new(|| true),
+      settling: Some(Box::new(move || start.elapsed() < Duration::from_secs(3))),
+    };
+    let watch = ActivityWatch {
+      file: file.clone(),
+      limit: Duration::from_millis(10),
+      startup: Some(StartupStall {
+        silence: Duration::from_millis(10),
+        stall: Duration::from_millis(10),
+        window: Duration::from_secs(5),
+      }),
+      limit_wait: None,
+    };
+    let (ok, killed, _) = p
+      .run_watched("sh", &["-c".into(), "sleep 0.4".into()], Some(Duration::from_millis(10)), Some(&watch), Some(&done))
+      .unwrap();
+    std::fs::remove_file(file).unwrap();
+    assert!(ok, "accounting has its own bounded budget after the task finishes");
+    assert_eq!(killed, Killed::No);
   }
 
   /// A writer still working must keep resetting the quiescence clock — the whole point of
@@ -2222,7 +2274,12 @@ mod tests {
     let _ = std::fs::remove_file(&result);
     // Appends for ~800ms — every append restarts the 300ms quiet window — then exits on its own.
     let script = format!(r#"for w in a b c d e f g h; do echo "$w" >> {}; sleep 0.1; done"#, result.display());
-    let done = DoneWatch { file: result.clone(), quiet_for: Duration::from_millis(300), confirm: Box::new(|| true) };
+    let done = DoneWatch {
+      settling: None,
+      file: result.clone(),
+      quiet_for: Duration::from_millis(300),
+      confirm: Box::new(|| true),
+    };
     let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, None, Some(&done)).unwrap();
     let body = std::fs::read_to_string(&result).unwrap_or_default();
     let _ = std::fs::remove_file(&result);
@@ -2251,6 +2308,7 @@ mod tests {
       committed.display()
     );
     let done = DoneWatch {
+      settling: None,
       file: result.clone(),
       quiet_for: Duration::from_millis(200),
       confirm: {

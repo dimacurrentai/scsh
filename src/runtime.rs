@@ -613,7 +613,7 @@ pub fn harness_command(
       tui.push_str(" --prompt ");
       tui.push_str(&shell_quote(&prompt));
       // opencode --prompt only PRE-FILLS the input box; send Enter once the TUI is up to submit.
-      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Enter, result, term)
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, TuiSubmit::Enter, result, term)
     }
     Harness::Claude => {
       // Full interactive TUI (no -p): the recording shows the real Claude Code screen, and
@@ -673,7 +673,7 @@ pub fn harness_command(
       // Markdown frontmatter (`---`) would otherwise be parsed as an unknown option and exit.
       tui.push_str(" -- ");
       tui.push_str(&shell_quote(&prompt));
-      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Auto, result, term)
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, TuiSubmit::Auto, result, term)
     }
     Harness::Cursor => {
       let model = Some(model.unwrap_or(crate::config::CURSOR_DEFAULT_MODEL));
@@ -713,7 +713,7 @@ pub fn harness_command(
       // first character; this also makes future user-authored direct prompts safe by construction.
       tui.push_str(" -- ");
       tui.push_str(&shell_quote(&prompt));
-      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Auto, result, term)
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashQuit, TuiSubmit::Auto, result, term)
     }
   }
 }
@@ -724,11 +724,9 @@ pub fn harness_command(
 enum TuiQuit {
   /// Type `/exit` + Enter (Claude Code).
   SlashExit,
-  /// Type `/quit` + Enter (codex — a clean exit; Ctrl-C would first interrupt the
+  /// Type `/quit` + Enter (Codex and Cursor — a clean exit; Ctrl-C would first interrupt the
   /// conversation and end the recording on an error banner).
   SlashQuit,
-  /// Ctrl-C twice, one second apart (grok, cursor-agent, opencode quit-confirm flows).
-  DoubleCtrlC,
 }
 
 impl TuiQuit {
@@ -737,7 +735,6 @@ impl TuiQuit {
     match self {
       TuiQuit::SlashExit => "slash-exit",
       TuiQuit::SlashQuit => "slash-quit",
-      TuiQuit::DoubleCtrlC => "double-ctrl-c",
     }
   }
 }
@@ -2679,6 +2676,8 @@ TAG
     assert!(df.contains(r#"[ -f \"$result\" ] || [ \$n -ge 2 ]"#), "relaunch stop conditions missing");
     assert!(df.contains("re-send $quit"), "graceful quit re-send missing");
     assert!(df.contains("killed session (harness ignored quit)"), "force-kill fallback missing");
+    assert!(!df.contains("send-keys -t scsh C-c"), "completion never interrupts an agent");
+    assert!(df.contains("$SCSH_RUN_LOG.shutdown"), "the host owns completion for all harnesses");
     // A TERM'd pane names its sender: the trap snapshots the container's process table
     // (via /proc — no extra packages) into the tuidebug, so the next early-exit recurrence
     // is attributable instead of a mystery.
@@ -2941,7 +2940,7 @@ TAG
     );
     assert!(cmd.contains("scsh: harness=opencode"));
     assert!(cmd.contains("mkdir -p \"$(dirname \"${SCSH_RUN_LOG}\")\""), "got: {cmd}");
-    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c enter tmp/add.json "), "got: {cmd}");
+    assert!(cmd.contains("scsh-tui-record 200 50 slash-exit enter tmp/add.json "), "got: {cmd}");
     assert!(cmd.contains("opencode -m openai/gpt-5.5 --prompt "), "got: {cmd}");
     assert!(!cmd.contains(" run "), "no headless run subcommand: {cmd}");
     assert!(cmd.contains(".skills/add/SKILL.md"));
@@ -3068,7 +3067,7 @@ TAG
       &crate::config::SkillDelivery::Repo,
     );
     assert!(cmd.contains("scsh: harness=grok"));
-    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c none tmp/add_grok.json "), "got: {cmd}");
+    assert!(cmd.contains("scsh-tui-record 200 50 slash-exit none tmp/add_grok.json "), "got: {cmd}");
     assert!(cmd.contains("grok --always-approve"), "got: {cmd}");
     assert!(!cmd.contains("grok -p "), "no headless -p: {cmd}");
     assert!(cmd.contains(" -m grok-build"));
@@ -3122,7 +3121,7 @@ TAG
     // Interactive TUI via scsh-tui-record. Workspace trust is pre-seeded by creating
     // cursor's marker file in-container (no flag/config key exists), not by scraping.
     assert!(
-      cmd.contains("scsh-tui-record 200 50 double-ctrl-c none tmp/add_cursor.json "),
+      cmd.contains("scsh-tui-record 200 50 slash-quit none tmp/add_cursor.json "),
       "Cursor completion must follow the configured result path, got: {cmd}"
     );
     assert!(cmd.contains("cursor-agent --force --approve-mcps --sandbox disabled"), "got: {cmd}");
