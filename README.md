@@ -245,6 +245,8 @@ model-written text into a host shell. See `scsh help def`, "Host steps".
 
 A decision step's schema-valid result is its verdict even if the command exits non-zero. If it writes no result file, `scsh` fails the step and saves a diagnostic card containing `passed: false` and an `error` with the exit and captured output tail. Stdout is never parsed as the verdict. Unreadable result files are preserved, with diagnostics saved separately.
 
+Workflow `string` and `string_list` outputs accept either a JSON string or an array of strings. A scalar becomes one list item with all punctuation and whitespace preserved; an array used for a `string` field joins with newlines. ID tokenization, when needed, belongs in the producing step.
+
 The Rust host runner also mirrors each command's captured stdout/stderr into a durable asciicast
 v3 recording for the session browser. It does not put the command under tmux, asciinema, or even
 a PTY: `isatty()` behavior, exit status, timeouts, and process-tree cleanup stay exactly as they

@@ -2036,6 +2036,37 @@ struct WorkflowResultContract<'a> {
   require_do_while_repeat: bool,
 }
 
+/// Accept a declared `string` from either a JSON string or an array of strings (joined with
+/// newlines). Agents often write a list of ids where the schema asked for one blob.
+fn string_from_result_value(value: &json::Value) -> Option<String> {
+  match value {
+    json::Value::String(value) => Some(value.clone()),
+    json::Value::Array(values) if values.iter().all(|value| matches!(value, json::Value::String(_))) => Some(
+      values
+        .iter()
+        .map(|value| match value {
+          json::Value::String(value) => value.as_str(),
+          _ => "",
+        })
+        .collect::<Vec<_>>()
+        .join("\n"),
+    ),
+    _ => None,
+  }
+}
+
+/// Accept a declared `string_list` from an array or a scalar, preserving each string intact.
+/// Separators in prose, paths, and identifiers are data, not implied list boundaries.
+fn string_list_from_result_value(value: &json::Value) -> Option<json::Value> {
+  match value {
+    json::Value::Array(values) if values.iter().all(|value| matches!(value, json::Value::String(_))) => {
+      Some(value.clone())
+    }
+    json::Value::String(_) => Some(json::Value::Array(vec![value.clone()])),
+    _ => None,
+  }
+}
+
 /// Extract and type-check a workflow step's complete result. Returned strings are the exact
 /// values forwarded through environment variables; string arrays remain compact JSON arrays.
 fn extract_step_outputs(
@@ -2067,7 +2098,10 @@ fn extract_step_outputs(
       return Err(format!("result is missing the '{}' field", f.name));
     };
     let rendered = match (f.ty, value) {
-      (harness_def::OutputType::String, json::Value::String(value)) => value.clone(),
+      (harness_def::OutputType::String, _) => match string_from_result_value(value) {
+        Some(value) => value,
+        None => return Err(format!("output '{}' must be a string", f.name)),
+      },
       (harness_def::OutputType::Int, json::Value::Number(value))
         if value.is_finite() && value.fract() == 0.0 && value.abs() < 9.0e15 =>
       {
@@ -2077,23 +2111,18 @@ fn extract_step_outputs(
       (harness_def::OutputType::Enum, json::Value::String(value)) if f.choices.iter().any(|choice| choice == value) => {
         value.clone()
       }
-      (harness_def::OutputType::StringList, json::Value::Array(values))
-        if values.iter().all(|value| matches!(value, json::Value::String(_))) =>
-      {
-        json::write(value)
-      }
+      (harness_def::OutputType::StringList, _) => match string_list_from_result_value(value) {
+        Some(value) => json::write(&value),
+        None => return Err(format!("output '{}' must be an array of strings", f.name)),
+      },
       (harness_def::OutputType::Object, json::Value::Object(_)) => json::write(value),
       (harness_def::OutputType::Enum, json::Value::String(value)) => {
         return Err(format!("output '{}' must be one of: {} (got '{value}')", f.name, f.choices.join(", ")));
       }
-      (harness_def::OutputType::String, _) => return Err(format!("output '{}' must be a string", f.name)),
       (harness_def::OutputType::Int, _) => return Err(format!("output '{}' must be an integer", f.name)),
       (harness_def::OutputType::Bool, _) => return Err(format!("output '{}' must be true or false", f.name)),
       (harness_def::OutputType::Enum, _) => {
         return Err(format!("output '{}' must be one of: {}", f.name, f.choices.join(", ")));
-      }
-      (harness_def::OutputType::StringList, _) => {
-        return Err(format!("output '{}' must be an array of strings", f.name));
       }
       (harness_def::OutputType::Object, _) => {
         return Err(format!("output '{}' must be a JSON object", f.name));
@@ -10789,6 +10818,8 @@ fn print_help_defs() {
       inputs:              env vars for the step:  NAME: params.X  or  NAME: stepid.field
       output:              typed result fields the step must write to $SCSH_RESULT (JSON)
         n: {{ type: int }}   types: string | int | bool | enum (with `choices: a, b, c`) | string_list | object
+                           string and string_list accept each other's JSON shape: a scalar
+                           becomes one list item; an array of strings joins with newlines
                            (+ optional `results_markdown` / `log_markdown` / `errors_markdown`
                            strings for the job page, undeclared and never forwarded)
       needs: a, b, c?      DAG edges — steps whose completion this step waits for; `c?` is
@@ -11174,16 +11205,40 @@ mod tests {
 
     let missing = extract_step_outputs(r#"{"grade":"good","comments":[]}"#, contract).unwrap_err();
     assert!(missing.contains("SCSH_DO_WHILE_REPEAT") && missing.contains("missing"));
-    let wrong =
-      extract_step_outputs(r#"{"grade":"good","comments":"one\n\ntwo","SCSH_DO_WHILE_REPEAT":false}"#, contract)
-        .unwrap_err();
-    assert!(wrong.contains("array of strings"));
     let extra = extract_step_outputs(
       r#"{"grade":"good","comments":[],"comment_count":0,"SCSH_DO_WHILE_REPEAT":false}"#,
       contract,
     )
     .unwrap_err();
     assert!(extra.contains("undeclared field") && extra.contains("comment_count"));
+  }
+
+  #[test]
+  fn string_and_string_list_outputs_accept_each_other() {
+    let outputs = [
+      harness_def::OutputField { name: "write_trace".into(), ty: harness_def::OutputType::String, choices: vec![] },
+      harness_def::OutputField { name: "comments".into(), ty: harness_def::OutputType::StringList, choices: vec![] },
+    ];
+    let contract = WorkflowResultContract { outputs: &outputs, require_do_while_repeat: false };
+
+    // A scalar comment stays one comment, with punctuation and whitespace intact.
+    let split = extract_step_outputs(r#"{"write_trace":"one","comments":"one\n\ntwo, three four"}"#, contract).unwrap();
+    assert_eq!(split.get("comments").map(String::as_str), Some(r#"["one\n\ntwo, three four"]"#));
+
+    // string from an array of strings — join with newlines, so a list field typed as string
+    // still forwards every id.
+    let joined = extract_step_outputs(r#"{"write_trace":["a","b"],"comments":["x","y"]}"#, contract).unwrap();
+    assert_eq!(joined.get("write_trace").map(String::as_str), Some("a\nb"));
+    assert_eq!(joined.get("comments").map(String::as_str), Some(r#"["x","y"]"#));
+
+    let empty = extract_step_outputs(r#"{"write_trace":[],"comments":""}"#, contract).unwrap();
+    assert_eq!(empty["write_trace"], "");
+    assert_eq!(empty["comments"], r#"[""]"#);
+
+    let wrong = extract_step_outputs(r#"{"write_trace":1,"comments":[]}"#, contract).unwrap_err();
+    assert!(wrong.contains("must be a string"), "{wrong}");
+    let wrong_list = extract_step_outputs(r#"{"write_trace":"x","comments":[1]}"#, contract).unwrap_err();
+    assert!(wrong_list.contains("array of strings"), "{wrong_list}");
   }
 
   #[test]
