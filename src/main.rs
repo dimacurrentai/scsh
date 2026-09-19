@@ -2226,6 +2226,48 @@ fn host_output_tail(lines: &[String]) -> String {
   }
 }
 
+/// The host command's captured stdout+stderr tail, with the same omission marker
+/// [`host_output_tail`] uses when the pump already dropped earlier lines.
+fn host_captured_output(p: &ui::screen::Proc, output_trimmed: bool) -> String {
+  let mut output = host_output_tail(&p.tail_lines(HOST_OUTPUT_LINES_REQUESTED));
+  if output_trimmed && !output.starts_with("[earlier output omitted]") {
+    output = format!("[earlier output omitted]\n{output}");
+  }
+  output
+}
+
+/// Fallback card when a self-reporting host command left no `$SCSH_RESULT`. Never parsed as
+/// the command's result — stdout is only quoted inside `error`, so a traceback cannot be
+/// mistaken for JSON.
+fn synthesized_missing_host_result(command: &str, code: Option<i32>, output: &str) -> String {
+  let label = code.map_or_else(|| "on a signal".to_string(), |n| n.to_string());
+  let mut error = format!("`{command}` exited {label} without writing $SCSH_RESULT");
+  if !output.trim().is_empty() {
+    error.push('\n');
+    error.push_str(output);
+  }
+  json::write_pretty(&json::Value::Object(vec![
+    (harness_def::HOST_OUTPUT_PASSED.into(), json::Value::Bool(false)),
+    ("error".into(), json::Value::String(error)),
+  ]))
+}
+
+/// Write a host step's result so the job page has a card, even when the step itself failed.
+fn persist_host_result_card(sink: &ResultSink, p: &ui::screen::Proc, run_id: &str, result_path: &Path, content: &str) {
+  match atomic_write(result_path, content.as_bytes()) {
+    Ok(()) => {
+      if let Some(dest) = fleet::persist_skill_result(sink.session_id, run_id, result_path) {
+        if let Some(c) = sink.client {
+          c.proc_result(p.index(), &dest);
+        }
+      }
+    }
+    Err(e) => {
+      p.emit(&format!("could not write {} ({e}) — the job page will not have this step's card", result_path.display()))
+    }
+  }
+}
+
 /// One host step waiting to run: everything the wave resolved for it before deciding that it
 /// executes outside a container.
 struct PendingHostStep<'a> {
@@ -2364,56 +2406,67 @@ fn run_host_step(
   // Whatever the command appended for the job page goes up now, whichever form it takes and
   // however it exited — a failing command's errors section is the one worth reading.
   report::publish(sink.client, p.index(), &step.id, &report::contributions_in_host_files(&result_path));
+  let output = host_captured_output(p, output_trimmed);
 
-  // Self-reporting form: the result file is how this command speaks, so a non-zero exit means it
-  // never got to — that is a failed step, not a verdict. Then validate exactly as an agent's
-  // result is validated, so a script and an agent are interchangeable at a step boundary.
+  // Self-reporting form: the result file is how this command speaks. A file, even after a
+  // non-zero exit, is a verdict. No file is not a parser accident — scsh synthesizes
+  // `{passed:false, error:…}` from the exit and the captured tail so the job page always has
+  // a card. stdout is never parsed as the result JSON.
   if host.reports_result {
-    if code != Some(0) {
-      let label = code.map_or_else(|| "on a signal".to_string(), |n| format!("{n}"));
-      let detail = format!("`{}` exited {label} without reporting a result", host.command);
-      p.finish_fail(failure::reason::HOST_STEP_NONZERO, Some(&detail));
-      return SkillRun::failed(failure::reason::HOST_STEP_NONZERO, None, None, None).with_fail_detail(&detail);
-    }
     let contract = WorkflowResultContract {
       outputs: &step.outputs,
       require_do_while_repeat: step.do_while.is_some()
         && !step.outputs.iter().any(|output| output.name == "SCSH_DO_WHILE_REPEAT"),
     };
-    let content = match read_collected_result(&result_path, p) {
-      Ok(content) => content,
-      Err(e) => {
-        let detail = format!("`{}` wrote no result at $SCSH_RESULT ({e})", host.command);
-        p.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
-        return SkillRun::failed(failure::reason::RESULT_MISSING, None, None, None).with_fail_detail(&detail);
-      }
-    };
-    report::publish(sink.client, p.index(), &step.id, &report::contributions_in_result(&content));
-    return match extract_step_outputs(&content, contract) {
-      Ok(outputs) => {
-        if let Some(dest) = fleet::persist_skill_result(sink.session_id, run_id, &result_path) {
-          if let Some(c) = sink.client {
-            c.proc_result(p.index(), &dest);
+    match read_collected_result(&result_path, p) {
+      Ok(content) => {
+        report::publish(sink.client, p.index(), &step.id, &report::contributions_in_result(&content));
+        return match extract_step_outputs(&content, contract) {
+          Ok(outputs) => {
+            persist_host_result_card(sink, p, run_id, &result_path, &content);
+            let glimpse = workflow_outputs_glimpse(contract, &outputs)
+              .unwrap_or_else(|| format!("`{}` reported its result", host.command));
+            p.finish_ok(Some(&glimpse));
+            SkillRun::ok(String::new(), None, Some(content), Some(outputs))
           }
-        }
-        let glimpse = workflow_outputs_glimpse(contract, &outputs)
-          .unwrap_or_else(|| format!("`{}` reported its result", host.command));
-        p.finish_ok(Some(&glimpse));
-        SkillRun::ok(String::new(), None, Some(content), Some(outputs))
+          Err(detail) => {
+            persist_host_result_card(sink, p, run_id, &result_path, &content);
+            p.finish_fail(failure::reason::RESULT_INVALID, Some(&detail));
+            SkillRun::failed(failure::reason::RESULT_INVALID, None, None, None)
+              .with_fail_detail(&detail)
+              .with_result_content(content)
+          }
+        };
       }
-      Err(detail) => {
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        let content = synthesized_missing_host_result(&host.command, code, &output);
+        persist_host_result_card(sink, p, run_id, &result_path, &content);
+        report::publish(sink.client, p.index(), &step.id, &report::contributions_in_result(&content));
+        let reason = if code == Some(0) { failure::reason::RESULT_MISSING } else { failure::reason::HOST_STEP_NONZERO };
+        let detail = json::field(&content, "error")
+          .unwrap_or_else(|| format!("`{}` wrote no result at $SCSH_RESULT", host.command));
+        p.finish_fail(reason, Some(&detail));
+        return SkillRun::failed(reason, None, None, None).with_fail_detail(&detail).with_result_content(content);
+      }
+      Err(e) => {
+        // Preserve unreadable bytes for diagnosis; the error card gets its own path.
+        let detail =
+          format!("could not read $SCSH_RESULT at {}: {e}; write a UTF-8 JSON result", result_path.display());
+        let content = json::write_pretty(&json::Value::Object(vec![
+          (harness_def::HOST_OUTPUT_PASSED.into(), json::Value::Bool(false)),
+          ("error".into(), json::Value::String(detail.clone())),
+        ]));
+        persist_host_result_card(sink, p, run_id, &result_path.with_extension("error.json"), &content);
         p.finish_fail(failure::reason::RESULT_INVALID, Some(&detail));
-        SkillRun::failed(failure::reason::RESULT_INVALID, None, None, None).with_fail_detail(&detail)
+        return SkillRun::failed(failure::reason::RESULT_INVALID, None, None, None)
+          .with_fail_detail(&detail)
+          .with_result_content(content);
       }
-    };
+    }
   }
 
   let passed = code == Some(0);
   let exit_code = code.unwrap_or(-1);
-  let mut output = host_output_tail(&p.tail_lines(HOST_OUTPUT_LINES_REQUESTED));
-  if output_trimmed && !output.starts_with("[earlier output omitted]") {
-    output = format!("[earlier output omitted]\n{output}");
-  }
   // The stringly-typed map is the workflow's internal channel (every `inputs:` binding is an
   // env var); the result FILE keeps the declared JSON types, so it reads like any other step's.
   let mut outputs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -5914,6 +5967,11 @@ impl SkillRun {
   }
   fn with_usage(mut self, usage: Option<usage::Summary>) -> SkillRun {
     self.usage = usage;
+    self
+  }
+  /// Attach the result JSON even when the step failed, so the job page still has a card.
+  fn with_result_content(mut self, content: String) -> SkillRun {
+    self.result_content = Some(content);
     self
   }
   fn invalid_result(
@@ -10788,10 +10846,12 @@ fn print_help_defs() {
   2. With `output:` — a DECISION. The command writes `$SCSH_RESULT` (scsh sets it to an
      absolute path) and scsh validates that JSON against the declared schema, exactly as it
      validates an agent's result — so a deterministic script and an agent are interchangeable
-     at a step boundary. Here a non-zero exit FAILS the step: the result file is how this
-     command speaks, so exiting without one means it never spoke. Such a step may carry
-     `break: true` (declaring boolean SCSH_LOOP_BREAK) or end a `do-while` (declaring
-     SCSH_DO_WHILE_REPEAT) — a loop can be steered by a script instead of a model.
+     at a step boundary. Leave a file if you can: a written result is the verdict even when
+     the process exits non-zero. If no file is written, scsh synthesizes
+     `{{passed: false, error: …}}` from the exit and the captured tail so the job page always
+     has a card, then fails the step. stdout is never parsed as the result JSON. Such a step
+     may carry `break: true` (declaring boolean SCSH_LOOP_BREAK) or end a `do-while`
+     (declaring SCSH_DO_WHILE_REPEAT) — a loop can be steered by a script instead of a model.
 
   Either form may speak to the job page: append markdown to the files in $SCSH_RESULTS_MD,
   $SCSH_LOG_MD, or $SCSH_ERRORS_MD (results sit above the job graph, the log below it, errors
@@ -12863,8 +12923,8 @@ Subject: [PATCH] add: 2 + 3 = 5
     assert_eq!(out["SCSH_LOOP_BREAK"], "false");
     assert!(!out.contains_key("passed"), "the synthesized fields are not mixed in: {out:?}");
 
-    // Exiting non-zero means it never got to speak — a failed step, not a verdict. This is the
-    // opposite of the check form, and the difference the two forms exist to draw.
+    // No file after a non-zero exit: a failed step, but scsh writes the fallback card so the
+    // job page is not a mystery. stdout is quoted inside `error`, never parsed as the result.
     let silent = host_step_def("exit 4", schema);
     let p = ui.proc("host: gate", false);
     let run = run_host_step(&silent.steps[0], "silent", &dir, Vec::new(), &p, &sink);
@@ -12873,12 +12933,43 @@ Subject: [PATCH] add: 2 + 3 = 5
     // Its own reason, not a container harness's: re-running a deterministic command that already
     // failed would only spend the same wall clock again.
     assert!(!failure::is_transient(failure::reason::HOST_STEP_NONZERO));
+    let silent_card = std::fs::read_to_string(dir.join("tmp/scsh/sess/silent.json")).expect("fallback card");
+    assert!(silent_card.contains("\"passed\": false"), "{silent_card}");
+    assert!(silent_card.contains("without writing $SCSH_RESULT"), "{silent_card}");
+    assert_eq!(run.result_content.as_deref(), Some(silent_card.as_str()));
+
+    // A file is how the command speaks: a valid result after exit 1 is still a verdict.
+    let spoke = host_step_def(
+      "printf '{\"story_id\":\"US-029-01\",\"SCSH_LOOP_BREAK\":false}' > \"$SCSH_RESULT\"; exit 1",
+      schema,
+    );
+    let p = ui.proc("host: gate", false);
+    let run = run_host_step(&spoke.steps[0], "spoke", &dir, Vec::new(), &p, &sink);
+    assert!(run.ok, "a written result is a verdict even when the process exits 1: {:?}", run.fail_detail);
+    assert_eq!(run.workflow_outputs.as_ref().unwrap()["story_id"], "US-029-01");
+
+    // Printing JSON on stdout is not reporting a result. The inspect failure mode: a traceback
+    // (or a lookalike object) on the pipe, no file.
+    let printed = host_step_def(
+      r#"printf '%s\n' '{"story_id":"US-000-00","SCSH_LOOP_BREAK":true}'; printf '%s\n' 'httpx.HTTPError: invalid write trace id' >&2; exit 1"#,
+      schema,
+    );
+    let p = ui.proc("host: gate", false);
+    let run = run_host_step(&printed.steps[0], "printed", &dir, Vec::new(), &p, &sink);
+    assert!(!run.ok);
+    assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::HOST_STEP_NONZERO));
+    let printed_card = run.result_content.expect("synthesized card");
+    assert!(printed_card.contains("invalid write trace id"), "{printed_card}");
+    assert!(printed_card.contains("\"passed\": false"), "{printed_card}");
+    assert!(run.workflow_outputs.is_none(), "printed stdout is not a typed verdict: {:?}", run.workflow_outputs);
 
     // Exit 0 but no result file at all.
     let empty = host_step_def("true", schema);
     let p = ui.proc("host: gate", false);
     let run = run_host_step(&empty.steps[0], "empty", &dir, Vec::new(), &p, &sink);
     assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::RESULT_MISSING));
+    let empty_card = std::fs::read_to_string(dir.join("tmp/scsh/sess/empty.json")).expect("fallback card");
+    assert!(empty_card.contains("\"passed\": false"), "{empty_card}");
 
     // Same, but with something already at $SCSH_RESULT: a silent command must not inherit a
     // result it never wrote, so the path is cleared before the command runs.
@@ -12887,13 +12978,26 @@ Subject: [PATCH] add: 2 + 3 = 5
     let p = ui.proc("host: gate", false);
     let run = run_host_step(&empty.steps[0], "stale", &dir, Vec::new(), &p, &sink);
     assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::RESULT_MISSING), "a stale result is not a verdict");
-    assert!(!stale.exists(), "the stale file is gone, not merely ignored");
+    let stale_card = std::fs::read_to_string(&stale).expect("stale path now holds the fallback");
+    assert!(stale_card.contains("\"passed\": false"), "{stale_card}");
+    assert!(!stale_card.contains("US-000-00"), "the leftover file was replaced, not reused");
 
     // Wrong type for a declared field is caught here, not by the step that consumes it.
     let mistyped = host_step_def("printf '{\"story_id\":1,\"SCSH_LOOP_BREAK\":false}' > \"$SCSH_RESULT\"", schema);
     let p = ui.proc("host: gate", false);
     let run = run_host_step(&mistyped.steps[0], "mistyped", &dir, Vec::new(), &p, &sink);
     assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::RESULT_INVALID));
+
+    // A present but unreadable result is invalid, not missing, and its bytes survive.
+    let invalid_utf8 = host_step_def(r#"printf '\377' > "$SCSH_RESULT""#, schema);
+    let p = ui.proc("host: gate", false);
+    let run = run_host_step(&invalid_utf8.steps[0], "invalid-utf8", &dir, Vec::new(), &p, &sink);
+    assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::RESULT_INVALID));
+    assert_eq!(std::fs::read(dir.join("tmp/scsh/sess/invalid-utf8.json")).unwrap(), [255]);
+    let card = run.result_content.expect("unreadable results still have a diagnostic card");
+    assert!(card.contains("could not read $SCSH_RESULT"), "{card}");
+    assert!(!card.contains("without writing"), "{card}");
+    assert_eq!(std::fs::read_to_string(dir.join("tmp/scsh/sess/invalid-utf8.error.json")).unwrap(), card);
   }
 
   /// What the durable result boundary now tolerates, end to end: a task writes a result whose

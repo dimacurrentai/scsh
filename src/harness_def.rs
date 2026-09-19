@@ -362,8 +362,9 @@ pub struct HostRun {
   ///
   /// The two forms read a non-zero exit differently, deliberately. Synthesized: a non-zero exit
   /// is DATA — a red gate the workflow is expected to react to. Self-reporting: the result file
-  /// is how the command speaks, so a non-zero exit means it never got to speak, and the step
-  /// fails.
+  /// is how the command speaks. Leave a file if you can; if none is written, scsh synthesizes
+  /// `{passed: false, error: …}` from the exit and the captured tail so the job page still has
+  /// a card, then fails the step.
   pub reports_result: bool,
 }
 

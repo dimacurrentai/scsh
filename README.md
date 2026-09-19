@@ -242,6 +242,9 @@ the job — a check that hangs is what this replaces; scsh kills the whole proce
 is fixed by the definition, so a workflow's host surface is auditable by reading its repo or
 `~/.harness/` `.yml` — but quote your expansions, because an input bound to an agent step's output carries
 model-written text into a host shell. See `scsh help def`, "Host steps".
+
+A decision step's schema-valid result is its verdict even if the command exits non-zero. If it writes no result file, `scsh` fails the step and saves a diagnostic card containing `passed: false` and an `error` with the exit and captured output tail. Stdout is never parsed as the verdict. Unreadable result files are preserved, with diagnostics saved separately.
+
 The Rust host runner also mirrors each command's captured stdout/stderr into a durable asciicast
 v3 recording for the session browser. It does not put the command under tmux, asciinema, or even
 a PTY: `isatty()` behavior, exit status, timeouts, and process-tree cleanup stay exactly as they
