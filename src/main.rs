@@ -6224,11 +6224,14 @@ fn harness_produced_its_deliverables(run_dir: &Path, result_rel: &str, commits: 
 
 /// Read a finished task's result file the way every reader downstream must see it.
 ///
-/// Agents and host commands hand-write this file, and one that escapes a character JSON does
-/// not escape (`\_`, a `\u` without four hex digits) is repaired in place here rather than
-/// costing the whole task a correction re-run — or, for a host step, failing it outright.
-/// Repairing only ever drops a backslash strict JSON refuses anyway, so no document can be
-/// reshaped into a different one; [`json::repair`] carries that argument in full.
+/// Pipeline: strict `json::parse`, then [`json::repair`] when [`result_json_repair_enabled`],
+/// then the caller schema-validates. Agents and host commands hand-write this file, and one
+/// that escapes a character JSON does not escape (`\_`, a `\u` without four hex digits) is
+/// repaired in place here rather than costing the whole task a correction re-run — or, for a
+/// host step, failing it outright. Repairing only ever drops a backslash strict JSON refuses
+/// anyway, so no document can be reshaped into a different one; [`json::repair`] carries that
+/// argument in full. `SCSH_REPAIR_RESULT_JSON=0` skips the rescue so a production workflow
+/// can stay on strict JSON; `=1` explicitly enables the default rescue.
 ///
 /// The file itself is rewritten as canonical strict JSON, so the result cache, the job page,
 /// `export-job`, and a later `--resume-from` all read the same valid document this run acted
@@ -6236,6 +6239,9 @@ fn harness_produced_its_deliverables(run_dir: &Path, result_rel: &str, commits: 
 /// the next attempt of the same task should stop relying on.
 fn read_collected_result(path: &Path, proc: &ui::screen::Proc) -> std::io::Result<String> {
   let content = std::fs::read_to_string(path)?;
+  if !result_json_repair_enabled() {
+    return Ok(content);
+  }
   let Some(repair) = json::repair(&content) else { return Ok(content) };
   // The durable file and the value scsh acts on must never diverge: when the rewrite fails,
   // keep the original text so strict validation downstream reports the real parse error.
@@ -6252,7 +6258,10 @@ fn read_collected_result(path: &Path, proc: &ui::screen::Proc) -> std::io::Resul
 fn result_is_a_json_object(body: &str) -> bool {
   match json::parse(body) {
     Ok(value) => matches!(value, json::Value::Object(_)),
-    Err(_) => json::repair(body).is_some_and(|repair| matches!(repair.value, json::Value::Object(_))),
+    Err(_) => {
+      result_json_repair_enabled()
+        && json::repair(body).is_some_and(|repair| matches!(repair.value, json::Value::Object(_)))
+    }
   }
 }
 
@@ -7476,6 +7485,15 @@ fn claude_auth_enabled() -> bool {
 /// quiet output must never mean missing accounting.
 fn usage_accounting_required() -> bool {
   !matches!(std::env::var("SCSH_NO_USAGE").ok().as_deref(), Some("1") | Some("true"))
+}
+
+/// Whether result JSON may be rescued by [`json::repair`] before schema validation.
+///
+/// Default on — the same conservative escape rescue already trusted for agent-authored
+/// writes. `SCSH_REPAIR_RESULT_JSON=0` keeps production workflows on strict `json::parse`
+/// only; `=1` explicitly enables the default rescue.
+fn result_json_repair_enabled() -> bool {
+  !matches!(std::env::var("SCSH_REPAIR_RESULT_JSON").ok().as_deref(), Some("0" | "false" | "off" | "no"))
 }
 
 /// Whether scsh forwards opencode credentials into runs (on unless opted out).
@@ -10518,6 +10536,10 @@ the run fails only when every selected skill is skipped.",
     "SCSH_NO_USAGE=1",
     "Skip required native token accounting and its bounded completion wait for every harness.",
   );
+  help_row(
+    "SCSH_REPAIR_RESULT_JSON=0",
+    "Require strict result JSON (default repairs undefined escapes; =1 enables repair).",
+  );
   help_row("SCSH_NO_OPENCODE_AUTH=1", "Do not forward opencode credentials into containers.");
   help_row("SCSH_NO_CLAUDE_AUTH=1", "Do not forward Claude credentials into containers.");
   help_row("SCSH_NO_CURSOR_AUTH=1", "Do not forward Cursor credentials into containers.");
@@ -11145,6 +11167,7 @@ mod tests {
 
   #[test]
   fn liveness_counts_a_repairable_result_exactly_as_the_boundary_does() {
+    let _guard = runtime::test_env_lock();
     // Strict JSON object: produced, as always.
     assert!(result_is_a_json_object(r#"{"result":"ok"}"#));
     // An escape JSON does not define is repaired at the boundary, so the liveness check that
@@ -13064,7 +13087,12 @@ Subject: [PATCH] add: 2 + 3 = 5
     let dir = mt_dir("host-step-repair");
     let _home = ScshHome::under(&dir);
 
-    let schema = "    output:\n      story_id:\n        type: string\n      note:\n        type: string\n";
+    let schema = "    output:
+      story_id:
+        type: string
+      note:
+        type: string
+";
     let ui = ui::screen::LiveUi::new(false, None);
     let sink = ResultSink { session_id: "host-step-repair", session_dir_rel: "tmp/scsh/sess", client: None };
 
@@ -13099,6 +13127,33 @@ Subject: [PATCH] add: 2 + 3 = 5
     let p = ui.proc("host: gate", false);
     let run = run_host_step(&broken.steps[0], "broken", &dir, Vec::new(), &p, &sink);
     assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::RESULT_INVALID));
+  }
+
+  #[test]
+  fn result_json_repair_can_be_turned_off_for_strict_workflows() {
+    let _guard = runtime::test_env_lock();
+    let previous = std::env::var_os("SCSH_REPAIR_RESULT_JSON");
+    std::env::set_var("SCSH_REPAIR_RESULT_JSON", "0");
+    let dir = mt_dir("host-step-repair-off");
+    let _home = ScshHome::under(&dir);
+
+    let schema = "    output:
+      story_id:
+        type: string
+      note:
+        type: string
+";
+    let ui = ui::screen::LiveUi::new(false, None);
+    let sink = ResultSink { session_id: "host-step-repair-off", session_dir_rel: "tmp/scsh/sess", client: None };
+    let repairable =
+      host_step_def(r#"printf '%s' '{"story_id":"US-029-01","note":"renamed \_internal"}' > "$SCSH_RESULT""#, schema);
+    let p = ui.proc("host: gate", false);
+    let run = run_host_step(&repairable.steps[0], "strict", &dir, Vec::new(), &p, &sink);
+    assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::RESULT_INVALID));
+    match previous {
+      Some(value) => std::env::set_var("SCSH_REPAIR_RESULT_JSON", value),
+      None => std::env::remove_var("SCSH_REPAIR_RESULT_JSON"),
+    }
   }
 
   #[test]
