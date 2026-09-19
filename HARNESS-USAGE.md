@@ -11,7 +11,7 @@ the attempt's forwarded credentials and temporary config are scrubbed:
   accounting are marked unavailable rather than double-counting the parent.
 - Cursor: keep the last cumulative token payload for each conversation from user-level
   TUI hooks. The hooks append events; they never publish a persistent readiness marker.
-  Resumed work invalidates the previous completed stop; stop records must also match the result file's revision (mtime and size), so unrelated appends cannot revive an old stop. The hooks live in the forwarded
+  Resumed work invalidates the previous completed stop. Cursor emits a completed `stop` before the same generation's trailing `afterAgentResponse` and `sessionEnd`; those trailing records preserve the stop, while a later generation or tool call invalidates it. The hooks live in the forwarded
   config home, never in the skill repository.
 
 Once a result exists, the host owns a single 30-second accounting deadline for every
