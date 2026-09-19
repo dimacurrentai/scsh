@@ -395,9 +395,13 @@ steps:
       TESTING_GROK_GRADE: review_testing_grok.grade
       TESTING_GROK_COMMENTS: review_testing_grok.comments
     prompt: |
-      You are preparing ONE GitHub pull-request review from the fleet's findings. Do not run
-            any command, do not touch git, and do not call GitHub — only read the inputs and write
-            the result.
+      You are preparing ONE GitHub pull-request review from the fleet's findings.
+            Use local commands or scripts to read the named input environment variables and
+            SCSH_RESULT, combine the findings, and write the required JSON to the path in
+            SCSH_RESULT (creating its parent directory if needed). These operations are required;
+            a chat reply does not replace the result file. Read only the named inputs, not the
+            full environment. Do not run git commands, call GitHub, access the network, modify
+            repository files other than the result file, or rerun the reviewers.
 
             Each `*_GRADE` input is a reviewer's grade (excellent, good, average, or poor); an empty
             grade means that reviewer did not run and must be ignored. Each matching `*_COMMENTS`
@@ -476,9 +480,13 @@ steps:
       TESTING_GROK_GRADE: review_testing_grok.grade
       TESTING_GROK_COMMENTS: review_testing_grok.comments
     prompt: |
-      You are preparing ONE GitHub pull-request review from the fleet's findings. Do not run
-            any command, do not touch git, and do not call GitHub — only read the inputs and write
-            the result.
+      You are preparing ONE GitHub pull-request review from the fleet's findings.
+            Use local commands or scripts to read the named input environment variables and
+            SCSH_RESULT, combine the findings, and write the required JSON to the path in
+            SCSH_RESULT (creating its parent directory if needed). These operations are required;
+            a chat reply does not replace the result file. Read only the named inputs, not the
+            full environment. Do not run git commands, call GitHub, access the network, modify
+            repository files other than the result file, or rerun the reviewers.
 
             Each `*_GRADE` input is a reviewer's grade (excellent, good, average, or poor); an empty
             grade means that reviewer did not run and must be ignored. Each matching `*_COMMENTS`
@@ -556,9 +564,13 @@ steps:
       TESTING_GROK_GRADE: review_testing_grok.grade
       TESTING_GROK_COMMENTS: review_testing_grok.comments
     prompt: |
-      You are preparing ONE GitHub pull-request review from the fleet's findings. Do not run
-            any command, do not touch git, and do not call GitHub — only read the inputs and write
-            the result.
+      You are preparing ONE GitHub pull-request review from the fleet's findings.
+            Use local commands or scripts to read the named input environment variables and
+            SCSH_RESULT, combine the findings, and write the required JSON to the path in
+            SCSH_RESULT (creating its parent directory if needed). These operations are required;
+            a chat reply does not replace the result file. Read only the named inputs, not the
+            full environment. Do not run git commands, call GitHub, access the network, modify
+            repository files other than the result file, or rerun the reviewers.
 
             Each `*_GRADE` input is a reviewer's grade (excellent, good, average, or poor); an empty
             grade means that reviewer did not run and must be ignored. Each matching `*_COMMENTS`
@@ -636,9 +648,13 @@ steps:
       TESTING_GROK_GRADE: review_testing_grok.grade
       TESTING_GROK_COMMENTS: review_testing_grok.comments
     prompt: |
-      You are preparing ONE GitHub pull-request review from the fleet's findings. Do not run
-            any command, do not touch git, and do not call GitHub — only read the inputs and write
-            the result.
+      You are preparing ONE GitHub pull-request review from the fleet's findings.
+            Use local commands or scripts to read the named input environment variables and
+            SCSH_RESULT, combine the findings, and write the required JSON to the path in
+            SCSH_RESULT (creating its parent directory if needed). These operations are required;
+            a chat reply does not replace the result file. Read only the named inputs, not the
+            full environment. Do not run git commands, call GitHub, access the network, modify
+            repository files other than the result file, or rerun the reviewers.
 
             Each `*_GRADE` input is a reviewer's grade (excellent, good, average, or poor); an empty
             grade means that reviewer did not run and must be ignored. Each matching `*_COMMENTS`
