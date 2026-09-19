@@ -2167,7 +2167,7 @@ fn step_invocation(
     name: run_id.to_string(),
     skill_source: step.id.clone(),
     harness: agent.harness,
-    model: agent.model.clone(),
+    model: config::default_model(agent.harness, agent.model.clone()),
     effort: agent.effort.clone(),
     memory: step.memory.clone(),
     retry_for: step.retry_for,

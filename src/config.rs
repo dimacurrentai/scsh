@@ -189,6 +189,13 @@ impl SkillDelivery {
   }
 }
 
+/// Pinned default, also resolved before cache keys and UI labels are computed.
+pub const CURSOR_DEFAULT_MODEL: &str = "cursor-grok-4.6-high-fast";
+
+pub fn default_model(harness: Harness, model: Option<String>) -> Option<String> {
+  model.or_else(|| (harness == Harness::Cursor).then(|| CURSOR_DEFAULT_MODEL.to_string()))
+}
+
 /// Expand every manifest skill into the invocation(s) `scsh run` would execute, in file order.
 pub fn expand_invocations(cfg: &Config) -> Vec<ResolvedInvocation> {
   cfg.skills.iter().flat_map(|s| expand_skill(s, cfg.terminal)).collect()
@@ -207,7 +214,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       name: skill.name.clone(),
       skill_source: skill.name.clone(),
       harness,
-      model: skill.model.clone(),
+      model: default_model(harness, skill.model.clone()),
       effort: effort_for(harness, None),
       memory: None,
       timeout: skill.timeout,
@@ -231,7 +238,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       name: format!("{}-{}", skill.name, route.name),
       skill_source: skill.name.clone(),
       harness: route.harness,
-      model: route.model.clone(),
+      model: default_model(route.harness, route.model.clone()),
       effort: effort_for(route.harness, route.effort.as_ref()),
       memory: None,
       timeout: skill.timeout,
@@ -1689,6 +1696,33 @@ mod tests {
     assert_eq!(inv[0].harness, Harness::Cursor);
     assert_eq!(inv[0].effort.as_deref(), Some("high"));
     assert!(Harness::known().contains(&"cursor"));
+  }
+
+  #[test]
+  fn cursor_default_is_resolved_for_direct_and_matrix_routes() {
+    let cfg = validate(
+      r#"skills:
+  direct:
+    harness: cursor
+    result: tmp/direct.json
+  matrix:
+    result: tmp/{name}.json
+    invocations:
+      implicit:
+        harness: cursor
+      explicit:
+        harness: cursor
+        model: auto
+      other:
+        harness: claude
+"#,
+    )
+    .unwrap();
+    let inv = expand_invocations(&cfg);
+    assert_eq!(inv[0].model.as_deref(), Some(CURSOR_DEFAULT_MODEL));
+    assert_eq!(inv[1].model.as_deref(), Some(CURSOR_DEFAULT_MODEL));
+    assert_eq!(inv[2].model.as_deref(), Some("auto"));
+    assert_eq!(inv[3].model, None);
   }
 
   #[test]
