@@ -36,7 +36,7 @@ beecast-player = "=0.10.9"
 # The page pipeline for `scsh export-cast`: one self-contained offline `.html` per
 # recording, embedding the same player as the live pages. Its only dependency is
 # `beecast-player`, so nothing third-party rides in.
-beecast-page = "=0.10.7"
+beecast-page = "=0.10.9"
 # The first-party commits-diff packer, as a library: every step's commits and the whole
 # job's become one self-contained review page each, and the job page renders markdown with
 # its safety-first subset. No default features — the binary and its terminal progress bars

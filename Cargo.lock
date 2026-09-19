@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "beecast-page"
-version = "0.10.7"
+version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41c35b873d2767e33c6a479f03e77f9a038b1096656d885c6a7f3c5192933d69"
+checksum = "1e05ef0abc7c87ba065b8d7cbb9a2e23588e91dbdcc6bd5c1dcd12a582c8aa50"
 dependencies = [
  "beecast-player",
 ]
