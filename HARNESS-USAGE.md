@@ -1,7 +1,7 @@
 # Harness usage accounting
 
-`scsh` collects token usage after every Claude Code, Codex, and Cursor attempt without
-changing the interactive TUI or making another provider request. Collection happens before
+`scsh` requires token usage for every successful agent attempt without
+making another provider request. Collection happens before
 the attempt's forwarded credentials and temporary config are scrubbed:
 
 - Claude Code: sum the `usage` object on each unique assistant response in the fresh
@@ -10,7 +10,26 @@ the attempt's forwarded credentials and temporary config are scrubbed:
   then sum independent parent and subagent sessions. Forked sessions with inherited
   accounting are marked unavailable rather than double-counting the parent.
 - Cursor: keep the last cumulative token payload for each conversation from user-level
-  TUI hooks. The hooks live in the forwarded config home, never in the skill repository.
+  TUI hooks. The hooks append events; they never publish a persistent readiness marker.
+  Resumed work invalidates the previous completed stop; stop records must also match the result file's revision (mtime and size), so unrelated appends cannot revive an old stop. The hooks live in the forwarded
+  config home, never in the skill repository.
+
+Once a result exists, the host owns a single 30-second accounting deadline for every
+harness. Startup, inactivity, wall-clock, and result-quiescence watchdogs yield during
+that bounded phase. The host validates fresh native records and the latest turn's completion,
+atomically saves the accounting snapshot, then authorizes the container to request a clean
+exit (`/exit` or `/quit`). No completion path sends Ctrl-C. Teardown gets a separate bounded
+grace period; a wedged process is still cleaned up. A timeout is recorded before teardown
+and stays a failure even if counters arrive late.
+
+Missing or incomplete native counters fail the attempt as `usage_accounting_unavailable`;
+a harness that remains live without complete accounting for the full 30-second bound fails as
+`usage_accounting_timeout`. Both retain the result, recording, hook stream, and run clone for
+inspection. For latency-sensitive work where counters are deliberately unnecessary,
+`SCSH_NO_USAGE=1 scsh run …` disables the requirement and accounting wait for every harness.
+Grok and OpenCode currently have no native accounting adapters: required accounting fails
+explicitly as `usage_accounting_unavailable`; these routes require the opt-out until an
+adapter exists. Cache hits launch no agent and are exempt from new accounting.
 
 The session browser shows one small usage line below the recording only after the attempt
 has finished. A cache hit launches no harness and therefore creates no new usage record.
@@ -53,11 +72,11 @@ subagents locally, their session files are included.
 Every field is required. Counts are nonnegative integers no greater than
 9,007,199,254,740,991. `cache_write`, `llm_round_trips`, and `tool_calls` may be `null`
 when the harness does not expose them reliably. In particular, Codex token snapshots
-do not identify model round-trips or tool calls. An interrupted attempt has
+do not identify model round-trips or tool calls. An interrupted attempt without a finalized accounting snapshot has
 `complete: false` even when some counters were recovered. Unsupported harnesses and
 cache hits have `usage: null`; they do not pretend to have measured usage.
 
-Collection reads local files once after the process exits; it makes no provider request.
+Collection polls local files during completion; it makes no provider request.
 Cursor additionally appends one local record per hook. The cost scales with the run's
 transcript size. The results-side file contains the latest attempt; uniquely named log
 files and individual session procs preserve each attempt separately.

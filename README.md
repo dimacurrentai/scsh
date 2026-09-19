@@ -144,6 +144,9 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
   Every Claude Code, Codex, and Cursor attempt normalizes its native token counters into
   one strict schema, shown below the finished recording and stored beside the result.
   See [harness usage accounting](HARNESS-USAGE.md).
+
+  Native token counters are required by default for every harness. After the result appears, ordinary watchdogs yield to a dedicated accounting wait of up to 30 seconds; only then does `scsh` request a graceful exit, never automatic Ctrl-C. Missing counters fail with `usage_accounting_timeout` or `usage_accounting_unavailable`. Set `SCSH_NO_USAGE=1` to explicitly skip this requirement and wait. Grok and OpenCode currently have no native accounting adapter and require that opt-out.
+
 - **`result`** *(required)* — a **repo-relative** path the skill must create (keep it
   under the gitignored `tmp/`). A missing result fails the skill. When it appears,
   `scsh` parses it as JSON and prints the message — a `result`/`message` field, or a

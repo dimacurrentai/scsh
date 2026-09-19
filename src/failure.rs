@@ -47,6 +47,13 @@ pub mod reason {
   pub const CONTAINER_RUN: &str = "container_run_failed";
   pub const RESULT_MISSING: &str = "result_file_missing";
   pub const RESULT_INVALID: &str = "result_schema_invalid";
+  /// A harness finished the task, but its native accounting did not finish
+  /// within the bounded post-result grace period. The result is preserved, but a run that
+  /// requires accounting must not silently publish it without its counters.
+  pub const USAGE_ACCOUNTING_TIMEOUT: &str = "usage_accounting_timeout";
+  /// A harness exited without a complete, parseable native token total. Distinct
+  /// from a timeout: this also covers a hook that exited early or emitted incomplete fields.
+  pub const USAGE_ACCOUNTING_UNAVAILABLE: &str = "usage_accounting_unavailable";
   pub const THREAD_PANICKED: &str = "skill_thread_panicked";
   /// A browser stop request was accepted and container teardown is still in progress.
   pub const STOP_REQUESTED: &str = "stop_requested";

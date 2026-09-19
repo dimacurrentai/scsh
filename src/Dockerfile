@@ -182,12 +182,11 @@ RUN printf '%s\n' \
   '      fi' \
   '    fi' \
   '    if [ -f "$result" ]; then' \
-  '      log "watcher: result appeared -> quit via $quit"' \
-  '      sleep 4' \
+  '      log "watcher: result appeared -> waiting for host accounting decision"' \
+  '      while [ ! -f "$SCSH_RUN_LOG.shutdown" ] && tmux has-session -t scsh 2>/dev/null; do sleep 0.1; done' \
   '      case "$quit" in' \
   '        slash-exit)    tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter ;;' \
   '        slash-quit)    tmux send-keys -t scsh -l /quit; sleep 1; tmux send-keys -t scsh Enter ;;' \
-  '        double-ctrl-c) tmux send-keys -t scsh C-c;      sleep 1; tmux send-keys -t scsh C-c   ;;' \
   '      esac' \
   '      i=0' \
   '      while tmux has-session -t scsh 2>/dev/null && [ "$i" -lt 12 ]; do' \
@@ -197,7 +196,6 @@ RUN printf '%s\n' \
   '          case "$quit" in' \
   '            slash-exit)    tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter ;;' \
   '            slash-quit)    tmux send-keys -t scsh -l /quit; sleep 1; tmux send-keys -t scsh Enter ;;' \
-  '            double-ctrl-c) tmux send-keys -t scsh C-c;      sleep 1; tmux send-keys -t scsh C-c   ;;' \
   '          esac' \
   '        fi' \
   '        sleep 1' \
