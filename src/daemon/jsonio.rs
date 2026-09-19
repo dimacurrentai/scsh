@@ -226,12 +226,13 @@ fn proc_json(p: &ProcRecord) -> String {
     Some(s) => format!("{s}"),
     None => "null".to_string(),
   };
+  let usage = p.usage.as_ref().map(crate::usage::Summary::compact_json).unwrap_or_else(|| "null".into());
   format!(
     "{{ \"index\": {}, \"previous_attempt\": {previous_attempt}, \"label\": {}, \"kind\": {}, \"status\": {}, \"skill_name\": {}, \
 \"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \
 \"elapsed\": {}, \"container_name\": {}, \"container_runtime\": {}, \"cast_path\": {}, \"diff_path\": {}, \
 \"skill_source\": {}, \"route\": {}, \"result_path\": {}, \"annotate_target\": {}, \"phase\": {}, \
-\"phase_until\": {phase_until}, \"lines\": [{}] }}",
+\"phase_until\": {phase_until}, \"usage\": {}, \"lines\": [{}] }}",
     p.index,
     quote(&p.label),
     quote(p.kind.as_str()),
@@ -252,6 +253,7 @@ fn proc_json(p: &ProcRecord) -> String {
     opt_str(&p.result_path),
     opt_str(&p.annotate_target),
     opt_str(&p.phase),
+    usage,
     lines.join(", ")
   )
 }
@@ -402,6 +404,12 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
     // the run either resumes and clears it or fails and replaces it.
     phase: field_str(obj, "phase"),
     phase_until: field_num(obj, "phase_until").map(|n| n as u64),
+    usage: match field_value(obj, "usage").ok() {
+      None | Some(Value::Null) => None,
+      Some(value) => {
+        Some(crate::usage::Summary::from_json(&crate::json::write(value)).ok_or("invalid TokenUsage on proc")?)
+      }
+    },
     lines,
   })
 }
@@ -521,6 +529,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      usage: None,
     };
     let json = proc_json(&proc);
     assert!(!json.contains("NaN"));
@@ -565,6 +574,7 @@ mod tests {
         phase: None,
         phase_until: None,
         lines: vec![OutputLine { at: 0.1, text: "step 1".into() }],
+        usage: None,
       }],
       last_seen_at: 105,
       client_connected: false,
@@ -585,6 +595,18 @@ mod tests {
     assert_eq!(s.ended_at, Some(105));
     assert_eq!(s.skills[0].name, "add");
     assert_eq!(s.parent_session, None);
+
+    let usage = crate::usage::Summary {
+      harness: crate::usage::Harness::Codex,
+      complete: true,
+      tokens: Some(crate::usage::Tokens { input: 10, output: 2, cache_read: 30, cache_write: None }),
+      llm_round_trips: None,
+      tool_calls: None,
+    };
+    session.procs[0].usage = Some(usage.clone());
+    let saved = session_json_store(&session);
+    assert_eq!(parse_session_json(&saved).unwrap().procs[0].usage, Some(usage));
+    assert!(parse_session_json(&saved.replace("\"schema_version\":1", "\"schema_version\":2")).is_err());
 
     session.parent_session = Some("parent1".into());
     let with_parent = parse_session_json(&session_json_store(&session)).unwrap();

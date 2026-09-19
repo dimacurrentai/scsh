@@ -48,6 +48,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
         started_at: Some(1),
         elapsed: None,
         lines: vec![],
+        usage: None,
       }],
       workflow: None,
       parent_session: None,
@@ -56,6 +57,95 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
     },
   );
   store
+}
+
+#[test]
+fn usage_appears_only_after_a_finished_player() {
+  let usage = crate::usage::Summary {
+    harness: crate::usage::Harness::ClaudeCode,
+    complete: true,
+    tokens: Some(crate::usage::Tokens { input: 12, output: 3, cache_read: 40, cache_write: Some(5) }),
+    llm_round_trips: Some(2),
+    tool_calls: Some(1),
+  };
+  let mut running = store_with_cast_proc(ProcStatus::Running);
+  running.sessions.get_mut("castab").unwrap().procs[0].usage = Some(usage.clone());
+  let running_html = session_page(&running, "castab").unwrap();
+  let running_proc = running_html.split("id=\"proc-0\"").nth(1).unwrap().split("</details>").next().unwrap();
+  assert!(!running_proc.contains("<div class=\"proc-usage"));
+
+  let mut done = store_with_cast_proc(ProcStatus::Ok);
+  done.sessions.get_mut("castab").unwrap().procs[0].usage = Some(usage);
+  let html = session_page(&done, "castab").unwrap();
+  let player = html.find("class=\"cast-player\"").expect("player");
+  let accounting = html.find("class=\"proc-usage dim\"").expect("finished usage");
+  assert!(player < accounting, "usage belongs below the completed player");
+  assert!(html.contains("57 input tokens · 3 output tokens · 40 cached tokens · 2 LLM calls · 1 tool call"));
+  assert!(html.contains("Uncached input: 12 · Cache read: 40 · Cache write: 5"));
+  let exports = [super::session_export::CastExport::Cast {
+    ndjson: r#"{"version":3,"term":{"cols":10,"rows":3}}
+[0.1,"o","hello"]
+"#
+    .into(),
+    summary: None,
+    chapters: vec![],
+    diff_html: None,
+    annotation: None,
+  }];
+  let offline = session_export_page(done.sessions.get("castab").unwrap(), &exports, None, 10);
+  assert!(offline.find("class=\"cast-player\"").unwrap() < offline.find("class=\"proc-usage dim\"").unwrap());
+  assert!(offline.contains("57 input tokens · 3 output tokens · 40 cached tokens · 2 LLM calls · 1 tool call"));
+}
+
+#[test]
+fn usage_footer_matches_the_live_client_and_new_rows() {
+  if crate::runtime::which("node").is_none() {
+    return;
+  }
+  let source = live_client_js();
+  let mut script = String::new();
+  for name in ["esc", "procIsLive", "procUsageHtml", "procHtml"] {
+    let start = source.find(&format!("function {name}(")).unwrap();
+    let end = source[start..].find("\n}\n").unwrap() + start + 3;
+    script.push_str(&source[start..end]);
+  }
+  script.push_str(
+    r#"
+const SESSION_ID = 'castab', liveSessions = {};
+const hasCast = p => !!p.cast_path;
+const castEmbedHtml = () => '<div class="cast-player"></div>';
+const procElapsedPhrase = () => '', workflowStepIdForProc = () => '';
+const attemptChipHtml = () => '', procStatHtml = () => '', retryLinkHtml = () => '';
+const originalAttemptLinkHtml = () => '', procMetaHtml = () => '';
+"#,
+  );
+  for status in [ProcStatus::Running, ProcStatus::Waiting, ProcStatus::Ok, ProcStatus::Fail] {
+    for text in [
+      r#"{"hook_event_name":"stop","conversation_id":"c","generation_id":"g","status":"completed","input_tokens":12,"output_tokens":3,"cache_read_tokens":4,"cache_write_tokens":1}"#,
+      "",
+    ] {
+      let mut store = store_with_cast_proc(status);
+      let session = store.sessions.get_mut("castab").unwrap();
+      session.procs[0].usage = Some(crate::usage::cursor_hook_summary(text));
+      let expected = super::proc::proc_usage_html(&session.procs[0]);
+      script.push_str(&format!(
+        r#"
+{{
+  const p = ({session}).procs[0];
+  const expected = {expected};
+  if (procUsageHtml(p) !== expected) throw new Error('usage footer parity');
+  const row = procHtml(p, true, 10);
+  if (expected && row.indexOf(expected) < row.indexOf('class="cast-player"')) throw new Error('footer placement');
+  if (!expected && row.includes('class="proc-usage')) throw new Error('live usage');
+}}
+"#,
+        session = crate::daemon::jsonio::session_json_store(session),
+        expected = crate::json::quote(&expected),
+      ));
+    }
+  }
+  let output = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
+  assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// The job page carries every section's card in a fixed order — errors, results, the job
@@ -82,7 +172,11 @@ fn job_page_puts_errors_and_results_above_the_graph_and_the_log_below_it() {
   session.push_report(entry(ReportSection::Results, "claude: add", "## Sum\n\n- **5**"));
   session.push_report(entry(ReportSection::Log, "claude: add", "ran `add`"));
   session.push_report(entry(ReportSection::Log, "host", "<script>alert(1)</script>"));
-  session.push_report(entry(ReportSection::Results, "claude: add", "| Behavior | Coverage |\n|---|:-:|\n| cap | unit ✓ |"));
+  session.push_report(entry(
+    ReportSection::Results,
+    "claude: add",
+    "| Behavior | Coverage |\n|---|:-:|\n| cap | unit ✓ |",
+  ));
   let html = session_page(&store, "castab").expect("page");
   assert!(html.contains(r#"id="job-results" data-job-report="results">"#), "a filled card is shown");
   assert!(html.contains(r#"id="job-errors" data-job-report="errors" hidden>"#), "an empty one stays hidden");
@@ -538,6 +632,7 @@ fn a_retried_route_is_visibly_a_retry() {
       started_at: Some(1),
       elapsed: Some(2.0),
       lines: vec![],
+      usage: None,
     }
   }
   let mut retry = skill(2, "add-claude", "claude", ProcStatus::Ok, None);
@@ -890,6 +985,7 @@ fn job_page_renders_the_loop_convergence_table() {
       started_at: Some(1),
       elapsed: Some(2.0),
       lines: vec![],
+      usage: None,
     }
   };
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
@@ -1205,6 +1301,7 @@ fn session_proc_html_has_no_stray_backslashes() {
         started_at: Some(1),
         elapsed: None,
         lines: vec![crate::daemon::model::OutputLine { at: 0.5, text: "building…".into() }],
+        usage: None,
       }],
       workflow: None,
       parent_session: None,
@@ -1265,6 +1362,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           started_at: Some(1),
           elapsed: Some(2.0),
           lines: vec![],
+          usage: None,
         },
         ProcRecord {
           index: 1,
@@ -1291,6 +1389,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           started_at: Some(1),
           elapsed: Some(2.0),
           lines: vec![],
+          usage: None,
         },
       ],
       workflow: None,
@@ -1489,6 +1588,7 @@ fn the_lede_counts_image_builds_separately_from_tasks() {
     annotate_target: None,
     phase: None,
     phase_until: None,
+    usage: None,
   };
   for (index, label) in ["build base", "build claude", "build codex", "build cursor"].iter().enumerate() {
     session.procs.push(proc(index, ProcKind::Build, label));
@@ -1755,6 +1855,7 @@ fn offline_export_embeds_commits_diff_when_present() {
       started_at: Some(1),
       elapsed: Some(1.0),
       lines: vec![],
+      usage: None,
     }],
     workflow: None,
     parent_session: None,
@@ -1849,6 +1950,7 @@ fn offline_export_renders_unrecorded_procs_as_note_rows() {
         OutputLine { at: 0.5, text: "Step 1/4 : FROM ubuntu".into() },
         OutputLine { at: 2.0, text: "<hostile> & escaped".into() },
       ],
+      usage: None,
     }],
     workflow: None,
     parent_session: None,
@@ -1910,6 +2012,7 @@ fn offline_export_includes_workflow_graph() {
         started_at: Some(1),
         elapsed: Some(4.0),
         lines: vec![],
+        usage: None,
       },
       ProcRecord {
         index: 1,
@@ -1936,6 +2039,7 @@ fn offline_export_includes_workflow_graph() {
         started_at: Some(5),
         elapsed: Some(5.0),
         lines: vec![],
+        usage: None,
       },
     ],
     workflow: Some(WorkflowMeta {
@@ -2146,6 +2250,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           started_at: Some(1),
           elapsed: Some(1.0),
           lines: vec![],
+          usage: None,
         },
         ProcRecord {
           index: 1,
@@ -2172,6 +2277,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           started_at: Some(1),
           elapsed: Some(1.2),
           lines: vec![],
+          usage: None,
         },
       ],
       workflow: None,
@@ -2260,6 +2366,7 @@ fn session_page_renders_job_level_fleet_verdict_across_skills() {
     started_at: Some(1),
     elapsed: Some(1.0),
     lines: vec![],
+    usage: None,
   };
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
   store.sessions.insert(
@@ -2351,6 +2458,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           started_at: None,
           elapsed: None,
           lines: vec![],
+          usage: None,
         },
         ProcRecord {
           index: 1,
@@ -2377,6 +2485,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           started_at: Some(1),
           elapsed: Some(1.0),
           lines: vec![],
+          usage: None,
         },
         ProcRecord {
           index: 2,
@@ -2403,6 +2512,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           started_at: Some(1),
           elapsed: None,
           lines: vec![],
+          usage: None,
         },
       ],
       workflow: None,
@@ -2615,6 +2725,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
         started_at: Some(1),
         elapsed: Some(3.0),
         lines: vec![],
+        usage: None,
       }],
       workflow: None,
       parent_session: None,
@@ -2707,6 +2818,7 @@ fn session_proc_html_has_no_autoscroll_checkbox() {
         // The auto-scroll control belongs to a text-output box, so the proc must have
         // streamed at least one line for the control to render.
         lines: vec![crate::daemon::model::OutputLine { at: 0.2, text: "cloning…".into() }],
+        usage: None,
       }],
       workflow: None,
       parent_session: None,
@@ -2770,6 +2882,7 @@ fn store_with_annotate_proc(status: ProcStatus) -> Store {
         started_at: Some(1),
         elapsed: None,
         lines: vec![],
+        usage: None,
       }],
       workflow: None,
       parent_session: None,
@@ -3426,6 +3539,7 @@ fn workflow_graph_renders_builtin_shapes() {
       started_at: Some(1),
       elapsed: Some(1.0),
       lines: vec![],
+      usage: None,
     }
   }
   // arith: add + multiply → summarize
@@ -4088,6 +4202,7 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
         started_at: Some(1),
         elapsed: Some(1.0),
         lines: vec![],
+        usage: None,
       }],
       last_seen_at: 10,
       client_connected: false,

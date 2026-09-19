@@ -356,6 +356,11 @@ pub(crate) fn grok_expires_at_lapsed(auth_json: &str, now: u64) -> bool {
 /// Run-dir-relative Cursor config dir (`CURSOR_CONFIG_DIR` inside the container).
 pub const CURSOR_FORWARD_REL: &str = "tmp/.cursor";
 
+/// Absolute Cursor config dir the container process sees.
+pub fn cursor_config_dir_in_container() -> String {
+  format!("{AGENT_REPO}/{CURSOR_FORWARD_REL}")
+}
+
 /// Run-dir-relative Linux auth dir (`$XDG_CONFIG_HOME/cursor/auth.json` in the container).
 pub const CURSOR_AUTH_FORWARD_REL: &str = "tmp/.config/cursor";
 
@@ -527,6 +532,7 @@ fn harness_container_env_verbose(harness: Harness, verbose: bool) -> Vec<(String
     Harness::Cursor => vec![
       (CURSOR_CONFIG_DIR_ENV.to_string(), format!("{AGENT_REPO}/{CURSOR_FORWARD_REL}")),
       (XDG_CONFIG_HOME_ENV.to_string(), format!("{AGENT_REPO}/tmp/.config")),
+      ("SCSH_CURSOR_HOOKS_LOG".to_string(), format!("{AGENT_REPO}/{RUN_LOG_REL}.cursor-hooks.jsonl")),
     ],
   }
 }
@@ -678,6 +684,10 @@ pub fn harness_command(
       // config dir), so it is created in-container just before the TUI starts. The repo
       // path slug is `/`-stripped, `/`->`-` of AGENT_REPO.
       let trust_dir = format!("$HOME/.cursor/projects/{}", AGENT_REPO.trim_start_matches('/').replace('/', "-"));
+      // User-level hooks (not a project `.cursor/hooks.json`): the interactive TUI
+      // reads `$HOME/.cursor/hooks.json`. scsh writes that file into the forwarded
+      // config home and copies it here so recordings stay a real TUI while tokens
+      // still land in `${SCSH_RUN_LOG}.cursor-hooks.jsonl`.
       // No `exec`: the wrapping shell must survive cursor-agent to record its exit status.
       // `--disable-auto-update` (a hidden but stable cursor-agent flag, present in every
       // version scsh has pinned): the launcher's auto-updater is the prime suspect for the
@@ -689,7 +699,9 @@ pub fn harness_command(
       // `--approve-mcps` lets configured project and forwarded MCP servers load
       // without an interactive approval prompt in the unattended container.
       let mut tui = format!(
-        "mkdir -p {trust_dir} && : > {trust_dir}/.workspace-trusted &&          cursor-agent --force --approve-mcps --sandbox disabled --disable-auto-update"
+        "mkdir -p {trust_dir} \"$HOME/.cursor\" && : > {trust_dir}/.workspace-trusted && \
+         if [ -f \"${{CURSOR_CONFIG_DIR}}/hooks.json\" ]; then cp \"${{CURSOR_CONFIG_DIR}}/hooks.json\" \"$HOME/.cursor/hooks.json\"; fi && \
+         cursor-agent --force --approve-mcps --sandbox disabled --disable-auto-update"
       );
       if let Some(m) = model {
         tui.push_str(" --model ");
@@ -3115,6 +3127,8 @@ TAG
     );
     assert!(cmd.contains("cursor-agent --force --approve-mcps --sandbox disabled"), "got: {cmd}");
     assert!(!cmd.contains("cursor-agent -p"), "got: {cmd}");
+    assert!(!cmd.contains("--print"), "Cursor must retain its interactive TUI: {cmd}");
+    assert!(!cmd.contains("stream-json"), "Cursor must retain its interactive TUI: {cmd}");
     assert!(!cmd.contains("--trust"), "got: {cmd}");
     assert!(cmd.contains(" --model composer-2.5-fast"));
     assert!(cmd.contains(".cursor/projects/home-agent-repo/.workspace-trusted"), "got: {cmd}");
@@ -3128,6 +3142,10 @@ TAG
       "the Cursor prompt follows an option delimiter: {cmd}"
     );
     assert!(!cmd.contains("cursor-usage.jsonl"), "Cursor must not require a project-specific hook: {cmd}");
+    assert!(
+      cmd.contains("$HOME/.cursor/hooks.json"),
+      "user-level hook copy keeps the TUI and avoids a project hooks.json: {cmd}"
+    );
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
     let bare = harness_command(
       Harness::Cursor,
@@ -3218,9 +3236,11 @@ TAG
     assert_eq!(codex[0].0, "RUST_LOG");
     assert!(harness_container_env_verbose(Harness::Codex, false).is_empty());
     let cursor = harness_container_env_verbose(Harness::Cursor, false);
-    assert_eq!(cursor.len(), 2);
+    assert_eq!(cursor.len(), 3);
     assert_eq!(cursor[0].0, "CURSOR_CONFIG_DIR");
     assert_eq!(cursor[1].0, "XDG_CONFIG_HOME");
+    assert_eq!(cursor[2].0, "SCSH_CURSOR_HOOKS_LOG");
+    assert!(cursor[2].1.ends_with(".cursor-hooks.jsonl"));
   }
 
   #[test]

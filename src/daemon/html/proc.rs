@@ -237,6 +237,22 @@ pub(crate) fn proc_meta_html(proc: &ProcRecord) -> String {
   }
 }
 
+/// A finished attempt's accounting, deliberately rendered after its player rather than in
+/// the live metadata row. A running recording never advertises partial spend as a final total.
+pub(crate) fn proc_usage_html(proc: &ProcRecord) -> String {
+  if proc_is_live(proc.status) {
+    return String::new();
+  }
+  match proc.usage.as_ref() {
+    Some(usage) => format!(
+      r#"<div class="proc-usage dim" title="{}"><strong>cost</strong> {}</div>"#,
+      esc(&usage.details()),
+      esc(&usage.phrase())
+    ),
+    None => String::new(),
+  }
+}
+
 #[cfg(test)]
 mod elapsed_phrase_tests {
   use super::elapsed_phrase;

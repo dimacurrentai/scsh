@@ -236,6 +236,9 @@ pub struct ProcRecord {
   /// When the current [`Self::phase`] is expected to end (unix seconds), when that is known —
   /// the provider's own reset instant for a usage-limit wait.
   pub phase_until: Option<u64>,
+  /// Strict normalized `TokenUsage` JSON for the attempt, including an explicit unavailable
+  /// record when a supported harness stopped before it emitted counters.
+  pub usage: Option<crate::usage::Summary>,
 }
 
 impl ProcRecord {
@@ -1005,6 +1008,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      usage: None,
     }
   }
 
@@ -1273,6 +1277,7 @@ mod tests {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        usage: None,
       }],
       last_seen_at: 200,
       client_connected: false,
@@ -1456,6 +1461,7 @@ mod tests {
       annotate_target: Some("/r/casts/add.cast".into()),
       phase: None,
       phase_until: None,
+      usage: None,
     };
     let session = |id: &str, parent: Option<&str>, ended_at: Option<u64>, procs: Vec<ProcRecord>| Session {
       id: id.into(),
@@ -1549,6 +1555,7 @@ mod tests {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        usage: None,
       }],
       last_seen_at: 50,
       client_connected: false,
@@ -1598,6 +1605,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 1,
@@ -1624,6 +1632,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
       ],
       last_seen_at: 1,

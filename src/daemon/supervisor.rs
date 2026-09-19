@@ -290,6 +290,7 @@ mod tests {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        usage: None,
       }],
       last_seen_at: now - 10,
       client_connected: false,

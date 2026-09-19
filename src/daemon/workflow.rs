@@ -952,6 +952,7 @@ mod tests {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        usage: None,
       }],
       last_seen_at: 60, // running-idle timeout elapses at 60 + 30 minutes
       client_connected: true,
@@ -1012,6 +1013,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 1,
@@ -1038,6 +1040,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
       ],
       last_seen_at: 50,
@@ -1112,6 +1115,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 1,
@@ -1138,6 +1142,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 2,
@@ -1164,6 +1169,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 3,
@@ -1190,6 +1196,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 4,
@@ -1216,6 +1223,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
       ],
       last_seen_at: 1,
@@ -1277,6 +1285,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      usage: None,
     };
     let session = Session {
       id: "cold1".into(),
@@ -1352,6 +1361,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 1,
@@ -1378,6 +1388,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 2,
@@ -1404,6 +1415,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 3,
@@ -1430,6 +1442,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
       ],
       last_seen_at: 1,
@@ -1490,6 +1503,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 1,
@@ -1516,6 +1530,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 2,
@@ -1542,6 +1557,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
       ],
       last_seen_at: 1,
@@ -1625,6 +1641,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 1,
@@ -1651,6 +1668,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
         ProcRecord {
           index: 2,
@@ -1677,6 +1695,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          usage: None,
         },
       ],
       last_seen_at: 1,

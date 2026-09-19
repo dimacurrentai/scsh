@@ -55,6 +55,8 @@ pub struct FleetRoute {
   pub comments_count: Option<u64>,
   pub issues_found: Option<u64>,
   pub result_message: Option<String>,
+  /// Strict normalized `TokenUsage` JSON for this route's attempt, when supported.
+  pub usage: Option<crate::usage::Summary>,
 }
 
 /// Routes that share a `skill_source` (len ≥ 2).
@@ -103,6 +105,7 @@ pub fn fleet_groups(procs: &[ProcRecord]) -> Vec<FleetGroup> {
         comments_count: parsed.as_ref().and_then(|s| s.comments_count),
         issues_found: parsed.as_ref().and_then(|s| s.issues_found),
         result_message: parsed.as_ref().and_then(|s| s.message.clone()).or_else(|| p.detail.clone()),
+        usage: p.usage.clone(),
       });
     }
     let summary = summarize_group(&skill_source, &routes);
@@ -150,8 +153,9 @@ pub fn group_rollup_json(g: &FleetGroup) -> String {
     if let Some(m) = r.result_message.as_deref().or(r.detail.as_deref()) {
       messages.push(m.to_string());
     }
+    let usage = r.usage.as_ref().map(crate::usage::Summary::compact_json).unwrap_or_else(|| "null".into());
     routes_json.push(format!(
-      "{{ \"route\": {}, \"harness\": {}, \"model\": {}, \"status\": {}, \"detail\": {}, \"grade\": {}, \"issues_found\": {} }}",
+      "{{ \"route\": {}, \"harness\": {}, \"model\": {}, \"status\": {}, \"detail\": {}, \"grade\": {}, \"issues_found\": {}, \"usage\": {} }}",
       json::quote(&r.route),
       json::quote(&r.harness),
       opt_json_str(r.model.as_deref()),
@@ -159,6 +163,7 @@ pub fn group_rollup_json(g: &FleetGroup) -> String {
       opt_json_str(r.detail.as_deref()),
       opt_json_str(r.grade.as_deref()),
       r.issues_found.map(|n| n.to_string()).unwrap_or_else(|| "null".into()),
+      usage,
     ));
   }
   let agree = !messages.is_empty() && messages.iter().all(|m| m == &messages[0]);
@@ -633,6 +638,7 @@ mod tests {
       comments_count: None,
       issues_found: issues,
       result_message: None,
+      usage: None,
     }
   }
 
@@ -756,6 +762,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      usage: None,
     };
     let procs = vec![
       // Registered out of order, to prove the trajectory is sorted by cycle.
@@ -828,6 +835,7 @@ mod tests {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        usage: None,
       },
       ProcRecord {
         index: 1,
@@ -854,6 +862,7 @@ mod tests {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        usage: None,
       },
     ];
     let written = write_rollups(session, &procs);

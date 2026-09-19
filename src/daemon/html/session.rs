@@ -3,7 +3,9 @@
 use super::escape::esc;
 use super::fleet::fleet_sections_by_anchor;
 use super::layout::wrap_page;
-use super::proc::{cast_embed_html, proc_elapsed_phrase, proc_has_cast, proc_meta_html, summary_stats_html};
+use super::proc::{
+  cast_embed_html, proc_elapsed_phrase, proc_has_cast, proc_meta_html, proc_usage_html, summary_stats_html,
+};
 use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html_for};
 use crate::daemon::model::{ProcKind, ProcStatus, ReportSection, Session, SessionLifecycle, Store};
 use crate::daemon::paths::now_unix_secs;
@@ -41,6 +43,7 @@ pub fn session_page_for(session: &Session, lifecycle: SessionLifecycle) -> Strin
     // canonical case — stays a slim summary-only row. There is deliberately no text-log
     // body: the cast IS the output format.
     let body_html = if proc_has_cast(proc) { cast_embed_html(&session.id, proc) } else { String::new() };
+    let usage_html = proc_usage_html(proc);
     let snapshot_btn = proc_snapshot_btn_html(&session.id, proc);
     let diff_btn = proc_diff_btn_html(&session.id, proc);
     let annotation_target = annotation_target_link_html(session, proc);
@@ -63,6 +66,7 @@ pub fn session_page_for(session: &Session, lifecycle: SessionLifecycle) -> Strin
 <div class="detail">{detail}</div>
 {container_line}
 {body_html}
+{usage_html}
 </details>
 "#,
       status_class = if terminating { "terminating" } else { proc.status.as_str() },
@@ -81,6 +85,7 @@ pub fn session_page_for(session: &Session, lifecycle: SessionLifecycle) -> Strin
       note = note_html,
       detail = esc(detail),
       container_line = container_line_html(proc),
+      usage_html = usage_html,
       attempt_chip = attempt_chip,
       original_link = original_link,
       retry_link = retry_link,

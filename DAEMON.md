@@ -80,9 +80,16 @@ as a timeout (a real setup bug) rather than being auto-clicked. Per harness:
   no non-interactive escape); onboarding + workspace trust seeded into the forwarded
   `.claude.json`.
 - **codex** — `--dangerously-bypass-approvals-and-sandbox`; `trust_level = "trusted"`
-  appended to the forwarded `config.toml`.
-- **cursor** — `--force`; its `~/.cursor/projects/<repo-slug>/.workspace-trusted` marker
+  appended to the forwarded `config.toml`. Its final cumulative session counter is
+  normalized after each attempt.
+- **cursor** — `--force`; user-level TUI hooks record tokens, LLM round-trips, and tool
+  calls without leaving print-mode JSON on the recording. Its `~/.cursor/projects/<repo-slug>/.workspace-trusted` marker
   pre-created in-container (`--trust` is print-mode-only, and there is no config key).
+
+Claude Code transcripts, Codex session JSONL, and Cursor hooks are read locally after
+the interactive process exits. This adds no provider request or model call. Each finished
+recording gets one usage line below its player; the same strict `TokenUsage` object is
+available as `procs[].usage` from `GET /api/v1/session/{id}`.
 
 Missing/invalid credentials fail fast with a clear "log in on the host" error before any
 container starts — scsh never tries to drive a login screen.

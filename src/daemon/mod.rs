@@ -17,6 +17,7 @@ pub mod reap;
 mod server;
 mod setup;
 mod supervisor;
+pub(crate) mod usage;
 mod websocket;
 mod workflow;
 

@@ -793,6 +793,8 @@ pub(crate) const PAGE_CSS: &str = r#"
     color: var(--text-muted);
   }
   .proc-meta strong { font-weight: 600; margin-right: 0.25rem; color: var(--text); }
+  .proc-usage { font-size: 0.78rem; margin: 0.5rem 0 0; font-variant-numeric: tabular-nums; letter-spacing: 0.01em; }
+  .proc-usage strong { font-weight: 600; margin-right: 0.25rem; color: var(--text); }
   .proc-stat { font-size: 0.8rem; color: var(--text-muted); }
   summary .meta {
     font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap;
