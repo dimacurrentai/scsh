@@ -1881,6 +1881,25 @@ mod tests {
   }
 
   #[test]
+  fn github_review_preparation_can_read_inputs_and_write_its_result() {
+    let def = builtin("gh-gorgeous-review");
+    for harness in ["claude", "codex", "cursor", "grok"] {
+      let id = format!("prepare_{harness}");
+      let step = def.steps.iter().find(|s| s.id == id).expect("publisher preparation step");
+      let body = step.render_skill_body().split_whitespace().collect::<Vec<_>>().join(" ");
+      assert!(body.contains("Use local commands or scripts to read the named input environment variables"), "{id}");
+      assert!(body.contains("write the required JSON to the path in SCSH_RESULT"), "{id}");
+      assert!(!body.contains("Do not run any command"), "{id} must permit the required result I/O");
+      assert!(body.contains("Do not run git commands, call GitHub, access the network"), "{id}");
+      assert!(body.contains("These values are provided as environment variables"), "{id}");
+      assert!(body.contains("`CONVENTIONS_CODEX_COMMENTS`"), "{id}");
+      assert!(body.contains("`findings` (JSON object)"), "{id}");
+      assert!(body.contains("`summary` (string)"), "{id}");
+      assert!(body.contains("`approval_bar` (bool)"), "{id}");
+    }
+  }
+
+  #[test]
   fn builtin_arith_runs_three_steps_on_three_harnesses() {
     let def = builtin("arith");
     assert!(def.is_workflow());
