@@ -10537,6 +10537,10 @@ the run fails only when every selected skill is skipped.",
     "Skip required native token accounting and its bounded completion wait for every harness.",
   );
   help_row(
+    "SCSH_USAGE_ACCOUNTING_TIMEOUT",
+    "Seconds to wait for native counters after a result (default 30; Cursor 90).",
+  );
+  help_row(
     "SCSH_REPAIR_RESULT_JSON=0",
     "Require strict result JSON (default repairs undefined escapes; =1 enables repair).",
   );
@@ -10739,7 +10743,8 @@ fn print_help_internals() {
   Cursor uses cursor-grok-4.6-high-fast; its interactive TUI is recorded with asciinema.
   Token usage is required for every successful agent attempt and displayed
   below its completed recording. Every harness gets a bounded accounting phase before
-  teardown; ordinary watchdogs yield for up to 30 seconds while counters finish. Missing or
+  teardown; ordinary watchdogs yield while counters finish (30s, or 90s for Cursor;
+  override with SCSH_USAGE_ACCOUNTING_TIMEOUT). Missing or
   timed-out counters fail with a dedicated accounting reason. Grok and OpenCode currently
   have no accounting adapter and require the explicit opt-out.
   SCSH_NO_USAGE=1 selects the lower-latency path that permits unavailable counters. External

@@ -4,6 +4,36 @@ use crate::usage::{cursor_hook_summary, unavailable, Harness, Summary};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// Default accounting wait after a result appears, for every harness except Cursor.
+pub const DEFAULT_ACCOUNTING_TIMEOUT_SECS: u64 = 30;
+/// Cursor hooks trail the result; give them a longer default than the other harnesses.
+pub const CURSOR_ACCOUNTING_TIMEOUT_SECS: u64 = 90;
+/// Extra seconds after the accounting wait before a wedged container is abandoned.
+const ACCOUNTING_LEAK_GRACE_SECS: u64 = 15;
+
+/// How long to wait for native counters after the result appears.
+///
+/// `SCSH_USAGE_ACCOUNTING_TIMEOUT` (seconds, > 0) overrides every harness. Otherwise
+/// Cursor gets [`CURSOR_ACCOUNTING_TIMEOUT_SECS`] and every other harness gets
+/// [`DEFAULT_ACCOUNTING_TIMEOUT_SECS`].
+pub fn accounting_timeout_secs(harness: crate::config::Harness) -> u64 {
+  accounting_timeout_from_env(harness, std::env::var("SCSH_USAGE_ACCOUNTING_TIMEOUT").ok().as_deref())
+}
+
+fn accounting_timeout_from_env(harness: crate::config::Harness, raw: Option<&str>) -> u64 {
+  if let Some(raw) = raw {
+    if let Ok(n) = raw.parse::<u64>() {
+      if n > 0 {
+        return n;
+      }
+    }
+  }
+  match harness {
+    crate::config::Harness::Cursor => CURSOR_ACCOUNTING_TIMEOUT_SECS,
+    _ => DEFAULT_ACCOUNTING_TIMEOUT_SECS,
+  }
+}
+
 /// One host-owned deadline for every harness. The container only exits after this
 /// controller has saved validated counters or journaled the accounting failure.
 pub struct Completion {
@@ -29,7 +59,8 @@ impl Completion {
       return false;
     }
     let started = *self.started.get_or_insert(now);
-    if now.duration_since(started) >= Duration::from_secs(45) {
+    let wait = accounting_timeout_secs(harness);
+    if now.duration_since(started) >= Duration::from_secs(wait.saturating_add(ACCOUNTING_LEAK_GRACE_SECS)) {
       // Even a full disk preventing the shutdown instruction must not leak a container.
       return false;
     }
@@ -37,7 +68,7 @@ impl Completion {
       return true;
     }
     self.next_poll = now + Duration::from_millis(250);
-    let expired = now.duration_since(started) >= Duration::from_secs(30);
+    let expired = now.duration_since(started) >= Duration::from_secs(wait);
     let ready = if required && !expired { completed_usage(harness, dir, result) } else { None };
     let error = dir.join(format!("{}.usage-error", crate::runtime::RUN_LOG_REL));
     let unsupported = matches!(harness, crate::config::Harness::Grok | crate::config::Harness::Opencode);
@@ -55,8 +86,9 @@ impl Completion {
         // A timeout remains a failure even if late counters appear during teardown.
         let detail = if unsupported {
           "unavailable: this harness has no native accounting adapter; use SCSH_NO_USAGE=1 to run without counters"
+            .to_string()
         } else {
-          "timeout: native accounting did not complete within 30s of the result"
+          format!("timeout: native accounting did not complete within {wait}s of the result")
         };
         if crate::atomic_write(&error, detail.as_bytes()).is_err() {
           return false;
@@ -220,7 +252,7 @@ mod completion_tests {
       let mut state = Completion::new();
       assert!(run.poll(&mut state, harness, true));
       assert!(!run.artifact("shutdown").exists());
-      state.started = Some(Instant::now() - Duration::from_secs(29));
+      state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs(harness).saturating_sub(1)));
       assert!(run.poll(&mut state, harness, true));
       assert!(!run.artifact("shutdown").exists(), "the full accounting budget remains available");
       let transcript = run.0.join(path);
@@ -239,9 +271,18 @@ mod completion_tests {
     for harness in [Agent::Cursor, Agent::Claude, Agent::Codex, Agent::Grok, Agent::Opencode] {
       let run = Run::new();
       let mut state = Completion::new();
-      state.started = Some(Instant::now() - Duration::from_secs(31));
+      state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs(harness) + 1));
       assert!(run.poll(&mut state, harness, true));
       assert!(run.artifact("usage-error").exists());
+      if !matches!(harness, Agent::Grok | Agent::Opencode) {
+        assert_eq!(
+          std::fs::read_to_string(run.artifact("usage-error")).unwrap(),
+          format!(
+            "timeout: native accounting did not complete within {}s of the result",
+            accounting_timeout_secs(harness)
+          )
+        );
+      }
       assert!(run.artifact("shutdown").exists());
       state.released = Some(Instant::now() - Duration::from_secs(16));
       assert!(!run.poll(&mut state, harness, true), "teardown remains bounded");
@@ -265,6 +306,18 @@ mod completion_tests {
       .unwrap();
     assert!(run.poll(&mut Completion::new(), Agent::Cursor, true));
     assert!(!run.artifact("shutdown").exists());
+  }
+
+  #[test]
+  fn cursor_waits_longer_than_other_harnesses_unless_overridden() {
+    for harness in [Agent::Claude, Agent::Codex, Agent::Grok, Agent::Opencode, Agent::Cursor] {
+      let expected = if harness == Agent::Cursor { 90 } else { 30 };
+      assert_eq!(accounting_timeout_from_env(harness, None), expected);
+      assert_eq!(accounting_timeout_from_env(harness, Some("12")), 12);
+      for invalid in ["0", "-1", "bad", ""] {
+        assert_eq!(accounting_timeout_from_env(harness, Some(invalid)), expected);
+      }
+    }
   }
 
   #[test]
