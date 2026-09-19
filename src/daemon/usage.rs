@@ -70,9 +70,8 @@ impl Completion {
   }
 }
 
-/// Reject old terminal events: the transcript containing a completed turn must have
-/// changed at or after this result, and its latest turn must be terminal. A hook's
-/// historical stop event alone is never permission to close a later generation.
+/// Each attempt owns a fresh transcript tree. Require it to change at or after the
+/// result and require its latest logical turn to be terminal.
 fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -> Option<Summary> {
   let result_time = std::fs::metadata(result).ok()?.modified().ok()?;
   let paths = match harness {
@@ -95,13 +94,6 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
     fresh |= after.modified().ok()? >= result_time;
     if harness != crate::config::Harness::Cursor && !crate::usage::turn_finished(harness, &stream) {
       return None;
-    }
-    if harness == crate::config::Harness::Cursor {
-      let nanos = result_time.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
-      let revision = format!("{nanos}:{}", std::fs::metadata(result).ok()?.len());
-      if !crate::usage::cursor_stop_matches_result(&stream, &revision) {
-        return None;
-      }
     }
     streams.push(Some(stream));
   }
@@ -233,13 +225,6 @@ mod completion_tests {
       assert!(!run.artifact("shutdown").exists(), "the full accounting budget remains available");
       let transcript = run.0.join(path);
       std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-      let stream = if harness == Agent::Cursor {
-        let metadata = std::fs::metadata(run.0.join("tmp/result.json")).unwrap();
-        let nanos = metadata.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        stream.replacen('{', &format!(r#"{{"scsh_result_revision":"{nanos}:{}","#, metadata.len()), 1)
-      } else {
-        stream.to_string()
-      };
       std::fs::write(transcript, stream).unwrap();
       assert!(run.poll(&mut state, harness, true));
       assert!(run.artifact("shutdown").exists(), "{harness:?}");
@@ -283,12 +268,19 @@ mod completion_tests {
   }
 
   #[test]
-  fn fresh_append_cannot_revive_a_stop_for_a_different_result_revision() {
+  fn real_cursor_hook_order_releases_complete_counters() {
     let run = Run::new();
-    std::fs::write(run.artifact("cursor-hooks.jsonl"), r#"{"hook_event_name":"stop","scsh_result_revision":"old:2","status":"completed","input_tokens":10,"output_tokens":2,"cache_read_tokens":0,"cache_write_tokens":0}
-{"hook_event_name":"sessionEnd","status":"completed"}
+    std::fs::write(run.artifact("cursor-hooks.jsonl"), r#"{"hook_event_name":"stop","conversation_id":"c","generation_id":"g","status":"completed","input_tokens":294213,"output_tokens":8032,"cache_read_tokens":171008,"cache_write_tokens":0}
+{"hook_event_name":"afterAgentResponse","conversation_id":"c","generation_id":"g"}
+{"hook_event_name":"sessionEnd","conversation_id":"c","status":"completed"}
 "#).unwrap();
-    assert!(run.poll(&mut Completion::new(), Agent::Cursor, true));
-    assert!(!run.artifact("shutdown").exists());
+    let mut completion = Completion::new();
+    assert!(run.poll(&mut completion, Agent::Cursor, true));
+    assert!(run.artifact("shutdown").exists());
+    let saved = Summary::from_json(&std::fs::read_to_string(run.artifact("usage-final")).unwrap()).unwrap();
+    let tokens = saved.tokens.unwrap();
+    assert_eq!(tokens.input, 123_205);
+    assert_eq!(tokens.output, 8_032);
+    assert_eq!(tokens.cache_read, 171_008);
   }
 }

@@ -18,21 +18,10 @@ import fcntl
 import json
 import os
 import sys
-from pathlib import Path
 
 try:
     event = json.load(sys.stdin)
-    # Bind this event to the result revision already present when the hook runs.
-    # A later sessionEnd append must not revive an old completed stop.
-    event.pop("scsh_result_revision", None)
-    result = os.environ.get("SCSH_RESULT")
-    if result:
-        try:
-            stat = Path(result).stat()
-            event["scsh_result_revision"] = f"{stat.st_mtime_ns}:{stat.st_size}"
-        except OSError:
-            pass
-    path = os.environ.get("SCSH_CURSOR_HOOKS_LOG") or str(Path(__file__).with_name("scsh-cursor-hooks.jsonl"))
+    path = os.environ.get("SCSH_CURSOR_HOOKS_LOG") or os.path.join(os.path.dirname(__file__), "scsh-cursor-hooks.jsonl")
     os.umask(0o077)
     with open(path, "a") as log:
         fcntl.flock(log, fcntl.LOCK_EX)
@@ -304,8 +293,10 @@ fn tokens_json(tokens: Option<&Tokens>) -> Value {
 #[derive(Default)]
 struct Conversation {
   generations: BTreeSet<String>,
-  /// Most recent working generation; a delayed stop from an older one cannot finish it.
+  /// Most recent event generation, used to recognize Cursor's trailing response hook.
   active_generation: Option<String>,
+  /// Generation named by the last completed stop, when Cursor supplies one.
+  stopped_generation: Option<String>,
   responses: u64,
   tools: BTreeSet<String>,
   missing_tool_id: bool,
@@ -342,8 +333,21 @@ pub fn cursor_hook_summary(stream: &str) -> Summary {
     match event_name {
       "afterAgentResponse" => {
         conversation.responses += 1;
-        conversation.stopped = false;
-        conversation.tokens = hook_tokens(&event);
+        let generation = string(&event, "generation_id");
+        let trailing_completed_response = conversation.stopped
+          && match conversation.stopped_generation.as_deref() {
+            Some(stopped) => generation == Some(stopped),
+            None => generation.is_none(),
+          };
+        if !trailing_completed_response {
+          conversation.stopped = false;
+          conversation.stopped_generation = None;
+        }
+        // Cursor emits `stop` before the same generation's response hook. Preserve
+        // real stop counters when that trailing hook omits its token fields.
+        if let Some(tokens) = hook_tokens(&event) {
+          conversation.tokens = Some(tokens);
+        }
       }
       "stop" => {
         if conversation
@@ -354,6 +358,12 @@ pub fn cursor_hook_summary(stream: &str) -> Summary {
           continue;
         }
         conversation.stopped = string(&event, "status") == Some("completed");
+        conversation.stopped_generation = conversation
+          .stopped
+          .then(|| {
+            string(&event, "generation_id").map(str::to_string).or_else(|| conversation.active_generation.clone())
+          })
+          .flatten();
         conversation.tokens = hook_tokens(&event);
       }
       "sessionEnd" => {
@@ -361,6 +371,7 @@ pub fn cursor_hook_summary(stream: &str) -> Summary {
       }
       "postToolUse" => {
         conversation.stopped = false;
+        conversation.stopped_generation = None;
         if let Some(tool) = string(&event, "tool_use_id").or_else(|| string(&event, "call_id")) {
           conversation.tools.insert(tool.to_string());
         } else {
@@ -398,16 +409,6 @@ pub fn cursor_hook_summary(stream: &str) -> Summary {
     llm_round_trips: Some(llm_round_trips),
     tool_calls: Some(tool_calls),
   }
-}
-
-/// File freshness alone is insufficient: unrelated hooks may append after an old stop.
-pub(crate) fn cursor_stop_matches_result(stream: &str, revision: &str) -> bool {
-  stream
-    .lines()
-    .rev()
-    .filter_map(|line| json::parse(line).ok())
-    .find(|event| hook_name(event) == Some("stop"))
-    .is_some_and(|event| string(&event, "scsh_result_revision") == Some(revision))
 }
 
 pub(crate) fn unavailable(harness: Harness) -> Summary {
@@ -966,14 +967,11 @@ mod tests {
     std::fs::create_dir_all(&root).unwrap();
     let log = root.join("hooks.jsonl");
     let ready = root.join("usage-ready");
-    let result = root.join("result.json");
-    std::fs::write(&result, "{}").unwrap();
     let run = |payload: &str| {
       let mut child = Command::new("python3")
         .args(["-c", CURSOR_HOOK_PY])
         .env("SCSH_CURSOR_HOOKS_LOG", &log)
         .env("SCSH_CURSOR_USAGE_READY", &ready)
-        .env("SCSH_RESULT", &result)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -991,13 +989,32 @@ mod tests {
     assert!(!ready.exists(), "hooks must never publish a sticky readiness marker");
     let text = std::fs::read_to_string(&log).unwrap();
     assert_eq!(text.lines().count(), 2);
-    let nanos =
-      std::fs::metadata(&result).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    assert!(cursor_stop_matches_result(&text, &format!("{nanos}:2")));
-    assert!(!cursor_stop_matches_result(&text, "another-revision"));
-    let appended = format!(r#"{text}{{"hook_event_name":"sessionEnd","status":"completed"}}"#);
-    assert!(!cursor_stop_matches_result(&appended, "another-revision"));
+    assert!(!text.contains("scsh_result_revision"), "the hook log contains only Cursor's event data");
     std::fs::remove_dir_all(root).unwrap();
+  }
+
+  #[test]
+  fn cursor_completed_stop_survives_its_trailing_response_and_session_end() {
+    let stream = r#"{"hook_event_name":"stop","conversation_id":"c","generation_id":"g","status":"completed","input_tokens":294213,"output_tokens":8032,"cache_read_tokens":171008,"cache_write_tokens":0}
+{"hook_event_name":"afterAgentResponse","conversation_id":"c","generation_id":"g"}
+{"hook_event_name":"sessionEnd","conversation_id":"c","status":"completed"}
+"#;
+    let summary = cursor_hook_summary(stream);
+    assert!(summary.complete);
+    assert_eq!(
+      summary.tokens,
+      Some(Tokens { input: 123_205, output: 8_032, cache_read: 171_008, cache_write: Some(0) })
+    );
+
+    let without_generation = stream.replace(r#","generation_id":"g""#, "");
+    assert!(cursor_hook_summary(&without_generation).complete, "generation ids are optional in Cursor hook payloads");
+
+    let resumed = stream.replacen(
+      r#"{"hook_event_name":"afterAgentResponse","conversation_id":"c","generation_id":"g"}"#,
+      r#"{"hook_event_name":"afterAgentResponse","conversation_id":"c","generation_id":"next"}"#,
+      1,
+    );
+    assert!(!cursor_hook_summary(&resumed).complete, "a later generation still invalidates the completed stop");
   }
 
   #[test]
