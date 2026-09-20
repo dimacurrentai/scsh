@@ -278,6 +278,7 @@ mod tests {
         note: None,
         detail: None,
         fail_reason: Some(crate::failure::reason::HARNESS_NONZERO.into()),
+        suspected_cause: None,
         elapsed: Some(5.0),
         lines: Vec::new(),
         container_name: None,

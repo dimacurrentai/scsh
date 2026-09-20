@@ -226,10 +226,11 @@ fn proc_json(p: &ProcRecord) -> String {
     Some(s) => format!("{s}"),
     None => "null".to_string(),
   };
+  let suspected_cause = p.suspected_cause.map(|cause| quote(cause.as_str())).unwrap_or_else(|| "null".into());
   let usage = p.usage.as_ref().map(crate::usage::Summary::compact_json).unwrap_or_else(|| "null".into());
   format!(
     "{{ \"index\": {}, \"previous_attempt\": {previous_attempt}, \"label\": {}, \"kind\": {}, \"status\": {}, \"skill_name\": {}, \
-\"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \
+\"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \"suspected_cause\": {suspected_cause}, \
 \"elapsed\": {}, \"container_name\": {}, \"container_runtime\": {}, \"cast_path\": {}, \"diff_path\": {}, \
 \"skill_source\": {}, \"route\": {}, \"result_path\": {}, \"annotate_target\": {}, \"phase\": {}, \
 \"phase_until\": {phase_until}, \"usage\": {}, \"lines\": [{}] }}",
@@ -390,6 +391,7 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
     note,
     detail,
     fail_reason,
+    suspected_cause: field_str(obj, "suspected_cause").as_deref().and_then(crate::failure::SuspectedCause::parse),
     elapsed,
     container_name,
     container_runtime,
@@ -517,6 +519,7 @@ mod tests {
       note: None,
       detail: None,
       fail_reason: None,
+      suspected_cause: None,
       elapsed: Some(f64::NAN),
       lines: vec![OutputLine { at: f64::INFINITY, text: "x".into() }],
       container_name: None,
@@ -562,6 +565,7 @@ mod tests {
         note: None,
         detail: Some("up to date".into()),
         fail_reason: None,
+        suspected_cause: None,
         elapsed: Some(1.5),
         container_name: None,
         container_runtime: Some("container".into()),
@@ -595,6 +599,20 @@ mod tests {
     assert_eq!(s.ended_at, Some(105));
     assert_eq!(s.skills[0].name, "add");
     assert_eq!(s.parent_session, None);
+
+    for cause in
+      [crate::failure::SuspectedCause::ExpiredCredentials, crate::failure::SuspectedCause::ToolCallParseFailure]
+    {
+      session.procs[0].status = ProcStatus::Fail;
+      session.procs[0].fail_reason = Some(crate::failure::reason::CONTAINER_INACTIVE.into());
+      session.procs[0].suspected_cause = Some(cause);
+      let saved = session_json_store(&session);
+      let restored = parse_session_json(&saved).unwrap();
+      assert_eq!(restored.procs[0].suspected_cause, Some(cause));
+      assert_eq!(restored.procs[0].fail_reason.as_deref(), Some(crate::failure::reason::CONTAINER_INACTIVE));
+      let legacy = saved.replace(&format!(", \"suspected_cause\": {}", quote(cause.as_str())), "");
+      assert_eq!(parse_session_json(&legacy).unwrap().procs[0].suspected_cause, None);
+    }
 
     let usage = crate::usage::Summary {
       harness: crate::usage::Harness::Codex,

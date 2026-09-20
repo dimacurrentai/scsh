@@ -5702,6 +5702,7 @@ fn build_and_run(
         note: None,
         detail: o.result_content.as_deref().and_then(json::message),
         fail_reason: o.fail_reason.clone(),
+        suspected_cause: None,
         elapsed: Some(o.duration_secs),
         lines: vec![],
         container_name: None,
@@ -6096,6 +6097,18 @@ fn cast_tail_text(cast: &Path) -> String {
 fn harness_exited_on_usage_limit(harness: config::Harness, sample: &str) -> bool {
   harness == config::Harness::Claude
     && limitwait::detect(sample).is_some_and(|state| state != limitwait::LimitState::Resumed)
+}
+
+/// Add an uncertain screen diagnosis only after the run has already failed.
+/// Keep the observed failure reason intact: hints never choose a retry policy.
+fn finish_harness_failure(spinner: &ui::screen::Proc, reason: &str, detail: &str, run_dir: &Path) {
+  let sample = cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL));
+  let cause = failure::suspected_cause(&sample);
+  let detail = match cause {
+    Some(cause) => format!("{detail}\n{}", cause.detail()),
+    None => detail.to_string(),
+  };
+  spinner.finish_fail_with_cause(reason, &detail, cause);
 }
 
 /// Recover a usage-limit verdict when a watchdog won the race with live screen classification.
@@ -6768,7 +6781,7 @@ fn run_one_skill(
   if let Some((reason, why)) = usage_failure {
     schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
     let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-    spinner.finish_fail(reason, Some(&detail));
+    finish_harness_failure(&spinner, reason, &detail, &run_dir);
     return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir).with_fail_detail(&why).with_usage(usage);
   }
   match result {
@@ -6781,7 +6794,7 @@ fn run_one_skill(
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("timed out after {}s", skill.timeout.unwrap_or(0));
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      spinner.finish_fail(failure::reason::CONTAINER_TIMEOUT, Some(&detail));
+      finish_harness_failure(&spinner, failure::reason::CONTAINER_TIMEOUT, &detail, &run_dir);
       return SkillRun::failed(failure::reason::CONTAINER_TIMEOUT, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage);
@@ -6792,7 +6805,7 @@ fn run_one_skill(
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("no new screen content for {inactivity_secs}s (inactivity_timeout)");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      spinner.finish_fail(failure::reason::CONTAINER_INACTIVE, Some(&detail));
+      finish_harness_failure(&spinner, failure::reason::CONTAINER_INACTIVE, &detail, &run_dir);
       return SkillRun::failed(failure::reason::CONTAINER_INACTIVE, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage);
@@ -6816,7 +6829,7 @@ fn run_one_skill(
       if let Some(c) = &daemon_client {
         c.proc_phase(spinner.index(), None, resets_at, &why);
       }
-      spinner.finish_fail(failure::reason::HARNESS_USAGE_LIMIT, Some(&detail));
+      finish_harness_failure(&spinner, failure::reason::HARNESS_USAGE_LIMIT, &detail, &run_dir);
       return SkillRun::failed(failure::reason::HARNESS_USAGE_LIMIT, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_limit_reset(resets_at)
@@ -6837,7 +6850,7 @@ fn run_one_skill(
         )
       };
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      spinner.finish_fail(failure::reason::STARTUP_STALLED, Some(&detail));
+      finish_harness_failure(&spinner, failure::reason::STARTUP_STALLED, &detail, &run_dir);
       return SkillRun::failed(failure::reason::STARTUP_STALLED, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage);
@@ -6850,7 +6863,7 @@ fn run_one_skill(
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = "stopped after the result file went quiet, but the result did not survive collection".to_string();
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      spinner.finish_fail(failure::reason::HARNESS_NONZERO, Some(&detail));
+      finish_harness_failure(&spinner, failure::reason::HARNESS_NONZERO, &detail, &run_dir);
       return SkillRun::failed(failure::reason::HARNESS_NONZERO, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage);
@@ -6873,7 +6886,7 @@ fn run_one_skill(
         if let Some(c) = &daemon_client {
           c.proc_phase(spinner.index(), None, observed_reset_at, &why);
         }
-        spinner.finish_fail(failure::reason::HARNESS_USAGE_LIMIT, Some(&detail));
+        finish_harness_failure(&spinner, failure::reason::HARNESS_USAGE_LIMIT, &detail, &run_dir);
         return SkillRun::failed(failure::reason::HARNESS_USAGE_LIMIT, Some(run_dir_str), Some(log), clone_dir)
           .with_fail_detail(&why)
           .with_limit_reset(observed_reset_at)
@@ -6883,12 +6896,10 @@ fn run_one_skill(
         failure::reason::HARNESS_OVERLOADED
       } else if failure::harness_reported_disconnect(&sample) {
         failure::reason::HARNESS_DISCONNECTED
-      } else if failure::harness_reported_auth_rejection(&sample) {
-        failure::reason::HARNESS_AUTH_REJECTED
       } else {
         failure::reason::HARNESS_NONZERO
       };
-      spinner.finish_fail(reason, Some(&detail));
+      finish_harness_failure(&spinner, reason, &detail, &run_dir);
       return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage);
@@ -6897,7 +6908,7 @@ fn run_one_skill(
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("could not run container: {e}");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      spinner.finish_fail(failure::reason::CONTAINER_RUN, Some(&detail));
+      finish_harness_failure(&spinner, failure::reason::CONTAINER_RUN, &detail, &run_dir);
       return SkillRun::failed(failure::reason::CONTAINER_RUN, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage);
@@ -6913,7 +6924,7 @@ fn run_one_skill(
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("declared artifact: {e}");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
+      finish_harness_failure(&spinner, failure::reason::RESULT_MISSING, &detail, &run_dir);
       return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage);
@@ -6932,7 +6943,7 @@ fn run_one_skill(
           schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
           let why = format!("could not read collected result '{}': {error}", skill.result);
           let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-          spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
+          finish_harness_failure(&spinner, failure::reason::RESULT_MISSING, &detail, &run_dir);
           return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
             .with_fail_detail(&why)
             .with_usage(usage);
@@ -7002,7 +7013,7 @@ fn run_one_skill(
     Err(e) => {
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let detail = skill_fail_detail(&e, skill.harness, Some(&run_dir_str), Some(&log));
-      spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
+      finish_harness_failure(&spinner, failure::reason::RESULT_MISSING, &detail, &run_dir);
       SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&e)
         .with_usage(usage)

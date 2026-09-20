@@ -325,6 +325,53 @@ pub fn harness_reported_auth_rejection(text: &str) -> bool {
   .any(|needle| lower.contains(needle))
 }
 
+/// A clue from a failed run's recording, never a lifecycle or retry decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuspectedCause {
+  ExpiredCredentials,
+  ToolCallParseFailure,
+}
+
+impl SuspectedCause {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::ExpiredCredentials => "expired_credentials",
+      Self::ToolCallParseFailure => "tool_call_parse_failure",
+    }
+  }
+
+  pub fn parse(value: &str) -> Option<Self> {
+    match value {
+      "expired_credentials" => Some(Self::ExpiredCredentials),
+      "tool_call_parse_failure" => Some(Self::ToolCallParseFailure),
+      _ => None,
+    }
+  }
+
+  pub fn detail(self) -> &'static str {
+    match self {
+      Self::ExpiredCredentials => "Likely cause: expired credentials. A login rejection appeared in the recording; it may be incidental. Check authentication on the host.",
+      Self::ToolCallParseFailure => "Likely cause: tool-call parsing failure. An exhausted retry appeared in the recording; it may be incidental. Inspect the recording and partial work.",
+    }
+  }
+}
+
+/// Screen text can quote an error or retain an old banner, so this is only a hint.
+pub fn suspected_cause(text: &str) -> Option<SuspectedCause> {
+  let compact: String = text.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect();
+  if harness_reported_auth_rejection(text)
+    || ["loginexpired", "pleaserunlogin", "notloggedin", "oauthtokenhasexpired", "invalidapikey", "401unauthorized"]
+      .iter()
+      .any(|needle| compact.contains(needle))
+  {
+    Some(SuspectedCause::ExpiredCredentials)
+  } else if compact.contains("themodelstoolcallcouldnotbeparsedretryalsofailed") {
+    Some(SuspectedCause::ToolCallParseFailure)
+  } else {
+    None
+  }
+}
+
 pub fn retry_enabled() -> bool {
   !matches!(std::env::var("SCSH_NO_RETRY").ok().as_deref(), Some("1") | Some("true"))
 }
@@ -621,6 +668,27 @@ fn truncate_excerpt(s: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn screen_diagnoses_are_uncertain_and_distinguish_login_from_parsing() {
+    for text in ["Login expired · Please run /login", "●Loginexpired·Pleaserun/login"] {
+      assert_eq!(suspected_cause(text), Some(SuspectedCause::ExpiredCredentials));
+    }
+    assert_eq!(
+      suspected_cause(
+        "The model's tool call could not be parsed
+(retry also failed)."
+      ),
+      Some(SuspectedCause::ToolCallParseFailure),
+    );
+    assert_eq!(suspected_cause("Your tool call was malformed. Please retry."), None);
+    assert_eq!(suspected_cause("Working on the task"), None);
+    for cause in [SuspectedCause::ExpiredCredentials, SuspectedCause::ToolCallParseFailure] {
+      assert_eq!(SuspectedCause::parse(cause.as_str()), Some(cause));
+      assert!(cause.detail().starts_with("Likely cause:"));
+      assert!(cause.detail().contains("may be incidental"));
+    }
+  }
 
   #[test]
   fn format_detail_prefixes_reason() {

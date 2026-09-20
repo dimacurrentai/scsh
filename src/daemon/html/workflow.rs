@@ -437,6 +437,7 @@ struct StatusCounts {
   waiting: usize,
   queued: usize,
   failed: usize,
+  login: usize,
   stopped: usize,
   stalled: usize,
   skipped: usize,
@@ -453,6 +454,7 @@ impl StatusCounts {
       WorkflowDisplayState::Waiting => self.waiting += 1,
       WorkflowDisplayState::Queued => self.queued += 1,
       WorkflowDisplayState::Failed => self.failed += 1,
+      WorkflowDisplayState::LikelyExpiredCredentials => self.login += 1,
       WorkflowDisplayState::ForceStopped => self.stopped += 1,
       WorkflowDisplayState::Stalled => self.stalled += 1,
       WorkflowDisplayState::Skipped => self.skipped += 1,
@@ -472,6 +474,7 @@ impl StatusCounts {
       (self.waiting, WorkflowDisplayState::Waiting),
       (self.queued, WorkflowDisplayState::Queued),
       (self.failed, WorkflowDisplayState::Failed),
+      (self.login, WorkflowDisplayState::LikelyExpiredCredentials),
       (self.stopped, WorkflowDisplayState::ForceStopped),
       (self.stalled, WorkflowDisplayState::Stalled),
       (self.awaiting_limits, WorkflowDisplayState::AwaitingLimits),
@@ -508,6 +511,7 @@ fn legend_html(present: &std::collections::BTreeSet<WorkflowDisplayState>) -> St
     WorkflowDisplayState::Done,
     WorkflowDisplayState::Graceful,
     WorkflowDisplayState::Failed,
+    WorkflowDisplayState::LikelyExpiredCredentials,
     WorkflowDisplayState::ForceStopped,
     WorkflowDisplayState::Stalled,
     WorkflowDisplayState::Waiting,
@@ -637,15 +641,16 @@ fn status_stack_rank(state: WorkflowDisplayState) -> u8 {
     WorkflowDisplayState::Done => 0,
     WorkflowDisplayState::Graceful => 1,
     WorkflowDisplayState::Failed => 2,
-    WorkflowDisplayState::ForceStopped => 3,
-    WorkflowDisplayState::Skipped => 4,
-    WorkflowDisplayState::Terminating => 5,
-    WorkflowDisplayState::Running => 6,
+    WorkflowDisplayState::LikelyExpiredCredentials => 3,
+    WorkflowDisplayState::ForceStopped => 4,
+    WorkflowDisplayState::Skipped => 5,
+    WorkflowDisplayState::Terminating => 6,
+    WorkflowDisplayState::Running => 7,
     // Above the plainly-stalled: it is the one non-moving state that is expected to move again.
-    WorkflowDisplayState::AwaitingLimits => 7,
-    WorkflowDisplayState::Stalled => 8,
-    WorkflowDisplayState::Queued => 9,
-    WorkflowDisplayState::Waiting => 10,
+    WorkflowDisplayState::AwaitingLimits => 8,
+    WorkflowDisplayState::Stalled => 9,
+    WorkflowDisplayState::Queued => 10,
+    WorkflowDisplayState::Waiting => 11,
   }
 }
 
@@ -691,6 +696,7 @@ fn node_html(
       | WorkflowDisplayState::Done
       | WorkflowDisplayState::Graceful
       | WorkflowDisplayState::Failed
+      | WorkflowDisplayState::LikelyExpiredCredentials
       | WorkflowDisplayState::ForceStopped
       | WorkflowDisplayState::Stalled
       | WorkflowDisplayState::AwaitingLimits
@@ -822,6 +828,10 @@ fn node_tip(
     WorkflowDisplayState::Done => lines.push("Succeeded".into()),
     WorkflowDisplayState::Graceful => lines.push("Graceful shutdown — valid result survived a teardown issue".into()),
     WorkflowDisplayState::Failed => lines.push("Failed".into()),
+    WorkflowDisplayState::LikelyExpiredCredentials => lines.push(
+      "Likely expired credentials — a login rejection appeared in the recording; check authentication on the host"
+        .into(),
+    ),
     WorkflowDisplayState::ForceStopped => lines.push("Stopped from the session browser".into()),
     WorkflowDisplayState::Skipped => {
       // The plan step's reason lives on the skipped proc's detail ("skipped — when: plan.grok
@@ -873,6 +883,7 @@ fn unmet_blocker_line(session: &Session, meta: &WorkflowMeta, id: &str, now: u64
         WorkflowDisplayState::Done => "done",
         WorkflowDisplayState::Graceful => "graceful",
         WorkflowDisplayState::Failed => "failed",
+        WorkflowDisplayState::LikelyExpiredCredentials => "likely expired credentials",
         WorkflowDisplayState::ForceStopped => "stopped",
         WorkflowDisplayState::Skipped => "skipped",
       };
@@ -899,6 +910,7 @@ fn state_icon(state: WorkflowDisplayState) -> &'static str {
     WorkflowDisplayState::Done => "✓",
     WorkflowDisplayState::Graceful => "!",
     WorkflowDisplayState::Failed => "✗",
+    WorkflowDisplayState::LikelyExpiredCredentials => "⚿",
     WorkflowDisplayState::ForceStopped => "✕",
     WorkflowDisplayState::Skipped => "⊘",
     WorkflowDisplayState::Stalled => "!",

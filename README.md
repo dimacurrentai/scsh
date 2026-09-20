@@ -278,6 +278,15 @@ browser — "Restart remaining" reuses every completed step's result — or from
 with `--resume-from <session>`. See [`RESILIENCE-DEMO.md`](RESILIENCE-DEMO.md) for the
 agent-followable walkthrough.
 
+After a harness run fails, `scsh` inspects its recording for possible causes.
+A login rejection adds a “Likely expired credentials” diagnosis in the session browser;
+an exhausted tool-call parsing retry adds a likely parsing-failure diagnosis.
+These messages may be incidental or quoted: they never stop a run or change its
+watchdogs or retry policy. The API preserves the observed `fail_reason` and adds
+nullable `suspected_cause` metadata (`expired_credentials` or
+`tool_call_parse_failure`), with an explanation in `detail`. Successful runs
+receive no diagnosis.
+
 An account's usage limit is handled apart from that machinery, because it is not a failure
 and no backoff can outlast it. Claude containers arm Claude Code's own limit wait
 (`autoContinueAtUsageLimit`), so a limited session waits for the reset and continues **the
