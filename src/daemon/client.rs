@@ -329,6 +329,14 @@ impl Client {
   pub fn proc_finish(
     &self, proc_index: usize, status: ProcStatus, fail_reason: Option<&str>, detail: Option<&str>, elapsed: f64,
   ) {
+    self.proc_finish_with_cause(proc_index, status, fail_reason, detail, elapsed, None);
+  }
+
+  pub fn proc_finish_with_cause(
+    &self, proc_index: usize, status: ProcStatus, fail_reason: Option<&str>, detail: Option<&str>, elapsed: f64,
+    suspected_cause: Option<crate::failure::SuspectedCause>,
+  ) {
+    let cause = suspected_cause.map(|cause| quote(cause.as_str())).unwrap_or_else(|| "null".into());
     let detail_json = match detail {
       Some(d) => quote(d),
       None => "null".to_string(),
@@ -338,7 +346,7 @@ impl Client {
       None => "null".to_string(),
     };
     let body = format!(
-      "{{ \"session\": {}, \"proc\": {}, \"status\": {}, \"fail_reason\": {}, \"detail\": {}, \"elapsed\": {} }}",
+      "{{ \"session\": {}, \"proc\": {}, \"status\": {}, \"fail_reason\": {}, \"detail\": {}, \"elapsed\": {}, \"suspected_cause\": {cause} }}",
       quote(&self.inner.session_id),
       proc_index,
       quote(status.as_str()),

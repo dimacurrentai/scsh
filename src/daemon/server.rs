@@ -1564,6 +1564,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           note: None,
           detail: None,
           fail_reason: None,
+          suspected_cause: None,
           elapsed: None,
           container_name: None,
           container_runtime: None,
@@ -1771,6 +1772,11 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         p.status = status;
         p.detail = detail;
         p.fail_reason = fail_reason;
+        p.suspected_cause = if status == ProcStatus::Fail {
+          field_str(&obj, "suspected_cause").as_deref().and_then(crate::failure::SuspectedCause::parse)
+        } else {
+          None
+        };
         p.elapsed = elapsed;
         true
       } else {
@@ -2724,6 +2730,7 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
       note: None,
       detail: Some(startup_error_detail(stderr_tail, code)),
       fail_reason: Some("startup_failed".into()),
+      suspected_cause: None,
       elapsed: Some(0.0),
       lines: Vec::new(),
       container_name: None,
@@ -3885,6 +3892,7 @@ mod tests {
       note: None,
       detail: None,
       fail_reason: None,
+      suspected_cause: None,
       container_name: None,
       container_runtime: None,
       cast_path: None,
@@ -3959,6 +3967,7 @@ mod tests {
       note: None,
       detail: Some("done".into()),
       fail_reason: None,
+      suspected_cause: None,
       container_name: None,
       container_runtime: None,
       cast_path: None,
@@ -4071,6 +4080,7 @@ mod tests {
       note: None,
       detail: Some("done".into()),
       fail_reason: None,
+      suspected_cause: None,
       container_name: None,
       container_runtime: None,
       cast_path: None,
@@ -4229,6 +4239,7 @@ mod tests {
             note: None,
             detail: None,
             fail_reason: None,
+            suspected_cause: None,
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
@@ -4308,6 +4319,23 @@ mod tests {
     let proc = &guard.sessions.get("xyzabc").unwrap().procs[0];
     assert_eq!(proc.container_name, None);
     assert_eq!(proc.container_runtime.as_deref(), Some("container"));
+    drop(guard);
+    for (status, expected) in
+      [("fail", Some(crate::failure::SuspectedCause::ExpiredCredentials)), ("ok", None), ("graceful", None)]
+    {
+      let body = format!(
+        r#"{{"session":"xyzabc","proc":0,"status":"{status}","fail_reason":"container_inactive","suspected_cause":"expired_credentials","elapsed":4}}"#
+      );
+      assert!(handle_api_post("/api/v1/proc/finish", &body, &store, &prune));
+      let guard = store.lock().unwrap();
+      let proc = &guard.sessions["xyzabc"].procs[0];
+      assert_eq!(proc.suspected_cause, expected, "successful results cannot inherit a diagnosis");
+      assert_eq!(
+        proc.fail_reason.as_deref(),
+        Some("container_inactive"),
+        "diagnosis never replaces the observed reason"
+      );
+    }
   }
 
   #[test]
@@ -4340,6 +4368,7 @@ mod tests {
             note: None,
             detail: None,
             fail_reason: None,
+            suspected_cause: None,
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
@@ -4402,6 +4431,7 @@ mod tests {
             note: None,
             detail: None,
             fail_reason: None,
+            suspected_cause: None,
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
@@ -4523,6 +4553,7 @@ mod tests {
             note: None,
             detail: None,
             fail_reason: None,
+            suspected_cause: None,
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
@@ -4591,6 +4622,7 @@ mod tests {
             note: None,
             detail: None,
             fail_reason: None,
+            suspected_cause: None,
             elapsed: None,
             lines: Vec::new(),
             container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
@@ -4675,6 +4707,7 @@ mod tests {
       note: None,
       detail: None,
       fail_reason: None,
+      suspected_cause: None,
       elapsed: None,
       lines: Vec::new(),
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
@@ -4788,6 +4821,7 @@ mod tests {
             note: None,
             detail: None,
             fail_reason: None,
+            suspected_cause: None,
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
@@ -4842,6 +4876,7 @@ mod tests {
       note: None,
       detail: None,
       fail_reason: None,
+      suspected_cause: None,
       elapsed: None,
       lines: Vec::new(),
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
@@ -5053,6 +5088,7 @@ mod tests {
       note: None,
       detail: None,
       fail_reason: None,
+      suspected_cause: None,
       elapsed: None,
       lines: Vec::new(),
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
@@ -5397,6 +5433,7 @@ mod tests {
             note: None,
             detail: None,
             fail_reason: None,
+            suspected_cause: None,
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
@@ -5509,6 +5546,7 @@ mod tests {
             note: None,
             detail: None,
             fail_reason: None,
+            suspected_cause: None,
             elapsed: Some(2.0),
             lines: Vec::new(),
             container_name: None,
@@ -5584,6 +5622,7 @@ mod tests {
       note: None,
       detail: None,
       fail_reason: None,
+      suspected_cause: None,
       elapsed: Some(2.0),
       lines: Vec::new(),
       container_name: None,
@@ -6128,6 +6167,7 @@ mod tests {
               note: Some("waiting for image build…".into()),
               detail: None,
               fail_reason: None,
+              suspected_cause: None,
               elapsed: None,
               lines: Vec::new(),
               container_name: None,
@@ -6958,6 +6998,7 @@ mod tests {
       note: None,
       detail: None,
       fail_reason: None,
+      suspected_cause: None,
       elapsed: None,
       lines: Vec::new(),
       container_name: None,

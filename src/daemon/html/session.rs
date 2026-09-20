@@ -69,7 +69,15 @@ pub fn session_page_for(session: &Session, lifecycle: SessionLifecycle) -> Strin
 {usage_html}
 </details>
 "#,
-      status_class = if terminating { "terminating" } else { proc.status.as_str() },
+      status_class = if terminating {
+        "terminating"
+      } else if proc.status == ProcStatus::Fail
+        && proc.suspected_cause == Some(crate::failure::SuspectedCause::ExpiredCredentials)
+      {
+        "fail login"
+      } else {
+        proc.status.as_str()
+      },
       index = proc.index,
       task_attrs = proc_task_attrs(session, proc),
       task_anchor = task_anchor,

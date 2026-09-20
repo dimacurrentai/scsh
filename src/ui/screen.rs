@@ -1092,6 +1092,25 @@ impl Proc {
   }
 
   fn finish_with(&self, status: Status, detail: Option<&str>, fail_reason: Option<&str>, elapsed: f64) {
+    self.finish_with_cause(status, detail, fail_reason, elapsed, None);
+  }
+
+  pub fn finish_fail_with_cause(&self, reason: &str, detail: &str, cause: Option<crate::failure::SuspectedCause>) {
+    crate::failure::log_proc(reason, &self.label, Some(detail));
+    let combined = crate::failure::format_detail(reason, detail);
+    self.finish_with_cause(
+      Status::Fail,
+      Some(&combined),
+      Some(reason),
+      self.start_instant().elapsed().as_secs_f64(),
+      cause,
+    );
+  }
+
+  fn finish_with_cause(
+    &self, status: Status, detail: Option<&str>, fail_reason: Option<&str>, elapsed: f64,
+    cause: Option<crate::failure::SuspectedCause>,
+  ) {
     {
       let mut m = self.model.lock().unwrap();
       m.set_elapsed(self.i, elapsed);
@@ -1107,7 +1126,7 @@ impl Proc {
         Status::Queued => crate::daemon::ProcStatus::Waiting,
         Status::Skipped => crate::daemon::ProcStatus::Skipped,
       };
-      s.proc_finish(self.i, ps, fail_reason, detail, elapsed);
+      s.proc_finish_with_cause(self.i, ps, fail_reason, detail, elapsed, cause);
     }
     if !self.attended {
       eprintln!("{}", summary_line(&self.label, status, elapsed, detail));
@@ -2020,6 +2039,32 @@ mod tests {
     assert_eq!(recent_limit_state(&mut novelty, None), waiting);
 
     let _ = std::fs::remove_file(&file);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn diagnostic_banners_never_shorten_the_watchdog_or_stop_success() {
+    for banner in
+      ["Login expired · Please run /login", "The model's tool call could not be parsed (retry also failed)."]
+    {
+      for (sleep, expected) in [("0.8", Killed::No), ("30", Killed::Inactive)] {
+        let ui = LiveUi::new(false, None);
+        let proc = ui.proc("diagnostic-banner", false);
+        proc.start();
+        let file = std::env::temp_dir().join(format!("scsh-diagnosis-{}.cast", crate::runtime::random_nonce_6()));
+        write_cast(&file, &[banner]);
+        let watch =
+          ActivityWatch { file: file.clone(), limit: Duration::from_secs(1), startup: None, limit_wait: None };
+        let started = Instant::now();
+        let (ok, killed, _) = proc.run_watched("sleep", &[sleep.into()], None, Some(&watch), None).unwrap();
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(killed, expected, "{banner}");
+        assert_eq!(ok, expected == Killed::No);
+        if expected == Killed::Inactive {
+          assert!(started.elapsed() >= watch.limit, "the entire inactivity budget must elapse");
+        }
+      }
+    }
   }
 
   #[cfg(unix)]

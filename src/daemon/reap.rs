@@ -161,6 +161,7 @@ mod tests {
         note: None,
         detail: None,
         fail_reason: None,
+        suspected_cause: None,
         container_name: Some(container.into()),
         container_runtime: Some("container".into()),
         cast_path: None,

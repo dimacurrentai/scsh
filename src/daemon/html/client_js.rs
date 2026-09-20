@@ -751,7 +751,9 @@ function syncProcElapsed(meta, p, nowUnix, liveClock) {
 function procElapsedPhrase(p, nowUnix) {
   const elapsed = procElapsed(p, nowUnix);
   if (isCacheHit(p)) return elapsed == null ? 'cache hit' : 'cache hit in ' + formatElapsedClock(elapsed);
-  return elapsedPhrase(p.status, elapsed, p.fail_reason);
+  const phrase = elapsedPhrase(p.status, elapsed, p.fail_reason);
+  return p.status === 'fail' && p.suspected_cause === 'expired_credentials'
+    ? phrase + ' · likely expired credentials' : phrase;
 }
 function updateProcClocks(nowUnixSec) {
   if (nowUnixSec === lastProcClockSec) return;
@@ -885,7 +887,8 @@ function setRestartBlocked(btn, blocked) {
 
 function updateProcFields(det, p, nowUnix) {
   const terminating = p.fail_reason === 'stop_requested' || p.fail_reason === 'restart_requested';
-  det.className = 'chamfer proc ' + (terminating ? 'terminating' : p.status);
+  det.className = 'chamfer proc ' + (terminating ? 'terminating' : p.status) +
+    (p.status === 'fail' && p.suspected_cause === 'expired_credentials' ? ' login' : '');
   const labelEl = det.querySelector('summary .label');
   if (labelEl) labelEl.textContent = p.label || '';
   const stat = det.querySelector('[data-proc-stat="' + CSS.escape(String(p.index)) + '"]');
@@ -1417,11 +1420,11 @@ function workflowStepIdForProc(p) {
   return p.skill_name || p.skill_source || null;
 }
 function wfStateIcon(state) {
-  return ({waiting:'◇',queued:'◈',running:'◆',terminating:'◆',done:'✓',graceful:'!',failed:'✗',stopped:'✕',skipped:'⊘',stalled:'!',awaiting_limits:'⧗'})[state] || '◇';
+  return ({waiting:'◇',queued:'◈',running:'◆',terminating:'◆',done:'✓',graceful:'!',failed:'✗',login:'⚿',stopped:'✕',skipped:'⊘',stalled:'!',awaiting_limits:'⧗'})[state] || '◇';
 }
 function wfStateLabel(state) {
   return ({waiting:'Waiting',queued:'Queued',running:'Running',terminating:'Terminating',done:'Succeeded',graceful:'Graceful shutdown',failed:'Failed',
-    stopped:'Stopped',skipped:'Skipped',stalled:'Abandoned',awaiting_limits:'Awaiting limits'})[state] || state;
+    login:'Likely expired credentials',stopped:'Stopped',skipped:'Skipped',stalled:'Abandoned',awaiting_limits:'Awaiting limits'})[state] || state;
 }
 function wfJobOutcome(session, nowUnix) {
   const life = sessionLifecycle(session, nowUnix);
@@ -1472,7 +1475,7 @@ function wfBlockerLine(session, id, nowUnix) {
   const st = wfDisplayState(session, dep, nowUnix);
   const bits = [];
   if (!isBuild && p.harness) bits.push(p.harness);
-  bits.push(kind, st === 'awaiting_limits' ? 'awaiting limits' : st);
+  bits.push(kind, st === 'awaiting_limits' ? 'awaiting limits' : (st === 'login' ? 'likely expired credentials' : st));
   return title + ' (' + bits.join(' · ') + ')';
 }
 function wfNodeTip(session, node, state, unmetIds, nowUnix) {
@@ -1492,6 +1495,7 @@ function wfNodeTip(session, node, state, unmetIds, nowUnix) {
   else if (state === 'done') lines.push('Succeeded');
   else if (state === 'graceful') lines.push('Graceful shutdown — valid result survived a teardown issue');
   else if (state === 'failed') lines.push('Failed');
+  else if (state === 'login') lines.push('Likely expired credentials — a login rejection appeared in the recording; check authentication on the host');
   else if (state === 'stopped') lines.push('Stopped from the session browser');
   else if (state === 'skipped') lines.push((p && p.detail) ? p.detail : 'Skipped');
   else if (state === 'stalled') lines.push('Abandoned — job stopped updating');
@@ -1528,7 +1532,8 @@ function wfDisplayState(session, node, nowUnix) {
   if (p.status === 'graceful') return 'graceful';
   if (p.status === 'fail') {
     return (p.fail_reason === 'force_stopped' || p.fail_reason === 'force_restarted' ||
-      p.fail_reason === 'session_end_before_proc_finish') ? 'stopped' : 'failed';
+      p.fail_reason === 'session_end_before_proc_finish') ? 'stopped' :
+      (p.status === 'fail' && p.suspected_cause === 'expired_credentials' ? 'login' : 'failed');
   }
   if (p.status === 'skipped') return 'skipped';
   if (p.status === 'running') return live ? 'running' : 'stalled';
@@ -1539,7 +1544,7 @@ function wfDisplayState(session, node, nowUnix) {
   return 'waiting';
 }
 function wfLegendHtml(present) {
-  const order = ['running','terminating','awaiting_limits','done','graceful','failed','stopped','stalled','waiting','queued','skipped'];
+  const order = ['running','terminating','awaiting_limits','done','graceful','failed','login','stopped','stalled','waiting','queued','skipped'];
   const items = order.filter(s => present[s]).map(s =>
     '<li class="wf-leg wf-leg-' + s + '"><span class="wf-ico" aria-hidden="true">' +
     wfStateIcon(s) + '</span> ' + wfStateLabel(s) + '</li>'
@@ -1549,9 +1554,10 @@ function wfLegendHtml(present) {
 function wfSummaryHtml(counts, total, first) {
   const parts = [total + (total === 1 ? ' task' : ' tasks')];
   const shown = (key) => key === 'done' ? 'succeeded' : (key === 'stalled' ? 'abandoned' :
-    (key === 'graceful' ? 'graceful shutdown' : (key === 'awaiting_limits' ? 'awaiting limits' : key)));
+    (key === 'graceful' ? 'graceful shutdown' : (key === 'awaiting_limits' ? 'awaiting limits' :
+    (key === 'login' ? 'likely expired credentials' : key))));
   for (const [n, label] of [[counts.done,'done'],[counts.graceful,'graceful'],[counts.running,'running'],[counts.terminating,'terminating'],[counts.waiting,'waiting'],
-    [counts.queued,'queued'],[counts.failed,'failed'],[counts.stopped,'stopped'],
+    [counts.queued,'queued'],[counts.failed,'failed'],[counts.login,'login'],[counts.stopped,'stopped'],
     [counts.stalled,'stalled'],[counts.awaiting_limits,'awaiting_limits'],[counts.skipped,'skipped']]) {
     if (n <= 0) continue;
     const id = first && first[label];
@@ -1598,7 +1604,7 @@ function wfNodeRanks(nodes) {
   return nodes.map(n => rankOf(n.id));
 }
 function wfStatusStackRank(state) {
-  return ({done:0,failed:1,stopped:2,skipped:3,terminating:4,running:5,awaiting_limits:6,stalled:7,queued:8,waiting:9})[state] ?? 10;
+  return ({done:0,failed:1,login:2,stopped:3,skipped:4,terminating:5,running:6,awaiting_limits:7,stalled:8,queued:9,waiting:10})[state] ?? 11;
 }
 function wfLayoutNodes(session, nodes, nowUnix) {
   const ranks = wfNodeRanks(nodes);
@@ -1810,7 +1816,7 @@ function wfBuildGraphHtml(session, nowUnix) {
   const w = Math.max(...all.map(n => n.x + n.w)) + WF_PAD;
   const h = Math.max(...all.map(n => n.y + (n.h || WF_NODE_H))) + WF_PAD;
   const present = Object.create(null);
-  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, queued: 0, failed: 0, stopped: 0, stalled: 0, skipped: 0, awaiting_limits: 0 };
+  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, queued: 0, failed: 0, login: 0, stopped: 0, stalled: 0, skipped: 0, awaiting_limits: 0 };
   const byId = Object.fromEntries(layout.map(n => [n.id, n]));
   const nodesHtml = wfBookendHtml(start, true) + nodes.map(node => {
     const pos = byId[node.id];
@@ -1824,6 +1830,7 @@ function wfBuildGraphHtml(session, nowUnix) {
     else if (state === 'waiting') counts.waiting++;
     else if (state === 'queued') counts.queued++;
     else if (state === 'failed') counts.failed++;
+    else if (state === 'login') counts.login++;
     else if (state === 'stopped') counts.stopped++;
     else if (state === 'stalled') counts.stalled++;
     else if (state === 'awaiting_limits') counts.awaiting_limits++;
@@ -1849,7 +1856,7 @@ function wfBuildGraphHtml(session, nowUnix) {
     const tipRunning = (state === 'running' && p && p.started_at)
       ? ' data-tip-running="' + esc(String(p.started_at)) + '"' : '';
     const elapsed = p ? procElapsed(p, nowUnix) : null;
-    const showElapsed = ['running','terminating','done','graceful','failed','stopped','stalled','awaiting_limits'].includes(state);
+    const showElapsed = ['running','terminating','done','graceful','failed','login','stopped','stalled','awaiting_limits'].includes(state);
     const stateElapsed = elapsed != null && showElapsed ? ' · ' + formatElapsedClock(elapsed) : '';
     const attempt = p ? procAttempt(session, p) : [1, 1];
     const attemptHtml = attempt[1] > 1 ? '<span class="wf-attempt"> · attempt ' + attempt[0] + '</span>' : '';
@@ -1954,7 +1961,7 @@ function updateWorkflowGraph(session, nowUnix) {
   const root = ensureWorkflowGraphMounted(session, nowUnix);
   if (!root) return;
   const present = Object.create(null);
-  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, queued: 0, failed: 0, stopped: 0, stalled: 0, skipped: 0, awaiting_limits: 0 };
+  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, queued: 0, failed: 0, login: 0, stopped: 0, stalled: 0, skipped: 0, awaiting_limits: 0 };
   nodes.forEach(node => {
     const el = root.querySelector('.wf-node[data-workflow-step="' + CSS.escape(node.id) + '"]');
     if (!el) return;
@@ -1967,6 +1974,7 @@ function updateWorkflowGraph(session, nowUnix) {
     else if (state === 'waiting') counts.waiting++;
     else if (state === 'queued') counts.queued++;
     else if (state === 'failed') counts.failed++;
+    else if (state === 'login') counts.login++;
     else if (state === 'stopped') counts.stopped++;
     else if (state === 'stalled') counts.stalled++;
     else if (state === 'awaiting_limits') counts.awaiting_limits++;
@@ -1997,7 +2005,7 @@ function updateWorkflowGraph(session, nowUnix) {
     if (state === 'running' && p && p.started_at) el.setAttribute('data-tip-running', String(p.started_at));
     else el.removeAttribute('data-tip-running');
     const elapsed = p ? procElapsed(p, nowUnix) : null;
-    const showElapsed = ['running','terminating','done','graceful','failed','stopped','stalled','awaiting_limits'].includes(state);
+    const showElapsed = ['running','terminating','done','graceful','failed','login','stopped','stalled','awaiting_limits'].includes(state);
     const stateElapsed = el.querySelector('.wf-state-elapsed');
     if (stateElapsed) stateElapsed.textContent = elapsed != null && showElapsed ? ' · ' + formatElapsedClock(elapsed) : '';
     // The node rebinds to the retry when one registers mid-run: surface the attempt.

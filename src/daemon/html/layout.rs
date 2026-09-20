@@ -464,6 +464,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-leg-done { color: var(--green); }
   .wf-leg-graceful { color: var(--cyan); }
   .wf-leg-failed { color: var(--red); }
+  .wf-leg-login { color: var(--yellow); }
   .wf-leg-stopped { color: var(--red); }
   .wf-leg-stalled { color: var(--purple); }
   .wf-leg-awaiting_limits { color: var(--magenta); }
@@ -621,6 +622,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node.wf-done .wf-state, .wf-node.wf-done .wf-id { color: var(--green); }
   .wf-node.wf-failed { --accent: var(--red); }
   .wf-node.wf-failed .wf-state, .wf-node.wf-failed .wf-id { color: var(--red); }
+  .wf-node.wf-login { --accent: var(--yellow); }
+  .wf-node.wf-login .wf-state, .wf-node.wf-login .wf-id { color: var(--yellow); }
   .wf-node.wf-stopped { --accent: var(--red); }
   .wf-node.wf-stopped .wf-state, .wf-node.wf-stopped .wf-id { color: var(--red); }
   .wf-node.wf-stalled { --accent: var(--purple); }
@@ -749,6 +752,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   details.proc.ok { --accent: var(--green); }
   details.proc.graceful { --accent: var(--cyan); }
   details.proc.fail { --accent: var(--red); }
+  details.proc.fail.login { --accent: var(--yellow); }
   details.proc.running { --accent: var(--orange); }
   details.proc.terminating { --accent: var(--orange); }
   details.proc.waiting { --accent: var(--cyan); }
@@ -776,12 +780,14 @@ pub(crate) const PAGE_CSS: &str = r#"
   .glyph { font-weight: 600; }
   /* Label (and fleet glyphs) still tint with status; the row bar carries the primary cue. */
   details.proc.fail summary .label { color: var(--red); }
+  details.proc.fail.login summary .label { color: var(--yellow); }
   details.proc.ok summary .label { color: var(--green); }
   details.proc.graceful summary .label { color: var(--cyan); }
   details.proc.running summary .label { color: var(--orange); }
   details.proc.terminating summary .label { color: var(--orange); }
   details.proc.waiting summary .label { color: var(--cyan); }
   .fail .glyph { color: var(--red); }
+  .fail.login .glyph { color: var(--yellow); }
   .ok .glyph { color: var(--green); }
   .graceful .glyph { color: var(--cyan); }
   /* Running is ORANGE everywhere (nodes, rows, legend); cyan stays for waiting. */

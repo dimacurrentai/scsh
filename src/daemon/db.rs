@@ -200,6 +200,7 @@ mod tests {
         note: None,
         detail: None,
         fail_reason: None,
+        suspected_cause: None,
         elapsed: Some(1.0),
         lines: Vec::new(),
         container_name: None,

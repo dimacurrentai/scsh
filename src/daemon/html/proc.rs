@@ -162,7 +162,13 @@ pub(crate) fn proc_elapsed_phrase(proc: &ProcRecord, now: u64) -> String {
       None => "cache hit".into(),
     };
   }
-  elapsed_phrase(proc.status, proc_elapsed_secs(proc, now), proc.fail_reason.as_deref())
+  let phrase = elapsed_phrase(proc.status, proc_elapsed_secs(proc, now), proc.fail_reason.as_deref());
+  if proc.status == ProcStatus::Fail && proc.suspected_cause == Some(crate::failure::SuspectedCause::ExpiredCredentials)
+  {
+    format!("{phrase} · likely expired credentials")
+  } else {
+    phrase
+  }
 }
 
 pub(crate) fn summary_stats_html(proc: &ProcRecord, now: u64) -> String {
@@ -274,6 +280,8 @@ mod elapsed_phrase_tests {
     );
     assert_eq!(elapsed_phrase(ProcStatus::Fail, None, Some(reason::STARTUP_STALLED)), "stalled at startup");
     assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(60.0), Some(reason::CONTAINER_TIMEOUT)), "timed out after 1m");
+    assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(45.0), Some(reason::HARNESS_AUTH_REJECTED)), "failed in 45s");
+    assert_eq!(elapsed_phrase(ProcStatus::Fail, None, Some(reason::HARNESS_AUTH_REJECTED)), "failed");
     assert_eq!(elapsed_phrase(ProcStatus::Waiting, None, None), "waiting");
     assert_eq!(elapsed_phrase(ProcStatus::Skipped, None, None), "skipped");
   }

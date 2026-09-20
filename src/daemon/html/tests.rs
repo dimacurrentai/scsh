@@ -32,6 +32,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
         note: None,
         detail: None,
         fail_reason: None,
+        suspected_cause: None,
         container_name: None,
         container_runtime: None,
         cast_path: Some("/tmp/x.cast".into()),
@@ -396,6 +397,60 @@ fn skipped_workflow_step_renders_as_a_dim_slashed_row() {
 }
 
 #[test]
+fn suspected_login_failure_is_yellow_and_preserves_the_observed_reason() {
+  use crate::daemon::workflow::{WorkflowMeta, WorkflowNodeMeta};
+  let mut store = store_with_cast_proc(ProcStatus::Fail);
+  {
+    let s = store.sessions.get_mut("castab").unwrap();
+    s.ended_at = Some(46);
+    s.kind = Some("workflow".into());
+    s.procs[0].fail_reason = Some(crate::failure::reason::CONTAINER_INACTIVE.into());
+    s.procs[0].suspected_cause = Some(crate::failure::SuspectedCause::ExpiredCredentials);
+    s.procs[0].detail = Some(crate::failure::SuspectedCause::ExpiredCredentials.detail().into());
+    s.procs[0].elapsed = Some(45.0);
+    s.workflow = Some(WorkflowMeta {
+      nodes: vec![WorkflowNodeMeta {
+        id: "add".into(),
+        proc_index: Some(0),
+        order: 0,
+        needs: vec![],
+        conditional: false,
+        when_summary: None,
+      }],
+    });
+  }
+  let api = crate::daemon::jsonio::session_json_api(&store, &store.sessions["castab"]);
+  assert!(api.contains(r#""fail_reason": "container_inactive""#));
+  assert!(api.contains(r#""suspected_cause": "expired_credentials""#));
+  assert!(api.contains("Likely cause: expired credentials"));
+  let page = session_page(&store, "castab").expect("login page");
+  let procs = session_procs_html(&page);
+  assert!(procs.contains(r#"class="chamfer proc fail login""#), "proc island is yellow login, not generic fail: {procs}");
+  assert!(procs.contains("stalled after 45s · likely expired credentials"), "elapsed phrase names login expired: {procs}");
+  assert!(
+    procs.contains("Check authentication on the host"),
+    "detail tells agents a human has to sign in: {procs}"
+  );
+  assert!(page.contains(r#"wf-login"#), "graph node class is login: {page}");
+  assert!(page.contains("Likely expired credentials"), "graph label names login expired");
+  assert!(page.contains("wf-leg-login"), "legend lists login expired");
+  let summary =
+    page.split(r#"class="workflow-summary dim">"#).nth(1).and_then(|s| s.split("</p>").next()).unwrap_or("?");
+  assert!(summary.contains("likely expired credentials"), "summary counts login expired separately: {summary}");
+  assert!(!summary.contains(">1 failed<") && !summary.contains("1 failed"), "login is not lumped into failed: {summary}");
+
+  let js = live_client_js();
+  assert!(js.contains("p.suspected_cause === 'expired_credentials'"), "live elapsed phrase matches SSR");
+  assert!(js.contains("login:'⚿'"), "live graph uses the login glyph");
+  assert!(js.contains("login:'Likely expired credentials'"), "live graph label matches SSR");
+  assert!(
+    js.contains("check authentication on the host"),
+    "live tip says retries cannot restore credentials"
+  );
+  assert!(js.contains("p.suspected_cause === 'expired_credentials' ? ' login'"), "live proc class stays yellow");
+}
+
+#[test]
 fn start_panel_offers_project_creation_and_the_client_wires_it() {
   let store = Store::new(DaemonMode::Persistent, 7274, 1);
   let html = super::index_page(&store);
@@ -517,6 +572,9 @@ fn ui_review_fixes_hold() {
   );
   assert!(html.contains(".wf-node.wf-stalled { --accent: var(--purple); }"), "abandoned/stalled is purple");
   assert!(html.contains(".wf-node.wf-stopped { --accent: var(--red); }"), "stopped shares fail red");
+  assert!(html.contains(".wf-node.wf-login { --accent: var(--yellow); }"), "login expired is yellow, not fail red");
+  assert!(html.contains("details.proc.fail.login { --accent: var(--yellow); }"), "proc island matches graph yellow");
+  assert!(html.contains(".wf-leg-login { color: var(--yellow); }"), "legend login is yellow");
   assert!(
     html.contains(".wf-node.wf-terminating { --accent: var(--orange);"),
     "terminating shares running orange"
@@ -616,6 +674,7 @@ fn a_retried_route_is_visibly_a_retry() {
       note: None,
       detail: Some("done".into()),
       fail_reason: fail.map(Into::into),
+      suspected_cause: None,
       container_name: None,
       container_runtime: None,
       cast_path: None,
@@ -969,6 +1028,7 @@ fn job_page_renders_the_loop_convergence_table() {
       note: None,
       detail: Some("scored".into()),
       fail_reason: None,
+      suspected_cause: None,
       container_name: None,
       container_runtime: None,
       cast_path: None,
@@ -1285,6 +1345,7 @@ fn session_proc_html_has_no_stray_backslashes() {
         note: None,
         detail: None,
         fail_reason: None,
+        suspected_cause: None,
         container_name: None,
         container_runtime: None,
         cast_path: None,
@@ -1346,6 +1407,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           note: None,
           detail: None,
           fail_reason: None,
+          suspected_cause: None,
           container_name: None,
           container_runtime: None,
           cast_path: None,
@@ -1373,6 +1435,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           note: None,
           detail: None,
           fail_reason: None,
+          suspected_cause: None,
           container_name: None,
           container_runtime: None,
           cast_path: None,
@@ -1576,6 +1639,7 @@ fn the_lede_counts_image_builds_separately_from_tasks() {
     note: None,
     detail: None,
     fail_reason: None,
+    suspected_cause: None,
     elapsed: None,
     lines: vec![],
     container_name: None,
@@ -1839,6 +1903,7 @@ fn offline_export_embeds_commits_diff_when_present() {
       note: None,
       detail: Some("ok".into()),
       fail_reason: None,
+      suspected_cause: None,
       container_name: None,
       container_runtime: None,
       cast_path: None,
@@ -1931,6 +1996,7 @@ fn offline_export_renders_unrecorded_procs_as_note_rows() {
       note: None,
       detail: None,
       fail_reason: None,
+      suspected_cause: None,
       container_name: None,
       container_runtime: None,
       cast_path: None,
@@ -1996,6 +2062,7 @@ fn offline_export_includes_workflow_graph() {
         note: None,
         detail: None,
         fail_reason: None,
+        suspected_cause: None,
         container_name: None,
         container_runtime: None,
         cast_path: None,
@@ -2023,6 +2090,7 @@ fn offline_export_includes_workflow_graph() {
         note: None,
         detail: None,
         fail_reason: None,
+        suspected_cause: None,
         container_name: None,
         container_runtime: None,
         cast_path: None,
@@ -2170,7 +2238,7 @@ fn awaiting_limits_has_live_ssr_and_offline_export_parity() {
   }
 
   let js = live_client_js();
-  assert!(js.contains("st === 'awaiting_limits' ? 'awaiting limits' : st"));
+  assert!(js.contains("st === 'awaiting_limits' ? 'awaiting limits' : (st === 'login' ? 'likely expired credentials' : st)"));
   assert!(!js.contains("bits.push(kind, st);"), "dependency tips must not expose the raw state identifier");
 }
 
@@ -2234,6 +2302,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           note: None,
           detail: Some("2 + 3 = 5".into()),
           fail_reason: None,
+          suspected_cause: None,
           container_name: None,
           container_runtime: None,
           cast_path: None,
@@ -2261,6 +2330,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           note: None,
           detail: Some("2 + 3 = 5".into()),
           fail_reason: None,
+          suspected_cause: None,
           container_name: None,
           container_runtime: None,
           cast_path: None,
@@ -2350,6 +2420,7 @@ fn session_page_renders_job_level_fleet_verdict_across_skills() {
     note: None,
     detail: None,
     fail_reason: None,
+    suspected_cause: None,
     container_name: None,
     container_runtime: None,
     cast_path: None,
@@ -2442,6 +2513,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           note: None,
           detail: None,
           fail_reason: None,
+          suspected_cause: None,
           container_name: None,
           container_runtime: None,
           cast_path: None,
@@ -2469,6 +2541,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           note: None,
           detail: Some("ok".into()),
           fail_reason: None,
+          suspected_cause: None,
           container_name: None,
           container_runtime: None,
           cast_path: None,
@@ -2496,6 +2569,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           note: None,
           detail: None,
           fail_reason: None,
+          suspected_cause: None,
           container_name: None,
           container_runtime: None,
           cast_path: None,
@@ -2709,6 +2783,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
         note: None,
         detail: None,
         fail_reason: None,
+        suspected_cause: None,
         container_name: None,
         container_runtime: None,
         cast_path: Some("/tmp/x.cast".into()),
@@ -2800,6 +2875,7 @@ fn session_proc_html_has_no_autoscroll_checkbox() {
         note: None,
         detail: None,
         fail_reason: None,
+        suspected_cause: None,
         container_name: None,
         container_runtime: None,
         cast_path: None,
@@ -2866,6 +2942,7 @@ fn store_with_annotate_proc(status: ProcStatus) -> Store {
         note: Some("summarizing…".into()),
         detail: None,
         fail_reason: None,
+        suspected_cause: None,
         container_name: None,
         container_runtime: None,
         cast_path: None,
@@ -3523,6 +3600,7 @@ fn workflow_graph_renders_builtin_shapes() {
       note: None,
       detail: None,
       fail_reason: None,
+      suspected_cause: None,
       container_name: None,
       container_runtime: None,
       cast_path: None,
@@ -4186,6 +4264,7 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
         note: None,
         detail: None,
         fail_reason: None,
+        suspected_cause: None,
         container_name: None,
         container_runtime: None,
         cast_path: None,
