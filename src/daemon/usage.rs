@@ -11,7 +11,7 @@ pub const CURSOR_ACCOUNTING_TIMEOUT_SECS: u64 = 90;
 /// Extra seconds after the accounting wait before a wedged container is abandoned.
 const ACCOUNTING_LEAK_GRACE_SECS: u64 = 15;
 
-/// How long to wait for native counters after the result appears.
+/// How long to wait for native counters after the turn has gone quiet.
 ///
 /// `SCSH_USAGE_ACCOUNTING_TIMEOUT` (seconds, > 0) overrides every harness. Otherwise
 /// Cursor gets [`CURSOR_ACCOUNTING_TIMEOUT_SECS`] and every other harness gets
@@ -37,20 +37,25 @@ fn accounting_timeout_from_env(harness: crate::config::Harness, raw: Option<&str
 /// One host-owned deadline for every harness. The container only exits after this
 /// controller has saved validated counters or journaled the accounting failure.
 pub struct Completion {
-  /// First observation of the result starts the accounting deadline.
+  /// Quiet-turn instant that starts the accounting deadline. Screen activity or a
+  /// growing native stream clears this so a live generation is not cut off.
   started: Option<Instant>,
   /// Authorization starts a separate, bounded graceful-exit allowance.
   released: Option<Instant>,
   /// Throttle native transcript reads without delaying watchdog protection.
   next_poll: Instant,
+  /// Last observed native accounting artifact size, for detecting a still-open turn.
+  native_bytes: Option<u64>,
 }
 
 impl Completion {
   pub fn new() -> Self {
-    Self { started: None, released: None, next_poll: Instant::now() }
+    Self { started: None, released: None, next_poll: Instant::now(), native_bytes: None }
   }
 
-  pub fn poll(&mut self, harness: crate::config::Harness, dir: &Path, result: &Path, required: bool) -> bool {
+  pub fn poll(
+    &mut self, harness: crate::config::Harness, dir: &Path, result: &Path, required: bool, live: bool,
+  ) -> bool {
     let now = Instant::now();
     if let Some(released) = self.released {
       return now.duration_since(released) < Duration::from_secs(15);
@@ -58,20 +63,20 @@ impl Completion {
     if !result.is_file() {
       return false;
     }
-    let started = *self.started.get_or_insert(now);
     let wait = accounting_timeout_secs(harness);
-    if now.duration_since(started) >= Duration::from_secs(wait.saturating_add(ACCOUNTING_LEAK_GRACE_SECS)) {
-      // Even a full disk preventing the shutdown instruction must not leak a container.
-      return false;
+    if let Some(started) = self.started {
+      if now.duration_since(started) >= Duration::from_secs(wait.saturating_add(ACCOUNTING_LEAK_GRACE_SECS)) {
+        // Even a full disk preventing the shutdown instruction must not leak a container.
+        return false;
+      }
     }
     if now < self.next_poll {
       return true;
     }
     self.next_poll = now + Duration::from_millis(250);
-    let expired = now.duration_since(started) >= Duration::from_secs(wait);
-    let ready = if required && !expired { completed_usage(harness, dir, result) } else { None };
     let error = dir.join(format!("{}.usage-error", crate::runtime::RUN_LOG_REL));
     let unsupported = matches!(harness, crate::config::Harness::Grok | crate::config::Harness::Opencode);
+    let ready = if required { completed_usage(harness, dir, result) } else { None };
     let saved = if let Some(summary) = ready {
       crate::atomic_write(
         &dir.join(format!("{}.usage-final", crate::runtime::RUN_LOG_REL)),
@@ -81,25 +86,69 @@ impl Completion {
     } else {
       false
     };
-    if !required || saved || unsupported || expired {
-      if required && !saved {
-        // A timeout remains a failure even if late counters appear during teardown.
-        let detail = if unsupported {
-          "unavailable: this harness has no native accounting adapter; use SCSH_NO_USAGE=1 to run without counters"
-            .to_string()
-        } else {
-          format!("timeout: native accounting did not complete within {wait}s of the result")
-        };
-        if crate::atomic_write(&error, detail.as_bytes()).is_err() {
-          return false;
-        }
+    let grew = self.native_grew(harness, dir);
+    // Cursor writes the result with a tool, then generates the final message. No hook
+    // fires until that generation ends. A wall clock from the result file would kill
+    // that turn and leave tokens=null. Hold the deadline while the screen or native
+    // stream is still moving; start it only once the turn has gone quiet.
+    let quiet = !live && !grew;
+    let expired =
+      quiet && self.started.map(|started| now.duration_since(started) >= Duration::from_secs(wait)).unwrap_or(false);
+    if required && !saved && !unsupported && !expired {
+      if quiet {
+        let _ = self.started.get_or_insert(now);
+      } else {
+        self.started = None;
       }
-      if crate::atomic_write(&dir.join(format!("{}.shutdown", crate::runtime::RUN_LOG_REL)), b"exit").is_ok() {
-        self.released = Some(now);
+      return true;
+    }
+    if required && !saved {
+      // A timeout remains a failure even if late counters arrive during teardown.
+      let detail = if unsupported {
+        "unavailable: this harness has no native accounting adapter; use SCSH_NO_USAGE=1 to run without counters"
+          .to_string()
+      } else {
+        format!("timeout: native accounting did not complete within {wait}s of the turn going quiet")
+      };
+      if crate::atomic_write(&error, detail.as_bytes()).is_err() {
+        return false;
       }
+    }
+    if crate::atomic_write(&dir.join(format!("{}.shutdown", crate::runtime::RUN_LOG_REL)), b"exit").is_ok() {
+      self.released = Some(now);
     }
     true
   }
+
+  fn native_grew(&mut self, harness: crate::config::Harness, dir: &Path) -> bool {
+    let bytes = accounting_bytes(harness, dir);
+    match self.native_bytes {
+      None => {
+        self.native_bytes = Some(bytes);
+        false
+      }
+      Some(previous) => {
+        self.native_bytes = Some(bytes);
+        bytes > previous
+      }
+    }
+  }
+}
+
+fn accounting_bytes(harness: crate::config::Harness, dir: &Path) -> u64 {
+  let paths = match harness {
+    crate::config::Harness::Cursor => {
+      vec![dir.join(format!("{}.cursor-hooks.jsonl", crate::runtime::RUN_LOG_REL))]
+    }
+    crate::config::Harness::Claude => {
+      jsonl_files(&dir.join(crate::runtime::CLAUDE_AUTH_REL).join(".claude/projects")).unwrap_or_default()
+    }
+    crate::config::Harness::Codex => {
+      jsonl_files(&dir.join(crate::runtime::CODEX_FORWARD_REL).join("sessions")).unwrap_or_default()
+    }
+    _ => return 0,
+  };
+  paths.iter().map(|path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)).sum()
 }
 
 /// Each attempt owns a fresh transcript tree. Require it to change at or after the
@@ -218,8 +267,11 @@ mod completion_tests {
       self.0.join(format!("{}.{suffix}", crate::runtime::RUN_LOG_REL))
     }
     fn poll(&self, state: &mut Completion, harness: Agent, required: bool) -> bool {
+      self.poll_live(state, harness, required, false)
+    }
+    fn poll_live(&self, state: &mut Completion, harness: Agent, required: bool, live: bool) -> bool {
       state.next_poll = Instant::now();
-      state.poll(harness, &self.0, &self.0.join("tmp/result.json"), required)
+      state.poll(harness, &self.0, &self.0.join("tmp/result.json"), required, live)
     }
   }
   impl Drop for Run {
@@ -278,7 +330,7 @@ mod completion_tests {
         assert_eq!(
           std::fs::read_to_string(run.artifact("usage-error")).unwrap(),
           format!(
-            "timeout: native accounting did not complete within {}s of the result",
+            "timeout: native accounting did not complete within {}s of the turn going quiet",
             accounting_timeout_secs(harness)
           )
         );
@@ -335,5 +387,63 @@ mod completion_tests {
     assert_eq!(tokens.input, 123_205);
     assert_eq!(tokens.output, 8_032);
     assert_eq!(tokens.cache_read, 171_008);
+  }
+
+  #[test]
+  fn a_live_cursor_turn_after_the_result_does_not_start_the_deadline() {
+    let run = Run::new();
+    std::fs::write(
+      run.artifact("cursor-hooks.jsonl"),
+      r#"{"hook_event_name":"postToolUse","conversation_id":"c","generation_id":"g","tool_use_id":"t1"}
+"#,
+    )
+    .unwrap();
+    let mut state = Completion::new();
+    assert!(run.poll_live(&mut state, Agent::Cursor, true, true));
+    assert!(!run.artifact("shutdown").exists());
+    assert!(state.started.is_none(), "screen activity means the generation is still running");
+    state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs(Agent::Cursor) + 1));
+    assert!(run.poll_live(&mut state, Agent::Cursor, true, true));
+    assert!(!run.artifact("usage-error").exists(), "a live turn must not expire the quiet-turn budget");
+    assert!(!run.artifact("shutdown").exists());
+    assert!(state.started.is_none());
+  }
+
+  #[test]
+  fn growing_cursor_hooks_after_the_result_hold_the_deadline() {
+    let run = Run::new();
+    let hooks = run.artifact("cursor-hooks.jsonl");
+    std::fs::write(
+      &hooks,
+      r#"{"hook_event_name":"postToolUse","conversation_id":"c","generation_id":"g","tool_use_id":"t1"}
+"#,
+    )
+    .unwrap();
+    let mut state = Completion::new();
+    assert!(run.poll(&mut state, Agent::Cursor, true));
+    state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs(Agent::Cursor) + 1));
+    std::fs::write(
+      &hooks,
+      r#"{"hook_event_name":"postToolUse","conversation_id":"c","generation_id":"g","tool_use_id":"t1"}
+{"hook_event_name":"postToolUse","conversation_id":"c","generation_id":"g","tool_use_id":"t2"}
+"#,
+    )
+    .unwrap();
+    assert!(run.poll(&mut state, Agent::Cursor, true));
+    assert!(!run.artifact("shutdown").exists(), "another tool call is still the same open turn");
+    std::fs::write(
+      &hooks,
+      r#"{"hook_event_name":"postToolUse","conversation_id":"c","generation_id":"g","tool_use_id":"t1"}
+{"hook_event_name":"postToolUse","conversation_id":"c","generation_id":"g","tool_use_id":"t2"}
+{"hook_event_name":"stop","conversation_id":"c","generation_id":"g","status":"completed","input_tokens":10,"output_tokens":2,"cache_read_tokens":3,"cache_write_tokens":0}
+"#,
+    )
+    .unwrap();
+    assert!(run.poll(&mut state, Agent::Cursor, true));
+    assert!(run.artifact("shutdown").exists());
+    assert!(!run.artifact("usage-error").exists());
+    let saved = Summary::from_json(&std::fs::read_to_string(run.artifact("usage-final")).unwrap()).unwrap();
+    assert!(saved.complete);
+    assert_eq!(saved.tokens.unwrap().output, 2);
   }
 }
