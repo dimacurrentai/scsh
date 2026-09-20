@@ -145,7 +145,7 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
   one strict schema, shown below the finished recording and stored beside the result.
   See [harness usage accounting](HARNESS-USAGE.md).
 
-  Native token counters are required by default for every harness. After the result appears, ordinary watchdogs yield to a dedicated accounting wait (30 seconds, or 90 seconds for Cursor; override with `SCSH_USAGE_ACCOUNTING_TIMEOUT`); only then does `scsh` request a graceful exit, never automatic Ctrl-C. Missing counters fail with `usage_accounting_timeout` or `usage_accounting_unavailable`. Set `SCSH_NO_USAGE=1` to explicitly skip this requirement and wait. Grok and OpenCode currently have no native accounting adapter and require that opt-out.
+  Native token counters are required by default for every harness. After the result appears and the turn has gone quiet, ordinary watchdogs yield to a dedicated accounting wait (30 seconds, or 90 seconds for Cursor; override with `SCSH_USAGE_ACCOUNTING_TIMEOUT`); only then does `scsh` request a graceful exit, never automatic Ctrl-C. A still-running generation does not start that wait. Missing counters fail with `usage_accounting_timeout` or `usage_accounting_unavailable`. Set `SCSH_NO_USAGE=1` to explicitly skip this requirement and wait. Grok and OpenCode currently have no native accounting adapter and require that opt-out.
 
 - **`result`** *(required)* — a **repo-relative** path the skill must create (keep it
   under the gitignored `tmp/`). A missing result fails the skill. When it appears,
@@ -549,7 +549,7 @@ The one place they are all listed. Host-side knobs, all optional:
 | `SCSH_GIT_PORT` | ephemeral | Git-daemon port on the host. |
 | `SCSH_KEEP_RUNS` | off | `1` keeps every `/tmp/scsh-*-run-*` clone (and skips the stale sweep). |
 | `SCSH_NO_USAGE` | off | `1` skips required native token accounting and its bounded completion wait. |
-| `SCSH_USAGE_ACCOUNTING_TIMEOUT` | `30` (`90` for Cursor) | Seconds to wait for native counters after a result appears. |
+| `SCSH_USAGE_ACCOUNTING_TIMEOUT` | `30` (`90` for Cursor) | Seconds to wait for native counters after the turn goes quiet. |
 | `SCSH_REPAIR_RESULT_JSON` | on | `0` requires strict result JSON. Default (or `1`) repairs undefined escapes before schema validation — the same rescue used for agent-authored writes. |
 | `SCSH_REAP_CONTAINERS` | on | `0` disables the daemon's zombie-container reaper: it destroys `scsh-*-run-*` containers that stay unclaimed by any live job for ~30 consecutive minutes of once-a-minute sweeps — orphans left by a killed `scsh run`. |
 | `SCSH_NO_RETRY` | off | `1` disables the single automatic retry of transient failures. |

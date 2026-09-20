@@ -353,9 +353,10 @@ fn read_line_tail<R: BufRead>(reader: &mut R, max_bytes: usize) -> std::io::Resu
 /// collection path — copy out, validate against the workflow schema, bounded correction retry —
 /// stays authoritative, so an early stop can never launder a bad result into a pass.
 pub struct DoneWatch {
-  /// Poll the caller's bounded completion protocol before any watchdog. True means the
-  /// task has finished and accounting/clean shutdown owns the remaining time budget.
-  pub settling: Option<Box<dyn Fn() -> bool + Send + Sync>>,
+  /// Poll the caller's bounded completion protocol before any watchdog. The bool is
+  /// whether the screen still produced novel frames this tick. True return means
+  /// accounting/clean shutdown owns the remaining time budget.
+  pub settling: Option<Box<dyn Fn(bool) -> bool + Send + Sync>>,
   /// The declared result file, watched for the writer going quiet.
   pub file: std::path::PathBuf,
   /// How long `file`'s stamp must hold still before it counts as finished.
@@ -902,7 +903,14 @@ impl Proc {
         if let Some(s) = child.try_wait()? {
           break s;
         }
-        if done.and_then(|d| d.settling.as_ref()).is_some_and(|poll| poll()) {
+        // Read the cast before accounting claims the wait: Cursor writes the result with a
+        // tool, then keeps generating. Those frames are the only sign the turn is still open.
+        let novel_activity = novelty.as_mut().is_some_and(NoveltyWatch::poll);
+        if novel_activity {
+          saw_novelty = true;
+          last_activity = std::time::Instant::now();
+        }
+        if done.and_then(|d| d.settling.as_ref()).is_some_and(|poll| poll(novel_activity)) {
           settling_started = true;
           thread::sleep(Duration::from_millis(100));
           continue;
@@ -911,14 +919,6 @@ impl Proc {
           kill_child_tree(&mut child);
           killed = Killed::Done;
           break child.wait()?;
-        }
-        // Read the cast FIRST — the novelty hashes and, when a limit wait is armed, the
-        // rendered screen come from the same bytes, and the limit scan below is worthless
-        // against a tail nothing has read into yet.
-        let novel_activity = novelty.as_mut().is_some_and(NoveltyWatch::poll);
-        if novel_activity {
-          saw_novelty = true;
-          last_activity = std::time::Instant::now();
         }
         // Then read the screen, before any watchdog does its arithmetic: a run parked on a
         // usage limit has not stalled and has not overrun anything, and every clock below has
@@ -2242,7 +2242,7 @@ mod tests {
       file: file.clone(),
       quiet_for: Duration::from_millis(10),
       confirm: Box::new(|| true),
-      settling: Some(Box::new(move || start.elapsed() < Duration::from_secs(3))),
+      settling: Some(Box::new(move |_| start.elapsed() < Duration::from_secs(3))),
     };
     let watch = ActivityWatch {
       file: file.clone(),

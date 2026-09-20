@@ -6630,7 +6630,7 @@ fn run_one_skill(
       let result = dir.join(&skill.result);
       let harness = skill.harness;
       let required = usage_accounting_required();
-      Box::new(move || state.lock().unwrap().poll(harness, &dir, &result, required))
+      Box::new(move |live| state.lock().unwrap().poll(harness, &dir, &result, required, live))
     }),
     file: run_dir.join(&skill.result),
     quiet_for: Duration::from_secs(RESULT_QUIESCENCE_SECS),
@@ -10538,7 +10538,7 @@ the run fails only when every selected skill is skipped.",
   );
   help_row(
     "SCSH_USAGE_ACCOUNTING_TIMEOUT",
-    "Seconds to wait for native counters after a result (default 30; Cursor 90).",
+    "Seconds to wait for native counters after the turn goes quiet (default 30; Cursor 90).",
   );
   help_row(
     "SCSH_REPAIR_RESULT_JSON=0",
@@ -10743,8 +10743,8 @@ fn print_help_internals() {
   Cursor uses cursor-grok-4.6-high-fast; its interactive TUI is recorded with asciinema.
   Token usage is required for every successful agent attempt and displayed
   below its completed recording. Every harness gets a bounded accounting phase before
-  teardown; ordinary watchdogs yield while counters finish (30s, or 90s for Cursor;
-  override with SCSH_USAGE_ACCOUNTING_TIMEOUT). Missing or
+  teardown; ordinary watchdogs yield while counters finish (30s, or 90s for Cursor,
+  after the turn goes quiet; override with SCSH_USAGE_ACCOUNTING_TIMEOUT). Missing or
   timed-out counters fail with a dedicated accounting reason. Grok and OpenCode currently
   have no accounting adapter and require the explicit opt-out.
   SCSH_NO_USAGE=1 selects the lower-latency path that permits unavailable counters. External
