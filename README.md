@@ -307,6 +307,28 @@ The built-in `gorgeous-pipeline` workflow prepares the current branch, runs the 
 
 `gh-gorgeous-review` has two entry points. Invoke `$gh-gorgeous-review <PR URL>` in an agent session for the complete conversational workflow, or use **Start gh-gorgeous-review** on scsh's Run page. The browser kickoff requires `gh auth login` plus one-time global installs of [dkorolev/beautiful-skills](https://github.com/dkorolev/beautiful-skills) and [dkorolev/code-review-skills](https://github.com/dkorolev/code-review-skills). The daemon creates or safely refreshes the same scsh-owned replica under `~/.scsh/github-reviews/`, pins local `main` to the PR's actual base, reconstructs `PR-DESCRIPTION.md`, snapshots the fleet harness quotas before and after, and starts the explicit machine-wide `code-gorgeous-review` fleet. An untrusted repo-local `.scsh.yml` cannot replace that fleet. Starting the browser job authorizes publication of one GitHub review after every planned route succeeds. Findings on diff lines become inline comments; other findings go into the summary. The event is COMMENT unless the approval bar is met. Publication appears as the final job step, and a failed publication keeps its error and completed results available. The publisher rechecks the PR head and base and reconciles existing reviews before posting. The checkout receipt records `published` or `publication_failed`, so a later `$gh-gorgeous-review <PR URL>` can report or recover that outcome without running the fleet twice.
 
+The built-in workflow reserves 25% of a session window and 10% of a long window.
+Cursor's reviewers and publisher explicitly use `cursor-grok-4.5-high`, so eligibility
+checks its native-model pool (`auto_pool`, the endpoint's legacy name). An exhausted
+named-model pool or aggregate billing gauge does not exclude that route. Grok checks
+shared weekly credits and GrokBuild, not unrelated voice/chat gauges. Cursor's
+[usage documentation](https://prod.cursor.com/help/models-and-usage/usage-limits)
+distinguishes native models from Auto, which can draw from either pool.
+
+Cursor and Grok provide one Grok 4.5 lane: at most one runs. Among eligible routes,
+the planner prefers the larger **spendable percentage per day until reset**:
+`max(0, 90 - used_percent) / days_until_reset`, taking the minimum across applicable
+limits and clamping the reset horizon to at least one hour. This favors allowance
+that would expire sooner while keeping the reserve; it is a scheduling heuristic,
+not a claim that the subscriptions buy equal token capacity. Monthly versus weekly
+periods use their actual reset dates, not assumed cycle lengths. If either reset is
+missing, invalid, unsupported, or elapsed, compare spendable percentages instead.
+Prefer a known quota over an unavailable one; ties and two unavailable readings
+prefer Cursor. Missing quota retains the existing run-anyway behavior, with an
+explicit note. The unselected route reports `alternative_selected`; selection reasons
+and raw quota readings remain in the plan. The two-lane minimum is checked afterward,
+so Cursor plus Grok alone cannot count as two independent opinions.
+
 Globally installed skill profiles may also declare required environment inputs. The Run page renders those inputs as form fields and forwards their values to the spawned profile.
 
 **Installing skills.** With no arguments, `scsh installskills` installs all five code-review specialties, their 15-route `code-review` profile, and `scsh-harness-demo-and-selftest` into the repo's `.skills/` — and deliberately nothing more: the delivery-pipeline skill families live in their own repositories and install from source, so the bundle can never drift from them. Give the command one or more **git URLs** to install another repository's skills (installed in order, as if you ran the command once per repo):

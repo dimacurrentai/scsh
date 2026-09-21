@@ -10275,7 +10275,7 @@ fn print_help_command(name: &str) {
       "the host-side steps of the built-in gh-gorgeous-review workflow",
       "scsh gh-review plan|publish|quota-after",
       &[
-        ("plan", "Which harnesses review: credentials first, then quota (a long window under 10% left or a 5-hour window under 25% benches the harness). Fails when fewer than two can run."),
+        ("plan", "Which harnesses review: credentials, then relevant quota pools (10% long-window and 25% session reserves). Cursor/Grok share one native Grok lane, selected by spare quota per day until reset. Needs two independent lanes."),
         ("publish", "Post the review the in-container prepare_review step wrote (FINDINGS, SUMMARY, APPROVAL_BAR inputs) through gh, after the head-unchanged and duplicate checks."),
         ("quota-after", "Closing quota snapshot for the harnesses that ran, as deltas against the plan's."),
         ("(host steps)", "Each reads its inputs from the environment the workflow binds and writes its verdict to $SCSH_RESULT; run by scsh, not by hand."),

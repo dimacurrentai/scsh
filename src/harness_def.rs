@@ -1881,6 +1881,19 @@ mod tests {
   }
 
   #[test]
+  fn github_review_cursor_routes_use_the_native_grok_model() {
+    let def = builtin("gh-gorgeous-review");
+    let cursor_steps: Vec<_> =
+      def.steps.iter().filter_map(|s| s.agent()).filter(|a| a.harness == crate::config::Harness::Cursor).collect();
+    assert_eq!(cursor_steps.len(), 6, "five reviewers plus the publisher");
+    for agent in cursor_steps {
+      assert_eq!(agent.model.as_deref(), Some("cursor-grok-4.5-high"));
+    }
+    let yaml = include_str!("harness_defs/gh-gorgeous-review.yml");
+    assert_eq!(yaml.matches("choices: run, no_credentials, expired, low_quota, alternative_selected").count(), 2);
+  }
+
+  #[test]
   fn github_review_preparation_can_read_inputs_and_write_its_result() {
     let def = builtin("gh-gorgeous-review");
     for harness in ["claude", "codex", "cursor", "grok"] {

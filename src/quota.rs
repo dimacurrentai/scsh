@@ -930,7 +930,7 @@ fn cursor_token() -> Option<String> {
 }
 
 /// Normalize `DashboardService/GetCurrentPeriodUsage`: the included-usage gauge plus the
-/// auto/named-model pool split, all resetting when the billing cycle rolls over.
+/// native/other-model pool split (legacy API field names), resetting at the billing cycle end.
 fn parse_cursor_usage(body: &str) -> Result<Vec<QuotaWindow>, String> {
   let Ok(Value::Object(root)) = json::parse(body) else {
     return Err("usage endpoint answered non-JSON".into());
@@ -939,7 +939,7 @@ fn parse_cursor_usage(body: &str) -> Result<Vec<QuotaWindow>, String> {
   let plan_usage = get_obj(&root, "planUsage").ok_or("usage endpoint answered without a planUsage object")?;
   let gauges = [
     ("totalPercentUsed", "billing_cycle", "billing cycle (included)"),
-    ("autoPercentUsed", "auto_pool", "auto-model pool"),
+    ("autoPercentUsed", "auto_pool", "native-model pool"),
     ("apiPercentUsed", "api_pool", "named-model pool"),
   ];
   let mut windows = Vec::new();

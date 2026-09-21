@@ -6,8 +6,9 @@
 # `plan` decides which harnesses review: it needs the harness logged in AND enough quota
 # left (a long window — weekly/monthly/billing — under 10% left benches it, a 5-hour window
 # under 25% left benches it). Fewer than two runnable harnesses fails the plan, and the job,
-# up front. Each of the five reviewer skills runs on every harness the plan cleared; a
-# benched harness shows every one of its reviewer nodes skipped, with the plan reason on the
+# up front. Cursor uses its native-model pool; Grok uses shared credits and GrokBuild.
+# Only one runs: prefer spendable quota per day until reset (see README). Each of the five
+# reviewer skills runs on every harness the plan cleared; a benched harness shows every one of its reviewer nodes skipped, with the plan reason on the
 # node. `prepare_<harness>` runs on the first runnable harness the plan chose as publisher,
 # reads the reviewer grades and comments, and writes the review payload (one human-voiced
 # summary plus per-file findings) with no GitHub write of its own. `publish`, a host step,
@@ -18,7 +19,7 @@
 # scsh's bundle byte-for-byte; scsh appends only the grade/comments workflow adapter the
 # shared reviewer contract already supports. Nothing is pushed and the PR itself is never
 # edited — the sole outward effect is the one published review.
-description: "Review a GitHub PR with every configured harness (needs two), then publish one GitHub review."
+description: "Review a GitHub PR with eligible harnesses (needs two; Cursor/Grok share one lane), then publish one GitHub review."
 params:
   PR_URL:
     type: string
@@ -42,12 +43,12 @@ steps:
         type: string
       cursor:
         type: enum
-        choices: run, no_credentials, expired, low_quota
+        choices: run, no_credentials, expired, low_quota, alternative_selected
       cursor_note:
         type: string
       grok:
         type: enum
-        choices: run, no_credentials, expired, low_quota
+        choices: run, no_credentials, expired, low_quota, alternative_selected
       grok_note:
         type: string
       publisher:
@@ -95,7 +96,7 @@ steps:
       plan.cursor: run
     agent:
       harness: cursor
-      model: auto
+      model: cursor-grok-4.5-high
     skill: conventions-reviewer
     output:
       grade:
@@ -152,7 +153,7 @@ steps:
       plan.cursor: run
     agent:
       harness: cursor
-      model: auto
+      model: cursor-grok-4.5-high
     skill: justification-reviewer
     output:
       grade:
@@ -209,7 +210,7 @@ steps:
       plan.cursor: run
     agent:
       harness: cursor
-      model: auto
+      model: cursor-grok-4.5-high
     skill: reviewability-reviewer
     output:
       grade:
@@ -266,7 +267,7 @@ steps:
       plan.cursor: run
     agent:
       harness: cursor
-      model: auto
+      model: cursor-grok-4.5-high
     skill: sanity-reviewer
     output:
       grade:
@@ -323,7 +324,7 @@ steps:
       plan.cursor: run
     agent:
       harness: cursor
-      model: auto
+      model: cursor-grok-4.5-high
     skill: testing-reviewer
     output:
       grade:
@@ -536,7 +537,7 @@ steps:
       plan.publisher: cursor
     agent:
       harness: cursor
-      model: auto
+      model: cursor-grok-4.5-high
     inputs:
       PR_URL: params.PR_URL
       CONVENTIONS_CLAUDE_GRADE: review_conventions_claude.grade
