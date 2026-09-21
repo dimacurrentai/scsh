@@ -479,7 +479,10 @@ invocations:                                                  # the agent matrix
 Param types are `string`, `int`, `bool`, and `enum` (with a comma-separated `choices:`). A param
 with a `default:` is optional; without one it is required unless `required: false` is set. The
 `task` / workflow-step `prompt` body is handed to the harness as a **custom prompt** (harnesses
-already accept free-form prompts) — no synthetic `.skills/…/SKILL.md` is written. Repo skills
+already accept free-form prompts) — no synthetic `.skills/…/SKILL.md` is written. A workflow step
+that names a `skill:` also gets that skill's whole directory — `SKILL.md` and its `scripts/` —
+written to `tmp/.scsh-skills/<name>/` in the run, and its prompt states that absolute path, so the
+skill runs the scripts it ships instead of improvising them. Repo skills
 under `.skills/` still run the skill-file path. `scsh run --def` requires a clean repo just like a
 normal run.
 

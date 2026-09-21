@@ -2214,6 +2214,7 @@ fn step_invocation(
     result: format!("{session_dir_rel}/{run_id}.json"),
     terminal: config::Terminal::default(),
     delivery: config::SkillDelivery::DirectPrompt(step.render_skill_body()),
+    installed_files: step.installed_files(),
     artifacts: step.artifacts.iter().map(|a| format!("{session_dir_rel}/{a}")).collect(),
   }
 }
@@ -3908,6 +3909,12 @@ fn attach_override_skill_bodies(invocations: &mut [ResolvedInvocation], skills_r
     let path = skills_root.join(".skills").join(&inv.skill_source).join("SKILL.md");
     let body =
       std::fs::read_to_string(&path).map_err(|e| format!("override skill missing at {}: {e}", path.display()))?;
+    // The override skill's scripts ride beside its `SKILL.md`, in the same global directory.
+    let global_dir = format!("{}/{}", inv.harness.global_skills_rel(), inv.skill_source);
+    inv.installed_files = runtime::skill_dir_files(&skills_root.join(".skills").join(&inv.skill_source))
+      .into_iter()
+      .map(|(rel, contents)| (format!("{global_dir}/{rel}"), contents))
+      .collect();
     inv.delivery = config::SkillDelivery::GlobalInstall(body);
   }
   Ok(())
@@ -7243,24 +7250,29 @@ fn clone_into(
   Ok(())
 }
 
-/// Materialize a carried skill body when the delivery needs a file on disk. `DirectPrompt`
-/// (harness-def `task:` / workflow `prompt:`) is a no-op — the text goes straight into the
+/// Materialize what a carried skill needs on disk. `installed_files` (a workflow step's named
+/// skill, an override skill's scripts) are written first. `DirectPrompt`
+/// (harness-def `task:` / workflow `prompt:`) adds nothing more — the text goes straight into the
 /// harness CLI as a custom prompt. `GlobalInstall` (an override-bundle run) lands in the
 /// harness's global skills dir under the run dir's `tmp/` — mounted on BOTH transports, so a
 /// plain host-side write reaches the container and the checkout never contains the skill.
 /// `Repo` is a no-op: the committed copy already rides in the clone.
 fn materialize_skill_body(run_dir: &Path, _git_transport: bool, skill: &ResolvedInvocation) -> Result<(), String> {
-  let write = |rel: &str, body: &str| -> Result<(), String> {
+  let write = |rel: &str, body: &[u8]| -> Result<(), String> {
     let path = run_dir.join(rel);
     if let Some(parent) = path.parent() {
       std::fs::create_dir_all(parent).map_err(|e| format!("could not create {}: {e}", parent.display()))?;
     }
     std::fs::write(&path, body).map_err(|e| format!("could not write {}: {e}", path.display()))
   };
+  // A carried skill is its whole directory: the files beside `SKILL.md` land with it.
+  for (rel, contents) in &skill.installed_files {
+    write(rel, contents)?;
+  }
   match &skill.delivery {
     config::SkillDelivery::Repo | config::SkillDelivery::DirectPrompt(_) => Ok(()),
     config::SkillDelivery::GlobalInstall(body) => {
-      write(&format!("{}/{}/SKILL.md", skill.harness.global_skills_rel(), skill.skill_source), body)
+      write(&format!("{}/{}/SKILL.md", skill.harness.global_skills_rel(), skill.skill_source), body.as_bytes())
     }
   }
 }
@@ -8206,6 +8218,10 @@ fn cache_key_at(
   // the invocation — so hash it here, so changing a definition's prompt busts the cache.
   if let Some(body) = skill.delivery.body() {
     blob.push_str(&format!("body={}\n", sha256::sha256_hex(body.as_bytes())));
+  }
+  // Likewise the files carried beside that body: a changed script is a changed skill.
+  for (rel, contents) in &skill.installed_files {
+    blob.push_str(&format!("installed={rel} {}\n", sha256::sha256_hex(contents)));
   }
   // A pinned base changes what the skill SEES (`origin/<branch>..HEAD`) without
   // changing the repo tree, so it must key the cache. Appended only when pinning is in play,
@@ -12499,6 +12515,7 @@ steps:
       result: "tmp/r.json".into(),
       terminal: config::Terminal::default(),
       delivery: config::SkillDelivery::Repo,
+      installed_files: Vec::new(),
       artifacts: Vec::new(),
     }
   }
@@ -12548,6 +12565,17 @@ steps:
       cache_key(&caller, &with_body, &env).unwrap(),
       cache_key(&caller, &with_body2, &env).unwrap(),
       "body change busts the cache"
+    );
+    // So do the files carried beside the body: a changed script is a changed skill.
+    let mut with_script = with_body.clone();
+    with_script.installed_files = vec![("tmp/.scsh-skills/x/scripts/w.py".into(), b"print(1)".to_vec())];
+    let mut with_script2 = with_script.clone();
+    with_script2.installed_files[0].1 = b"print(2)".to_vec();
+    assert_ne!(cache_key(&caller, &with_body, &env).unwrap(), cache_key(&caller, &with_script, &env).unwrap());
+    assert_ne!(
+      cache_key(&caller, &with_script, &env).unwrap(),
+      cache_key(&caller, &with_script2, &env).unwrap(),
+      "a carried script change busts the cache"
     );
 
     // A committed change to repo content => different key (the HEAD tree changed).
@@ -13394,6 +13422,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       result: "tmp/greet.json".into(),
       terminal: config::Terminal::default(),
       delivery: config::SkillDelivery::GlobalInstall("# greet\nsay hi\n".into()),
+      installed_files: Vec::new(),
       artifacts: Vec::new(),
     };
     // claude: the CLI's user-level skills dir (under CLAUDE_CONFIG_DIR). The write must land
@@ -13412,6 +13441,75 @@ Subject: [PATCH] add: 2 + 3 = 5
     materialize_skill_body(&run_dir, false, &inv(config::Harness::Opencode)).unwrap();
     assert!(run_dir.join("tmp/.scsh-skills/greet/SKILL.md").is_file());
     let _ = std::fs::remove_dir_all(&base);
+  }
+
+  /// A workflow's named skill arrives as its whole directory, and the delivered writer runs
+  /// from the run's working directory by the path the prompt states — end to end, through
+  /// the same two functions a real step goes through.
+  #[test]
+  fn a_workflow_skill_step_delivers_its_directory_and_the_delivered_writer_runs() {
+    let (name, source) =
+      harness_def::builtin_defs().into_iter().find(|(name, _)| *name == "gorgeous-pipeline").expect("built-in");
+    let definition = harness_def::validate(name, source, harness_def::DefSource::Builtin).expect("validates");
+    let step = definition.steps.iter().find(|step| step.id.starts_with("review_sanity_")).expect("a sanity reviewer");
+    let invocation = step_invocation(step, "review", "tmp/scsh/session", Vec::new(), None);
+    let config::SkillDelivery::DirectPrompt(prompt) = &invocation.delivery else { panic!("steps are prompts") };
+    let skill_dir = "tmp/.scsh-skills/sanity-reviewer";
+    assert!(prompt.contains(&format!("installed at `{}/{skill_dir}`", runtime::AGENT_REPO)), "got: {prompt}");
+
+    let run_dir = std::env::temp_dir().join(format!("scsh-step-skill-{}", runtime::random_nonce_6()));
+    std::fs::create_dir_all(&run_dir).unwrap();
+    materialize_skill_body(&run_dir, false, &invocation).unwrap();
+    assert!(run_dir.join(skill_dir).join("SKILL.md").is_file());
+    assert!(!run_dir.join(".skills").exists(), "the checkout never contains the delivered skill");
+    let ran = std::process::Command::new("python3")
+      .arg(format!("{skill_dir}/scripts/write_review.py"))
+      .args(["--workflow", "--grade=good", "--issue", "--commit=abc123", "--severity=nit", "--file=src/a.rs"])
+      .args(["--line=7", "--description=It's a `$HOME` \"quote\".", "--suggestion=Rename it."])
+      .current_dir(&run_dir)
+      .env("SCSH_RESULT", &invocation.result)
+      .status()
+      .expect("python3 runs the delivered writer");
+    assert!(ran.success());
+    let result = std::fs::read_to_string(run_dir.join(&invocation.result)).expect("the declared result path");
+    assert!(result.contains("\"grade\": \"good\""), "got: {result}");
+    assert!(
+      result.contains("[nit] commit abc123; file src/a.rs; line 7; description: It's a `$HOME`"),
+      "got: {result}"
+    );
+
+    // An inline prompt has no directory: nothing is installed, and no path is claimed.
+    let (name, source) =
+      harness_def::builtin_defs().into_iter().find(|(name, _)| *name == "demo-loop-do-while").expect("built-in");
+    let demo = harness_def::validate(name, source, harness_def::DefSource::Builtin).expect("validates");
+    let inline = step_invocation(demo.steps.first().unwrap(), "increment", "tmp/scsh/session", Vec::new(), None);
+    assert!(inline.installed_files.is_empty());
+    assert!(!inline.delivery.body().unwrap().contains("## Skill directory"));
+    assert!(inline.delivery.body().unwrap().contains("Write a single JSON object"), "an inline prompt writes its own");
+    assert!(!prompt.contains("Write a single JSON object"), "a skill with a writer is never told to hand-write JSON");
+    let _ = std::fs::remove_dir_all(&run_dir);
+  }
+
+  /// An override run's skill is global, and its scripts land beside its `SKILL.md`.
+  #[test]
+  fn an_override_skill_carries_its_scripts_into_the_global_directory() {
+    let skills_root = std::env::temp_dir().join(format!("scsh-override-skill-{}", runtime::random_nonce_6()));
+    let dir = skills_root.join(".skills/greet");
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "# greet\n").unwrap();
+    std::fs::write(dir.join("scripts/hello.py"), "print('hi')\n").unwrap();
+    let mut invocations = vec![mk_inv("greet")];
+    invocations[0].harness = config::Harness::Codex;
+    attach_override_skill_bodies(&mut invocations, &skills_root).unwrap();
+    let run_dir = skills_root.join("run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    materialize_skill_body(&run_dir, false, &invocations[0]).unwrap();
+    assert!(run_dir.join("tmp/.scsh-skills/greet/SKILL.md").is_file());
+    assert_eq!(
+      std::fs::read_to_string(run_dir.join("tmp/.scsh-skills/greet/scripts/hello.py")).unwrap(),
+      "print('hi')\n"
+    );
+    let _ = std::fs::remove_dir_all(&skills_root);
   }
 
   #[test]

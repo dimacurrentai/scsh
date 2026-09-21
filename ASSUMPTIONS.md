@@ -14,7 +14,7 @@ Review these before merging or extending.
 ## Invocation
 
 - **Repo skills** (`.skills/<name>/SKILL.md`): the harness prompt is `Run the skill defined in .skills/<source>/SKILL.md…` (or the global-install equivalent for `--override-dot-scsh-yml`).
-- **Harness-def `task:` / workflow-step `prompt:`**: passed to the harness as a **custom prompt** (`SkillDelivery::DirectPrompt`) — no synthetic `SKILL.md`. Applies to built-ins like `doctor`, `add`, `code-review` (including `probe_credentials`), `arith`, `fruits`, `greet`, `research`.
+- **Harness-def `task:` / workflow-step `prompt:`**: passed to the harness as a **custom prompt** (`SkillDelivery::DirectPrompt`) — no synthetic `SKILL.md`. A workflow step naming a `skill:` is delivered as its **whole directory** too (`tmp/.scsh-skills/<name>/` in the run, outside the checkout; the prompt states the absolute path): one skill runs per container, so scsh says where it is and the agent derives nothing. Applies to built-ins like `doctor`, `add`, `code-review` (including `probe_credentials`), `arith`, `fruits`, `greet`, `research`.
 - **Claude TUI:** `claude --permission-mode bypassPermissions "<prompt>"` (recorded via `scsh-tui-record`), not slash-command `/add`.
 - **OpenCode TUI:** `opencode -m <model> --prompt "<prompt>"`, submitted with Enter once the TUI is up (not the old headless `opencode run`).
 
