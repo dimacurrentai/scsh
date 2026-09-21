@@ -1974,6 +1974,35 @@ fn resolve_ref(
   }
 }
 
+/// Why an undecided step can be skipped NOW, before every step it needs has settled: a
+/// required need was skipped, or a `when:` condition over an already-decided step is false.
+/// Either verdict is final — the gate is an AND and a decided step's outputs do not change —
+/// so the row turns ⊘ at once instead of reading "waiting" until the last need lands. Loops
+/// are left to the wave walk: a loop step's state is cleared and re-run each iteration, so
+/// neither a loop step nor a gate over one is ever settled ahead of time (`in_loop`).
+fn early_skip_reason(
+  s: &harness_def::Step, def: &harness_def::HarnessDef, state: &std::collections::HashMap<String, StepState>,
+  in_loop: &impl Fn(&str) -> bool,
+) -> Option<String> {
+  if in_loop(&s.id) {
+    return None;
+  }
+  let skipped_need = s
+    .needs
+    .iter()
+    .filter(|n| !s.optional_needs.contains(n) && !in_loop(n))
+    .find(|n| state.get(*n).is_some_and(|st| st.skipped));
+  if let Some(n) = skipped_need {
+    return Some(format!("skipped — needs '{n}', which was skipped"));
+  }
+  let settled = |r: &harness_def::Ref| match r {
+    harness_def::Ref::Param(_) => true,
+    harness_def::Ref::StepField { step, .. } => state.contains_key(step) && !in_loop(step),
+  };
+  let note = harness_def::when_settled_failure_note(s.when.as_ref()?, &settled, &|r| resolve_ref(r, def, state))?;
+  Some(format!("skipped — when: {note}"))
+}
+
 /// Resolve one step INPUT: current state first, then the previous do-while iteration's saved
 /// outputs — the loop-carried channel validate_step_graph admits, so a body step can consume
 /// what the loop's final step produced last round without any committed file. Empty when
@@ -3269,6 +3298,28 @@ fn run_workflow(
   let launch_limiter = runtime::LaunchLimiter::new(runtime::max_parallel_runs());
   while state.len() < def.steps.len() && failure.is_none() {
     let wave_caller_tip = caller_tip.clone();
+    // Settle every step whose skip is already certain, to a fixpoint (a skip can cascade
+    // through required needs), before picking this wave — see `early_skip_reason`.
+    loop {
+      let in_loop =
+        |id: &str| do_while_end_for.contains_key(id) || def.steps.iter().any(|step| step.id == id && step.is_loop());
+      let early: Vec<(&harness_def::Step, String)> = def
+        .steps
+        .iter()
+        .filter(|s| !state.contains_key(&s.id))
+        .filter_map(|s| early_skip_reason(s, def, &state, &in_loop).map(|why| (s, why)))
+        .collect();
+      if early.is_empty() {
+        break;
+      }
+      for (s, why) in early {
+        if let Some(p) = step_procs.remove(&s.id) {
+          p.finish_skipped(&why);
+        }
+        skipped_count += 1;
+        state.insert(s.id.clone(), StepState { skipped: true, outputs: HashMap::new() });
+      }
+    }
     let ready: Vec<&harness_def::Step> = def
       .steps
       .iter()
@@ -13341,6 +13392,50 @@ Subject: [PATCH] add: 2 + 3 = 5
       StepState { skipped: false, outputs: [("feedback".to_string(), "current".to_string())].into() },
     );
     assert_eq!(resolve_input(&feedback, &def, &state, &loop_prev), "current", "live state beats the carried value");
+  }
+
+  #[test]
+  fn early_skip_settles_a_false_gate_before_the_other_needs_land() {
+    // gh-gorgeous-review: once `plan` names the publisher, every other `prepare_<harness>` is
+    // certain to be skipped — it must not read "waiting" on the reviewers until they finish.
+    let (_, src) = harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "gh-gorgeous-review").unwrap();
+    let def = harness_def::validate("gh-gorgeous-review", src, harness_def::DefSource::Builtin).unwrap();
+    let step = |id: &str| def.steps.iter().find(|s| s.id == id).unwrap();
+    let never = |_: &str| false;
+    let mut state = std::collections::HashMap::new();
+    assert_eq!(early_skip_reason(step("prepare_grok"), &def, &state, &never), None, "plan has not decided yet");
+    state.insert(
+      "plan".to_string(),
+      StepState {
+        skipped: false,
+        outputs: [("publisher".to_string(), "claude".to_string()), ("grok".to_string(), "low_quota".to_string())]
+          .into(),
+      },
+    );
+    assert_eq!(
+      early_skip_reason(step("prepare_grok"), &def, &state, &never).as_deref(),
+      Some("skipped — when: plan.publisher = grok, but plan.publisher is `claude`")
+    );
+    assert_eq!(early_skip_reason(step("prepare_claude"), &def, &state, &never), None, "the chosen publisher waits");
+    assert_eq!(early_skip_reason(step("publish"), &def, &state, &never), None, "optional needs never cascade");
+    // Loop state is cleared and re-run each iteration, so nothing about a loop is settled early.
+    assert_eq!(early_skip_reason(step("prepare_grok"), &def, &state, &|id| id == "plan"), None);
+    assert_eq!(early_skip_reason(step("prepare_grok"), &def, &state, &|id| id == "prepare_grok"), None);
+  }
+
+  #[test]
+  fn early_skip_cascades_through_a_required_need_only() {
+    let src = "description: x\nsteps:\n  gate:\n    run: true\n  hard:\n    needs: gate\n    run: true\n  soft:\n    needs: gate?\n    run: true\n";
+    let def = harness_def::validate("x", src, harness_def::DefSource::Repo).unwrap();
+    let step = |id: &str| def.steps.iter().find(|s| s.id == id).unwrap();
+    let never = |_: &str| false;
+    let mut state = std::collections::HashMap::new();
+    state.insert("gate".to_string(), StepState { skipped: true, outputs: Default::default() });
+    assert_eq!(
+      early_skip_reason(step("hard"), &def, &state, &never).as_deref(),
+      Some("skipped — needs 'gate', which was skipped")
+    );
+    assert_eq!(early_skip_reason(step("soft"), &def, &state, &never), None, "an optional edge does not fall with it");
   }
 
   #[test]
