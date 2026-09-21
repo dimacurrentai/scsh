@@ -145,7 +145,7 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
   one strict schema, shown below the finished recording and stored beside the result.
   See [harness usage accounting](HARNESS-USAGE.md).
 
-  Native token counters are required by default for every harness. After the result appears and the turn has gone quiet, ordinary watchdogs yield to a dedicated accounting wait (30 seconds, or 90 seconds for Cursor; override with `SCSH_USAGE_ACCOUNTING_TIMEOUT`); only then does `scsh` request a graceful exit, never automatic Ctrl-C. A still-running generation does not start that wait. Missing counters fail with `usage_accounting_timeout` or `usage_accounting_unavailable`. Set `SCSH_NO_USAGE=1` to explicitly skip this requirement and wait. Grok and OpenCode currently have no native accounting adapter and require that opt-out.
+  Native token counters are required by default for every harness. After the result appears and the turn has gone quiet, ordinary watchdogs yield to a dedicated accounting wait (30 seconds, or 90 seconds for Cursor; override with `SCSH_USAGE_ACCOUNTING_TIMEOUT`); only then does `scsh` request a graceful exit, never automatic Ctrl-C. A still-running generation does not start that wait. Missing counters fail with `usage_accounting_timeout` or `usage_accounting_unavailable`. Set `SCSH_NO_USAGE=1` to explicitly skip this requirement and wait. Grok records native per-turn usage, including folded subagent spend. OpenCode currently has no native accounting adapter and requires that opt-out.
 
 - **`result`** *(required)* — a **repo-relative** path the skill must create (keep it
   under the gitignored `tmp/`). A missing result fails the skill. When it appears,

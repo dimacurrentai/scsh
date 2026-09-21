@@ -17,12 +17,12 @@ the attempt's forwarded credentials and temporary config are scrubbed:
 Once a result exists and the turn has gone quiet, the host owns a single accounting deadline: 30 seconds for most harnesses, 90 seconds for Cursor (its hooks trail the result). Screen activity and a still-growing native stream hold that deadline — Cursor writes the result with a tool, then generates the final message with no hooks until `stop`. Override either wait with `SCSH_USAGE_ACCOUNTING_TIMEOUT` (positive integer seconds; invalid values fall back to the harness default). Startup, inactivity, wall-clock, and result-quiescence watchdogs yield during that bounded phase. The host validates fresh native records and the latest turn's completion, atomically saves the accounting snapshot, then authorizes the container to request a clean exit (`/exit` or `/quit`). No completion path sends Ctrl-C. Teardown gets a separate bounded grace period; a wedged process is still cleaned up. A timeout is recorded before teardown and stays a failure even if counters arrive late.
 
 Missing or incomplete native counters fail the attempt as `usage_accounting_unavailable`; a harness that remains live without complete accounting for the full deadline fails as `usage_accounting_timeout`. Both retain the result, recording, hook stream, and run clone for inspection. For latency-sensitive work where counters are deliberately unnecessary, `SCSH_NO_USAGE=1 scsh run …` disables the requirement and accounting wait for every harness.
-Grok and OpenCode currently have no native accounting adapters: required accounting fails
-explicitly as `usage_accounting_unavailable`; these routes require the opt-out until an
-adapter exists. Cache hits launch no agent and are exempt from new accounting.
+OpenCode currently has no native accounting adapter: required accounting fails explicitly as `usage_accounting_unavailable`; this route requires the opt-out until an adapter exists. Cache hits launch no agent and are exempt from new accounting.
 
 The session browser shows one small usage line below the recording only after the attempt
 has finished. A cache hit launches no harness and therefore creates no new usage record.
+
+Grok reads `_x.ai/session/update` → `turn_completed.usage` in the primary session’s `updates.jsonl`. It sums distinct prompt bills, including Grok’s folded subagent usage; it does not add child transcripts or per-model breakdowns again. `usageIsIncomplete`, missing counters, malformed records, and conflicting duplicate bills prevent successful accounting. The final turn must end with `end_turn`, and the transcript must be at least as recent as the result file. Model-call counts come from `modelCalls`; tool counts remain unavailable because the primary stream does not contain all child tool calls.
 
 ## Stable schema
 
@@ -49,15 +49,12 @@ The same strict object is available at `procs[].usage` from
 }
 ```
 
-`harness` is exactly `claude_code`, `codex`, or `cursor`; its corresponding `source` is
-exactly `claude_session_jsonl`, `codex_session_jsonl`, or `cursor_hooks`. Unknown fields,
+`harness` is exactly `claude_code`, `codex`, `cursor`, or `grok`; its corresponding `source` is exactly `claude_session_jsonl`, `codex_session_jsonl`, `cursor_hooks`, or `grok_session_jsonl`. Unknown fields,
 versions, harnesses, and harness/source combinations are rejected by the reader.
 
-`tokens.input` is uncached input. Claude already reports that bucket separately; Codex and
-Cursor input counters include cached input, so `scsh` subtracts the cache buckets. Missing
+`tokens.input` is uncached input. Claude already reports that bucket separately; Codex, Cursor, and Grok input counters include cached input, so `scsh` subtracts the cache buckets. Missing
 accounting is `tokens: null` with `complete: false`, never a fabricated zero. Counters are
-observable client records rather than a billing statement. Where a harness records
-subagents locally, their session files are included.
+observable client records rather than a billing statement. Claude and Codex include local subagent transcripts; Grok uses the primary bill that already includes them.
 
 Every field is required. Counts are nonnegative integers no greater than
 9,007,199,254,740,991. `cache_write`, `llm_round_trips`, and `tool_calls` may be `null`

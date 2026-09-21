@@ -10664,7 +10664,7 @@ fn print_help_config() {
   println!(
     "{}",
     h_dim(
-      "  grok:     grok --always-approve -m <model> --effort <level> \"Run the skill defined in .skills/<source>/…\" \
+      "  grok:     grok --always-approve --trust -m <model> --effort <level> \"Run the skill defined in .skills/<source>/…\" \
 (~/.grok/auth.json or XAI_API_KEY)",
     )
   );
@@ -10756,8 +10756,9 @@ fn print_help_internals() {
   below its completed recording. Every harness gets a bounded accounting phase before
   teardown; ordinary watchdogs yield while counters finish (30s, or 90s for Cursor,
   after the turn goes quiet; override with SCSH_USAGE_ACCOUNTING_TIMEOUT). Missing or
-  timed-out counters fail with a dedicated accounting reason. Grok and OpenCode currently
-  have no accounting adapter and require the explicit opt-out.
+  timed-out counters fail with a dedicated accounting reason. Grok reads native per-turn
+  usage from its primary session, including folded subagent spend. OpenCode currently
+  has no accounting adapter and requires the explicit opt-out.
   SCSH_NO_USAGE=1 selects the lower-latency path that permits unavailable counters. External
   callers get the same versioned TokenUsage schema through session JSON, fleet routes, and
   results/<invocation>.usage.json.

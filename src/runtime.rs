@@ -659,8 +659,10 @@ pub fn harness_command(
     Harness::Grok => {
       // Full interactive TUI: grok's default IS the Build TUI, and a positional prompt seeds
       // the interactive session (`grok "fix the bug"`) — vs the old headless `grok -p`, which
-      // recorded no real terminal. `--always-approve` auto-approves; the container is the sandbox.
-      let mut tui = String::from("grok --always-approve");
+      // recorded no real terminal. `--always-approve` approves tools, but folder trust is
+      // separate: `--trust` grants it before startup loads project instructions and skills.
+      // Both apply to the ephemeral container, which is the sandbox.
+      let mut tui = String::from("grok --always-approve --trust");
       if let Some(m) = model {
         tui.push_str(" -m ");
         tui.push_str(&shell_quote(m));
@@ -3068,7 +3070,7 @@ TAG
     );
     assert!(cmd.contains("scsh: harness=grok"));
     assert!(cmd.contains("scsh-tui-record 200 50 slash-exit none tmp/add_grok.json "), "got: {cmd}");
-    assert!(cmd.contains("grok --always-approve"), "got: {cmd}");
+    assert!(cmd.contains("grok --always-approve --trust -m grok-build"), "got: {cmd}");
     assert!(!cmd.contains("grok -p "), "no headless -p: {cmd}");
     assert!(cmd.contains(" -m grok-build"));
     assert!(cmd.contains(" --effort high"));
@@ -3084,7 +3086,7 @@ TAG
       crate::config::Terminal::default(),
       &crate::config::SkillDelivery::Repo,
     );
-    assert!(bare.contains("grok --always-approve"), "got: {bare}");
+    assert!(bare.contains("grok --always-approve --trust -- "), "got: {bare}");
     assert!(!bare.contains(" --effort "));
     assert!(!bare.contains(" -m "));
 
@@ -3098,7 +3100,7 @@ TAG
       &crate::config::SkillDelivery::DirectPrompt("---\nname: build\n---\nDo the work.".into()),
     );
     assert!(
-      frontmatter.contains("grok --always-approve -- ") && frontmatter.contains("name: build"),
+      frontmatter.contains("grok --always-approve --trust -- ") && frontmatter.contains("name: build"),
       "frontmatter must be positional, never parsed as an option: {frontmatter}"
     );
   }

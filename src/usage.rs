@@ -67,6 +67,7 @@ pub enum Harness {
   ClaudeCode,
   Codex,
   Cursor,
+  Grok,
 }
 
 impl Harness {
@@ -75,6 +76,7 @@ impl Harness {
       Harness::ClaudeCode => "claude_code",
       Harness::Codex => "codex",
       Harness::Cursor => "cursor",
+      Harness::Grok => "grok",
     }
   }
 
@@ -83,6 +85,7 @@ impl Harness {
       Harness::ClaudeCode => "claude_session_jsonl",
       Harness::Codex => "codex_session_jsonl",
       Harness::Cursor => "cursor_hooks",
+      Harness::Grok => "grok_session_jsonl",
     }
   }
 }
@@ -131,6 +134,7 @@ impl Summary {
       "claude_code" => Harness::ClaudeCode,
       "codex" => Harness::Codex,
       "cursor" => Harness::Cursor,
+      "grok" => Harness::Grok,
       _ => return None,
     };
     if string(payload, "source") != Some(harness.source()) {
@@ -418,6 +422,9 @@ pub(crate) fn unavailable(harness: Harness) -> Summary {
 /// Native turn boundaries, separate from token snapshots: a tool-call response or
 /// cumulative counter alone does not mean the agent has finished its last turn.
 pub(crate) fn turn_finished(harness: crate::config::Harness, stream: &str) -> bool {
+  if harness == crate::config::Harness::Grok {
+    return grok_session_summary(stream).complete;
+  }
   let mut finished = false;
   for line in stream.lines().filter(|line| !line.trim().is_empty()) {
     let Ok(event) = json::parse(line) else { return false };
@@ -601,6 +608,114 @@ fn codex_tokens(usage: &Value) -> Option<Tokens> {
   })
 }
 
+/// Identify the primary Grok session from its native event stream. Child usage is
+/// folded into its parent's turn totals, so summing every session would double-count.
+pub(crate) fn grok_primary_session(events: &str) -> Result<Option<String>, ()> {
+  let mut primary = None;
+  for line in events.lines().filter(|line| !line.trim().is_empty()) {
+    let event = json::parse(line).map_err(|_| ())?;
+    if string(&event, "type") == Some("turn_started") {
+      let relationship = string(&event, "session_relationship").ok_or(())?;
+      if relationship == "primary" {
+        let id = string(&event, "session_id").ok_or(())?;
+        if primary.as_deref().is_some_and(|previous| previous != id) {
+          return Err(());
+        }
+        primary = Some(id.to_string());
+      }
+    }
+  }
+  Ok(primary)
+}
+
+/// Grok 1.0.34's `_x.ai/session/update` records contain per-prompt bills, not
+/// cumulative session totals. Only the primary stream is supplied: its bills
+/// already include subagents. Ignore context-window telemetry and modelUsage
+/// breakdowns, and honor usageIsIncomplete (including outstanding subagent bills).
+/// Source: xai-org/grok-build, xai-grok-shell/src/extensions/notification.rs.
+pub fn grok_session_summary(stream: &str) -> Summary {
+  let mut turns = BTreeMap::new();
+  let mut session = None;
+  let mut finished = false;
+  for line in stream.lines().filter(|line| !line.trim().is_empty()) {
+    let Ok(event) = json::parse(line) else { return unavailable(Harness::Grok) };
+    let Some(params) = field(&event, "params") else { return unavailable(Harness::Grok) };
+    let Some(id) = string(params, "sessionId") else { return unavailable(Harness::Grok) };
+    if session.as_deref().is_some_and(|previous| previous != id) {
+      return unavailable(Harness::Grok);
+    }
+    session = Some(id.to_string());
+    let Some(update) = field(params, "update") else { return unavailable(Harness::Grok) };
+    match string(update, "sessionUpdate") {
+      Some("turn_completed") => {
+        if string(&event, "method") != Some("_x.ai/session/update") {
+          return unavailable(Harness::Grok);
+        }
+        let Some(prompt) = string(update, "prompt_id") else { return unavailable(Harness::Grok) };
+        let Some(usage) = field(update, "usage") else { return unavailable(Harness::Grok) };
+        let Some(tokens) = grok_tokens(usage) else { return unavailable(Harness::Grok) };
+        let Some(calls) = count(usage, "modelCalls") else { return unavailable(Harness::Grok) };
+        let bill = (tokens, calls);
+        if turns.get(prompt).is_some_and(|previous| previous != &bill || !finished) {
+          return unavailable(Harness::Grok);
+        }
+        turns.insert(prompt.to_string(), bill);
+        finished = string(update, "stop_reason") == Some("end_turn");
+      }
+      Some(
+        "user_message_chunk"
+        | "agent_message_chunk"
+        | "agent_thought_chunk"
+        | "tool_call"
+        | "tool_call_update"
+        | "tool_call_delta_chunk",
+      ) => finished = false,
+      _ => {}
+    }
+  }
+  if turns.is_empty() {
+    return unavailable(Harness::Grok);
+  }
+  let mut total = Tokens { input: 0, output: 0, cache_read: 0, cache_write: Some(0) };
+  let mut calls = 0u64;
+  for (tokens, count) in turns.values() {
+    if !add_tokens(&mut total, tokens) {
+      return unavailable(Harness::Grok);
+    }
+    let Some(sum) = calls.checked_add(*count).filter(|n| *n <= 9_007_199_254_740_991) else {
+      return unavailable(Harness::Grok);
+    };
+    calls = sum;
+  }
+  Summary {
+    harness: Harness::Grok,
+    complete: finished,
+    tokens: Some(total),
+    llm_round_trips: Some(calls),
+    // The primary transcript omits child tool calls; do not present a partial count as exact.
+    tool_calls: None,
+  }
+}
+
+fn grok_tokens(usage: &Value) -> Option<Tokens> {
+  if !matches!(field(usage, "usageIsIncomplete"), None | Some(Value::Bool(false))) {
+    return None;
+  }
+  let input = count(usage, "inputTokens")?;
+  let output = count(usage, "outputTokens")?;
+  let cache_read = count(usage, "cachedReadTokens")?;
+  let cache_write = count(usage, "cacheCreationTokens")?;
+  if count(usage, "totalTokens")? != input.checked_add(output)? {
+    return None;
+  }
+  Some(Tokens {
+    input: input.checked_sub(cache_read.checked_add(cache_write)?)?,
+    output,
+    cache_read,
+    cache_write: Some(cache_write),
+  })
+}
+
 fn add_tokens(total: &mut Tokens, add: &Tokens) -> bool {
   let Some(input) = total.input.checked_add(add.input) else { return false };
   let Some(output) = total.output.checked_add(add.output) else { return false };
@@ -695,6 +810,74 @@ fn number(n: usize) -> Value {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  pub(crate) const GROK: &str = include_str!("../tests/fixtures/grok-usage/updates.jsonl");
+
+  #[test]
+  fn grok_real_turn_matches_native_usage_and_round_trips() {
+    let summary = grok_session_summary(GROK);
+    assert!(summary.complete);
+    assert_eq!(summary.tokens, Some(Tokens { input: 20_974, output: 191, cache_read: 19_456, cache_write: Some(0) }));
+    assert_eq!(summary.llm_round_trips, Some(2));
+    assert_eq!(summary.tool_calls, None);
+    assert_eq!(Summary::from_json(&summary.to_json()), Some(summary));
+  }
+
+  #[test]
+  fn grok_counts_turns_once_and_does_not_add_model_breakdowns() {
+    let completed = GROK.lines().last().unwrap();
+    let duplicated = format!("{GROK}{completed}");
+    assert_eq!(grok_session_summary(&duplicated), grok_session_summary(GROK));
+    let two_turns = format!("{GROK}{}", GROK.replace("prompt-1", "prompt-2"));
+    let summary = grok_session_summary(&two_turns);
+    assert!(summary.complete);
+    assert_eq!(summary.tokens.unwrap().input, 41_948);
+    assert_eq!(summary.llm_round_trips, Some(4));
+  }
+
+  #[test]
+  fn grok_rejects_missing_partial_inconsistent_or_invalid_counters() {
+    for (from, to) in [
+      ("\"inputTokens\":40430", "\"inputTokens\":-1"),
+      ("\"outputTokens\":191", "\"outputTokens\":1.5"),
+      ("\"cachedReadTokens\":19456", "\"cachedReadTokens\":50000"),
+      ("\"cacheCreationTokens\":0,", ""),
+      ("\"modelCalls\":2", "\"modelCalls\":null"),
+      ("\"totalTokens\":40621", "\"totalTokens\":1"),
+      ("\"usage\":{", "\"usage\":{\"usageIsIncomplete\":true,"),
+      ("\"usage\":{", "\"usage\":{\"usageIsIncomplete\":\"false\","),
+    ] {
+      let summary = grok_session_summary(&GROK.replace(from, to));
+      assert!(!summary.complete, "{to}");
+      assert_eq!(summary.tokens, None, "{to}");
+    }
+    assert_eq!(grok_session_summary("").tokens, None);
+    assert_eq!(grok_session_summary(&format!("{GROK}{{")).tokens, None);
+    let conflict = format!("{GROK}{}", GROK.lines().last().unwrap().replace("\"modelCalls\":2", "\"modelCalls\":3"));
+    assert_eq!(grok_session_summary(&conflict).tokens, None);
+  }
+
+  #[test]
+  fn grok_cache_writes_are_disjoint_and_sum_overflow_is_unavailable() {
+    let summary = grok_session_summary(&GROK.replace("\"cacheCreationTokens\":0", "\"cacheCreationTokens\":100"));
+    let tokens = summary.tokens.unwrap();
+    assert_eq!(tokens.input, 20_874);
+    assert_eq!(tokens.cache_write, Some(100));
+    let large = GROK.replace("\"modelCalls\":2", "\"modelCalls\":9007199254740991");
+    assert!(grok_session_summary(&large).complete);
+    assert!(!grok_session_summary(&format!("{large}{}", large.replace("prompt-1", "prompt-2"))).complete);
+  }
+
+  #[test]
+  fn grok_waits_for_final_bill_and_rejects_stale_completion_after_resuming() {
+    let open = GROK.lines().filter(|line| !line.contains("turn_completed")).collect::<Vec<_>>().join("\n");
+    assert!(!turn_finished(crate::config::Harness::Grok, &open));
+    assert!(turn_finished(crate::config::Harness::Grok, GROK));
+    let resumed = format!("{GROK}{}\n", GROK.lines().next().unwrap());
+    assert!(!grok_session_summary(&resumed).complete);
+    assert!(!grok_session_summary(&format!("{resumed}{}", GROK.lines().last().unwrap())).complete);
+    assert!(!grok_session_summary(&GROK.replace("end_turn", "cancelled")).complete);
+  }
 
   // Hook input_tokens includes cache. Last stop is the cumulative turn total.
   const HOOKS: &str = r#"{"hook_event_name":"afterAgentResponse","conversation_id":"c","generation_id":"g1","model":"cursor-grok-4.6-high-fast","input_tokens":45461,"output_tokens":80,"cache_read_tokens":30144,"cache_write_tokens":0}

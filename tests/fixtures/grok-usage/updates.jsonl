@@ -1,0 +1,9 @@
+{"timestamp":1789944411,"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk"}}}
+{"timestamp":1789944414,"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_thought_chunk"}}}
+{"timestamp":1789944415,"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"}}}
+{"timestamp":1789944415,"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call"}}}
+{"timestamp":1789944415,"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update"}}}
+{"timestamp":1789944417,"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update"}}}
+{"timestamp":1789944418,"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_thought_chunk"}}}
+{"timestamp":1789944418,"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"}}}
+{"timestamp":1789944418,"method":"_x.ai/session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn","usage":{"inputTokens":40430,"outputTokens":191,"totalTokens":40621,"cachedReadTokens":19456,"cacheCreationTokens":0,"reasoningTokens":113,"modelCalls":2,"apiDurationMs":6697,"costUsdTicks":179594800,"modelUsage":{"grok-4.6-build":{"inputTokens":40430,"outputTokens":191,"totalTokens":40621,"cachedReadTokens":19456,"cacheCreationTokens":0,"reasoningTokens":113,"modelCalls":2,"apiDurationMs":6697,"costUsdTicks":179594800}},"numTurns":2},"prompt_id":"prompt-1"}}}
