@@ -957,6 +957,14 @@ impl Session {
       if !failed.is_empty() {
         return SessionLifecycle::Failed;
       }
+      // "No failed proc" is only a success when something ran. A job that was to run skills
+      // and ended without one proc ever starting did nothing the daemon saw — its runner
+      // never reported in, or died first. While it was open the start timeout read it
+      // Failed; ending it (the supervisor replacing it, its process exiting) must not
+      // flip that to a green "completed" over zero tasks.
+      if !self.skills.is_empty() && !self.has_started_work() {
+        return SessionLifecycle::Failed;
+      }
       return SessionLifecycle::Completed;
     }
     if now > self.liveness_deadline() {
@@ -1522,6 +1530,19 @@ mod tests {
     let job = store.sessions.get("job").unwrap();
     assert!(store.annotation_in_flight("job", now));
     assert_eq!(store.lifecycle_of(job, now), SessionLifecycle::Failed);
+  }
+
+  /// A job that was to run skills and ended with no proc ever starting did nothing the
+  /// daemon saw: failed, never a green "completed" over zero tasks.
+  #[test]
+  fn lifecycle_fails_a_job_that_ended_without_starting_any_planned_work() {
+    let mut session = stored_session("blind", 1, Some(40), 1);
+    assert_eq!(session.lifecycle_status(100), SessionLifecycle::Completed, "nothing planned, nothing owed");
+    session.skills = vec![SkillMeta { name: "plan".into(), harness: "host".into() }];
+    assert_eq!(session.lifecycle_status(100), SessionLifecycle::Failed, "planned work that never started");
+    // Any decided row — even a skipped one — means the runner reported in and the job ran.
+    session.procs = vec![test_proc(ProcStatus::Skipped)];
+    assert_eq!(session.lifecycle_status(100), SessionLifecycle::Completed, "a decided row is work");
   }
 
   #[test]
