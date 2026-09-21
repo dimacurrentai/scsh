@@ -363,6 +363,8 @@ pub(crate) const PAGE_CSS: &str = r#"
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
 
+  .session-meta .repo-path { white-space: normal; overflow-wrap: anywhere; }
+
   /* ── panels / forms ── */
   .images-controls, .controls-row {
     display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;
@@ -497,8 +499,9 @@ pub(crate) const PAGE_CSS: &str = r#"
   /* Auto margins center each axis independently, and collapse to zero on an overflowing axis.
      The stage must remain exactly as tall as its graph: a synthetic minimum would center the
      stage while leaving a small graph visibly above the viewport's vertical midpoint. */
-  .workflow-stage { position: relative; flex: 0 0 auto; margin: auto; }
-  .workflow-zoom { margin-left: auto; display: inline-flex; flex: 0 0 auto; gap: 0.25rem; }
+  .workflow-extent { position: relative; flex: 0 0 auto; margin: auto; overflow: hidden; }
+  .workflow-stage { position: relative; flex: 0 0 auto; margin: auto; transform-origin: top left; }
+  .workflow-zoom { margin-left: auto; display: inline-flex; flex-wrap: wrap; max-width: 100%; gap: 0.25rem; }
   .workflow-zoom button {
     --cut: 4px; --bw: 1px;
     min-width: 2.2rem; min-height: 2rem; padding: 0.2rem 0.5rem; color: var(--text-muted);
@@ -770,7 +773,16 @@ pub(crate) const PAGE_CSS: &str = r#"
   summary::-webkit-details-marker { display: none; }
   /* The answer/note always sits alone on the summary's last line (order pushes it past the
      annotation chip), so collapsed rows keep roughly equal heights however long the text is. */
-  summary .note { order: 9; flex-basis: 100%; min-width: 0; }
+  summary .note { order: 9; flex-basis: 100%; min-width: 0; font-size: 0.85rem;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 1.35rem; }
+  summary .note:empty, .line-count:empty, .idle:empty { display: none; }
+  details.proc.skipped { --accent: var(--border); margin-bottom: 0.35rem; }
+  details.proc.skipped summary { padding: 0.1rem 0; }
+  details.proc > summary .label { overflow-wrap: anywhere; min-width: 0; }
+  details.proc > summary .meta { margin-left: auto; font-size: 0.78rem; font-weight: 500;
+    padding: 0.12rem 0.45rem; border: 1px solid var(--border); border-radius: 3px; }
+  details.proc.ok > summary .meta { color: var(--green); }
+  details.proc.skipped > summary .meta { color: var(--text-muted); border-color: transparent; }
   summary .triangle {
     flex-shrink: 0; width: 0.85rem; text-align: center; font-size: 0.65rem;
     line-height: 1; opacity: 0.75; align-self: center; color: var(--text-muted);
@@ -781,7 +793,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   /* Label (and fleet glyphs) still tint with status; the row bar carries the primary cue. */
   details.proc.fail summary .label { color: var(--red); }
   details.proc.fail.login summary .label { color: var(--yellow); }
-  details.proc.ok summary .label { color: var(--green); }
+  details.proc.ok summary .label { color: var(--text); }
   details.proc.graceful summary .label { color: var(--cyan); }
   details.proc.running summary .label { color: var(--orange); }
   details.proc.terminating summary .label { color: var(--orange); }
@@ -1129,7 +1141,7 @@ pub(crate) const LIVE_ONLY_CSS: &str = r#"
   .proc-actions .proc-kill { grid-column: 2; grid-row: 2; }
   .proc-actions:has(.proc-restart) .proc-kill { grid-column: 2; grid-row: 3; }
   /* Keep the summary text clear of the absolute top-right action stack. */
-  details.proc:has(.proc-actions) > summary { padding-right: 11.5rem; }
+  details.proc:has(.proc-actions > :not([hidden])) > summary { padding-right: 11.5rem; }
   details.proc:has(.proc-actions .proc-diff) > summary { padding-right: 22.35rem; }
   button.proc-kill,
   button.proc-restart {

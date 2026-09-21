@@ -28,7 +28,7 @@ use super::escape::esc;
 use super::fleet::fleet_sections_by_anchor;
 use super::format::format_duration_secs;
 use super::layout::{FAVICON_LINK, PAGE_CSS};
-use super::proc::{proc_elapsed_phrase, proc_meta_html, proc_usage_html};
+use super::proc::{proc_elapsed_phrase, proc_meta_html, proc_note_html, proc_usage_html};
 use super::session::{session_ended_text, session_lede_html};
 use super::workflow::{annotation_label, proc_task_anchor_html, proc_task_attrs, workflow_graph_html_for};
 use super::workflow_view_js::WORKFLOW_VIEW_JS;
@@ -339,7 +339,7 @@ fn proc_diff_btn_html(proc: &ProcRecord, has_diff: bool) -> String {
 /// label, elapsed phrase, note, task anchor for the workflow graph's jump links), with
 /// the cast box carrying only the keys hint — no live controls.
 fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> String {
-  let note = proc.detail.as_deref().or(proc.note.as_deref()).unwrap_or("");
+  let note = proc_note_html(proc);
   let elapsed = proc_elapsed_phrase(proc, now_unix_secs());
   let has_diff = export.diff_html().is_some_and(|html| !html.is_empty());
   let body = match export {
@@ -382,6 +382,7 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
 <span class="note dim">{note}</span>
 {diff_chip}</summary>
 {meta}
+<div class="detail">{detail}</div>
 {body}{usage}</details>
 "#,
     status = proc.status.as_str(),
@@ -393,7 +394,8 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
     retry_link = super::session::retry_link_html(session, proc),
     original_link = super::session::original_attempt_link_html(session, proc),
     elapsed = esc(&elapsed),
-    note = esc(note),
+    note = note,
+    detail = esc(proc.detail.as_deref().unwrap_or("")),
     diff_chip = proc_diff_btn_html(proc, has_diff),
     meta = proc_meta_html(proc),
     usage = proc_usage_html(proc),

@@ -18,6 +18,13 @@ function wfFitZoom(scroller, stage) {
   // or below, so fitting up never forbids zooming back to natural size.
   return Math.min(widthZoom, heightZoom);
 }
+function wfWheelZoom(current, deltaY, deltaMode, pageHeight) {
+  // Normalize wheel units, then scale proportionally. Tiny pinch events must not each
+  // add ten percentage points, especially when a large graph is fitted below 25%.
+  const unit = deltaMode === 1 ? 16 : deltaMode === 2 ? pageHeight : 1;
+  const pixels = Math.max(-50, Math.min(50, deltaY * unit));
+  return current * Math.exp(-pixels * 0.002);
+}
 function initWorkflowGraphView(activateTask) {
   const root = document.querySelector('[data-workflow-graph]');
   // The bound flag is a JS property, never a DOM attribute. A snapshot re-saved from the
@@ -33,6 +40,17 @@ function initWorkflowGraphView(activateTask) {
     scroller.setAttribute('tabindex', '0');
   }
   const stage = root.querySelector('.workflow-stage');
+  // The wrapper owns the scaled scroll extent. Transform the complete graph as one
+  // surface: WebKit's CSS zoom can leave rem-sized labels larger than their nodes.
+  // Reuse the wrapper after Save As, whose HTML already contains the initialized DOM.
+  let extent = stage && stage.parentElement;
+  if (stage && !extent.classList.contains('workflow-extent')) {
+    extent = document.createElement('div');
+    extent.className = 'workflow-extent';
+    stage.before(extent);
+    extent.appendChild(stage);
+  }
+  if (stage) stage.style.removeProperty('zoom');
   const reset = root.querySelector('[data-wf-zoom-reset]');
   const zoomOut = root.querySelector('[data-wf-zoom-out]');
   const expand = root.querySelector('[data-wf-expand]');
@@ -90,7 +108,11 @@ function initWorkflowGraphView(activateTask) {
     workflowZoom = Math.max(minimum, Math.min(maximum, next));
     // Zoom scales the stage INSIDE the fixed viewport; the card itself never changes size,
     // so zooming (like graph growth) can never reflow the page around it.
-    if (stage) stage.style.zoom = String(workflowZoom);
+    if (stage && extent) {
+      extent.style.width = parseFloat(stage.style.width) * workflowZoom + 'px';
+      extent.style.height = parseFloat(stage.style.height) * workflowZoom + 'px';
+      stage.style.transform = 'scale(' + workflowZoom + ')';
+    }
     if (reset) reset.textContent = Math.round(workflowZoom * 100) + '%';
     if (zoomOut) zoomOut.disabled = workflowZoom <= minimum + 0.001;
   };
@@ -100,7 +122,7 @@ function initWorkflowGraphView(activateTask) {
     scroller.scrollLeft = 0;
     scroller.scrollTop = 0;
   };
-  // Zoom anchored at a viewport point: the content under the pointer stays put. CSS zoom
+  // Zoom anchored at a viewport point: the content under the pointer stays put. The transform
   // scales the scroll content linearly, so re-anchoring is pure arithmetic on the offsets.
   const zoomAt = (next, clientX, clientY) => {
     if (!scroller) { applyZoom(next); return; }
@@ -212,7 +234,7 @@ function initWorkflowGraphView(activateTask) {
     if (ev.ctrlKey || ev.metaKey) {
       // Trackpad pinch arrives as ctrlKey wheel events: zoom toward the fingers, not the
       // viewport center.
-      zoomAt(workflowZoom + (ev.deltaY < 0 ? 0.1 : -0.1), ev.clientX, ev.clientY);
+      zoomAt(wfWheelZoom(workflowZoom, ev.deltaY, ev.deltaMode, scroller.clientHeight), ev.clientX, ev.clientY);
       return;
     }
     scroller.scrollLeft += ev.deltaX;

@@ -726,11 +726,27 @@ function idleSinceLine(p, nowUnix) {
   if (elapsed == null) return null;
   return Math.max(0, elapsed - lastLineAt(p));
 }
+// Mirrors proc_note_html; keep full diagnostics in the expanded detail.
+function procNoteHtml(p) {
+  if (p.status === 'skipped') return '';
+  const finished = p.status !== 'running' && p.status !== 'waiting';
+  let text = (finished && p.detail) ? p.detail : (p.note || '');
+  const prefix = 'review_url: https://github.com/';
+  if (text.startsWith(prefix)) {
+    const path = text.slice(prefix.length).split(/\s/)[0].split('#')[0];
+    if (!path.includes('…') && !path.includes('...') && path.includes('/pull/')) {
+      return '<a href="https://github.com/' + esc(path) + '">View pull request</a> · Review published';
+    }
+  }
+  if (isCacheHit(p)) text = text.split(' (cached')[0];
+  text = text.replace(/^(summary|deltas): /, '').split(' · approval_bar:')[0];
+  return finished && looksLikeArtifactPath(text) ? '<code>' + esc(text) + '</code>' : esc(text);
+}
 function procStatHtml(p, nowUnix) {
   const n = (p.lines || []).length;
   const idle = formatIdleClock(idleSinceLine(p, nowUnix));
   return '<span class="proc-stat" data-proc-stat="' + esc(String(p.index)) + '">' +
-    '<span class="line-count">' + esc(lineCountLabel(n)) + '</span>' +
+    '<span class="line-count">' + esc(n ? lineCountLabel(n) : '') + '</span>' +
     '<span class="idle">' + idle + '</span></span>';
 }
 let liveSessions = null;
@@ -738,7 +754,7 @@ let lastProcClockSec = null;
 function syncProcStat(stat, p, nowUnix, skipIdle) {
   if (!stat) return;
   const lc = stat.querySelector('.line-count');
-  setTextUnlessSelecting(lc, lineCountLabel((p.lines || []).length));
+  setTextUnlessSelecting(lc, (p.lines || []).length ? lineCountLabel(p.lines.length) : '');
   if (!skipIdle) {
     setTextUnlessSelecting(stat.querySelector('.idle'), formatIdleClock(idleSinceLine(p, nowUnix)));
   }
@@ -916,14 +932,10 @@ function updateProcFields(det, p, nowUnix) {
     }
   }
   const noteEl = det.querySelector('summary .note');
-  // Finished rows show their ANSWER (the finish detail) in the collapsed summary; only
-  // rows still working show the transient note. A bare artifact path is SYSTEM info and
-  // renders as code; anything else is the agent's own text.
-  const finished = p.status !== 'running' && p.status !== 'waiting';
+  // The compact preview is shared with new rows; expansion retains the raw detail.
   if (noteEl) {
-    const text = (finished && p.detail) ? p.detail : (p.note || '');
-    if (finished && looksLikeArtifactPath(text)) noteEl.innerHTML = '<code>' + esc(text) + '</code>';
-    else noteEl.textContent = text;
+    const html = procNoteHtml(p);
+    if (noteEl.innerHTML !== html) noteEl.innerHTML = html;
   }
   // Per-proc Force restart / Force stop: show only while the step is live; remove once it
   // finishes (or once a stop/restart request is in flight). Restart is skill runs only.
@@ -1401,7 +1413,7 @@ function procHtml(p, isOpen, nowUnix) {
     '<span class="triangle" aria-hidden="true"></span> ' +
     '<span class="label">' + esc(p.label) + '</span>' + attemptChipHtml(session, p) + ' ' + procStatHtml(p, nowUnix) +
     ' <span class="meta" data-proc-elapsed="' + esc(String(p.index)) + '">' + esc(elapsedText) + '</span>' + retryLinkHtml(session, p) + originalAttemptLinkHtml(session, p) + ' ' +
-    '<span class="note dim">' + esc(p.note || '') + '</span></summary>';
+    '<span class="note dim">' + procNoteHtml(p) + '</span></summary>';
   return summaryOpen + procMetaHtml(p) + '<div class="detail">' + esc(p.detail || '') + '</div>' +
     container + body + procUsageHtml(p) + '</details>';
 }
