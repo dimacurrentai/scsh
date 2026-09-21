@@ -126,6 +126,13 @@ impl LiveUi {
     }
   }
 
+  /// How many procs have been declared so far — the index the NEXT declared proc would get.
+  /// Rows added after the board is gone (annotate) continue from here, so they can never
+  /// land on a row a retry or a loop iteration claimed mid-run.
+  pub fn proc_count(&self) -> usize {
+    self.model.lock().unwrap().proc_count()
+  }
+
   /// Pin the board viewport to the top (manifest-first row order). Called once all procs are
   /// declared so [0] lines up with the first skill row.
   pub fn pin_board_to_top(&self) {

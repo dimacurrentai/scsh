@@ -1540,6 +1540,13 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           return false;
         }
       }
+      // Re-declaring a row is an idempotent re-post of the SAME proc. A different kind on a
+      // claimed index is an allocation collision in the runner: an annotate row that landed
+      // on a retry's index used to overwrite it, erasing the lineage edge that superseded
+      // the failed first attempt — and a job that had succeeded read "failed".
+      if s.procs.iter().any(|p| p.index == proc_index && p.kind != kind) {
+        return false;
+      }
       if let Some(p) = s.procs.iter_mut().find(|p| p.index == proc_index) {
         p.previous_attempt = previous_attempt;
         p.label = label;
@@ -4977,6 +4984,22 @@ mod tests {
       assert_eq!(replacement.previous_attempt, Some(1));
       assert_eq!(session.proc_next_attempt(old).map(|p| p.index), Some(3));
       assert_eq!(session.proc_first_attempt(replacement).index, 1);
+    }
+    // A different kind of proc cannot take over the replacement's row: the lineage edge —
+    // and with it the old attempt's superseded state — survives an index collision.
+    assert!(!handle_api_post(
+      "/api/v1/proc/add",
+      r#"{"session":"rst01","proc":3,"label":"annotate · review-1","kind":"annotate"}"#,
+      &store,
+      &prune,
+    ));
+    {
+      let guard = store.lock().unwrap();
+      let session = guard.sessions.get("rst01").unwrap();
+      let replacement = session.procs.iter().find(|p| p.index == 3).unwrap();
+      assert_eq!(replacement.kind, ProcKind::Skill);
+      assert_eq!(replacement.previous_attempt, Some(1));
+      assert!(session.proc_is_superseded(session.procs.iter().find(|p| p.index == 1).unwrap()));
     }
     assert!(!handle_api_post(
       "/api/v1/proc/add",
