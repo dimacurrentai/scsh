@@ -105,6 +105,11 @@ impl Model {
   }
 
   /// Add a proc, returning its index (the handle the driver/worker uses to update it).
+  /// Number of procs declared so far (also the index the next [`Self::add`] returns).
+  pub fn proc_count(&self) -> usize {
+    self.procs.len()
+  }
+
   pub fn add(&mut self, label: impl Into<String>) -> usize {
     self.procs.push(Proc {
       label: label.into(),
@@ -431,6 +436,16 @@ mod tests {
     m.set_note(s, Some("2 + 3 = 5".into()));
     m.push_line(s, 1.0, "running add");
     m
+  }
+
+  #[test]
+  fn proc_count_is_the_next_index() {
+    let mut m = Model::new();
+    assert_eq!(m.proc_count(), 0);
+    let first = m.add("build");
+    let second = m.add("skill (retry)");
+    assert_eq!((first, second), (0, 1));
+    assert_eq!(m.proc_count(), 2, "a row declared after the run continues past the retry");
   }
 
   #[test]

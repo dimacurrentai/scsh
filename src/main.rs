@@ -3277,8 +3277,6 @@ fn run_workflow(
     p.note(&note);
     step_procs.insert(s.id.clone(), p);
   }
-  // Annotate procs (added after the run) continue past the last declared step/build index.
-  let mut next_annotate_idx = step_procs.values().map(|p| p.index()).max().map(|m| m + 1).unwrap_or(0);
   ui.pin_board_to_top();
 
   // Walk the DAG: a step is decidable once every step it needs has a state (run or skipped).
@@ -3685,6 +3683,11 @@ fn run_workflow(
       skipped_count += 1;
     }
   }
+  // Annotate procs (added after the run) continue past EVERY row the run declared — retries
+  // and loop iterations claim rows mid-run, so this is read now, not when the steps were
+  // declared. An annotate row landing on a retry's index overwrote the retry in the session
+  // browser, which un-superseded the failed first attempt and turned a good job "failed".
+  let mut next_annotate_idx = ui.proc_count();
   ui.finish();
   if let Some(msg) = failure {
     fail(&msg);
@@ -5729,6 +5732,8 @@ fn build_and_run(
 
   // The run is over: restore the terminal and print the persistent ✓/✗ summary (attended; off a
   // TTY the per-proc lines already streamed). Everything below prints to the normal screen.
+  // Annotate rows continue past every row the run declared, retries included.
+  let mut next_annotate_idx = ui.proc_count();
   ui.finish();
 
   // Fleet rollups: group multi-route skill_source results into deterministic JSON under the
@@ -5934,7 +5939,6 @@ fn build_and_run(
   }
 
   // Annotate while the client is still registered (before DaemonSession drop / finish_session).
-  let mut next_annotate_idx = outcomes.iter().map(|o| o.proc_index).max().map(|m| m + 1).unwrap_or(0);
   annotate_run_casts(root, session_skill_casts(&session_id), daemon_session.client.as_deref(), &mut next_annotate_idx);
 
   if failed == 0 {
