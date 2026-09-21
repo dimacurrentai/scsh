@@ -77,6 +77,7 @@ login leaves behind, and precisely what `scsh` looks for.
   flow on a browserless host. Alternatively create an API key at
   [console.x.ai](https://console.x.ai) and export it as `XAI_API_KEY`.
 - **Artifact produced:** `$GROK_HOME/auth.json` (default `~/.grok/auth.json`).
+- **Unattended startup:** `scsh` passes `--always-approve --trust` inside the ephemeral container. Tool approval and folder trust are separate: `--trust` prevents the startup confirmation and enables project instructions and skills without requiring a host trust entry.
 - **What `scsh` probes** (`grok_container_auth_ready()`):
   1. `auth.json` under `$GROK_HOME` when that variable is set and non-empty, else under
      `~/.grok`.

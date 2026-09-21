@@ -75,7 +75,7 @@ impl Completion {
     }
     self.next_poll = now + Duration::from_millis(250);
     let error = dir.join(format!("{}.usage-error", crate::runtime::RUN_LOG_REL));
-    let unsupported = matches!(harness, crate::config::Harness::Grok | crate::config::Harness::Opencode);
+    let unsupported = harness == crate::config::Harness::Opencode;
     let ready = if required { completed_usage(harness, dir, result) } else { None };
     let saved = if let Some(summary) = ready {
       crate::atomic_write(
@@ -146,6 +146,7 @@ fn accounting_bytes(harness: crate::config::Harness, dir: &Path) -> u64 {
     crate::config::Harness::Codex => {
       jsonl_files(&dir.join(crate::runtime::CODEX_FORWARD_REL).join("sessions")).unwrap_or_default()
     }
+    crate::config::Harness::Grok => grok_transcripts(dir).unwrap_or_default(),
     _ => return 0,
   };
   paths.iter().map(|path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)).sum()
@@ -161,6 +162,7 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
       jsonl_files(&dir.join(crate::runtime::CLAUDE_AUTH_REL).join(".claude/projects")).ok()?
     }
     crate::config::Harness::Codex => jsonl_files(&dir.join(crate::runtime::CODEX_FORWARD_REL).join("sessions")).ok()?,
+    crate::config::Harness::Grok => grok_transcripts(dir).ok()?,
     _ => return None,
   };
   let mut fresh = false;
@@ -182,6 +184,7 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
     crate::config::Harness::Cursor => cursor_hook_summary(streams.first()?.as_deref()?),
     crate::config::Harness::Claude => crate::usage::claude_session_summary(&streams)?,
     crate::config::Harness::Codex => crate::usage::codex_session_summary(&streams)?,
+    crate::config::Harness::Grok => crate::usage::grok_session_summary(streams.first()?.as_deref()?),
     _ => return None,
   };
   (fresh && summary.complete && summary.tokens.is_some()).then_some(summary)
@@ -208,8 +211,43 @@ pub fn from_run_dir(harness: crate::config::Harness, run_dir: &Path) -> Option<S
           .unwrap_or_else(|| unavailable(Harness::Cursor)),
       )
     }
-    crate::config::Harness::Grok | crate::config::Harness::Opencode => None,
+    crate::config::Harness::Grok => Some(
+      grok_transcripts(run_dir)
+        .ok()
+        .and_then(|paths| std::fs::read_to_string(paths.first()?).ok())
+        .map(|stream| crate::usage::grok_session_summary(&stream))
+        .unwrap_or_else(|| unavailable(Harness::Grok)),
+    ),
+    crate::config::Harness::Opencode => None,
   }
+}
+
+/// Fresh GROK_HOME contains one primary session plus optional children. The primary
+/// bills already fold in child spend. Select it by native metadata, never directory order.
+fn grok_transcripts(run_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+  let root = run_dir.join(crate::runtime::GROK_FORWARD_REL).join("sessions");
+  let files = jsonl_files(&root)?;
+  let mut primary = Vec::new();
+  for events in files.iter().filter(|path| path.file_name().is_some_and(|name| name == "events.jsonl")) {
+    let text = std::fs::read_to_string(events)?;
+    let id =
+      crate::usage::grok_primary_session(&text).map_err(|_| std::io::Error::other("invalid Grok session metadata"))?;
+    if let Some(id) = id {
+      let dir = events.parent().ok_or_else(|| std::io::Error::other("missing Grok session directory"))?;
+      if dir.file_name().and_then(|name| name.to_str()) != Some(&id) {
+        return Err(std::io::Error::other("Grok session id does not match its directory"));
+      }
+      let updates = dir.join("updates.jsonl");
+      if !files.contains(&updates) {
+        return Err(std::io::Error::other("missing Grok session updates"));
+      }
+      primary.push(updates);
+    }
+  }
+  if primary.len() != 1 {
+    return Err(std::io::Error::other("expected exactly one primary Grok session per attempt"));
+  }
+  Ok(primary)
 }
 
 pub(crate) fn claude_session_summary(root: &Path) -> Option<Summary> {
@@ -281,6 +319,50 @@ mod completion_tests {
   }
 
   #[test]
+  fn grok_waits_for_primary_bill_and_ignores_child_totals() {
+    let run = Run::new();
+    let root = run.0.join(crate::runtime::GROK_FORWARD_REL).join("sessions/repo");
+    let primary = root.join("session-1");
+    let child = root.join("child");
+    for (dir, relationship, id) in [(&primary, "primary", "session-1"), (&child, "subagent", "child")] {
+      std::fs::create_dir_all(dir).unwrap();
+      std::fs::write(
+        dir.join("events.jsonl"),
+        format!(r#"{{"type":"turn_started","session_relationship":"{relationship}","session_id":"{id}"}}"#),
+      )
+      .unwrap();
+      std::fs::write(dir.join("updates.jsonl"), "").unwrap();
+    }
+    let fixture = include_str!("../../tests/fixtures/grok-usage/updates.jsonl");
+    std::fs::write(child.join("updates.jsonl"), fixture.replace("session-1", "child")).unwrap();
+    let mut state = Completion::new();
+    assert!(run.poll(&mut state, Agent::Grok, true));
+    assert!(!run.artifact("shutdown").exists(), "child completion cannot finish the primary turn");
+    std::fs::write(primary.join("updates.jsonl"), fixture).unwrap();
+    assert!(run.poll(&mut state, Agent::Grok, true));
+    assert!(run.artifact("shutdown").exists());
+    assert!(!run.artifact("usage-error").exists());
+    let saved = Summary::from_json(&std::fs::read_to_string(run.artifact("usage-final")).unwrap()).unwrap();
+    assert!(saved.complete);
+    assert_eq!(saved.tokens.unwrap().input, 20_974, "child spend is already folded into the primary bill");
+    assert_eq!(from_run_dir(Agent::Grok, &run.0).unwrap().llm_round_trips, Some(2));
+
+    std::fs::File::options()
+      .write(true)
+      .open(primary.join("updates.jsonl"))
+      .unwrap()
+      .set_modified(std::time::SystemTime::now() - Duration::from_secs(60))
+      .unwrap();
+    assert!(completed_usage(Agent::Grok, &run.0, &run.0.join("tmp/result.json")).is_none());
+    std::fs::write(
+      child.join("events.jsonl"),
+      r#"{"type":"turn_started","session_relationship":"primary","session_id":"child"}"#,
+    )
+    .unwrap();
+    assert!(grok_transcripts(&run.0).is_err(), "ambiguous primaries must not double-count");
+  }
+
+  #[test]
   fn delayed_native_counters_release_each_supported_harness_only_after_terminal_snapshot() {
     for (harness, path, stream) in [
       (
@@ -326,7 +408,7 @@ mod completion_tests {
       state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs(harness) + 1));
       assert!(run.poll(&mut state, harness, true));
       assert!(run.artifact("usage-error").exists());
-      if !matches!(harness, Agent::Grok | Agent::Opencode) {
+      if harness != Agent::Opencode {
         assert_eq!(
           std::fs::read_to_string(run.artifact("usage-error")).unwrap(),
           format!(
