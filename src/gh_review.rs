@@ -1,12 +1,15 @@
 //! `scsh gh-review …` — the host-side steps of the built-in `gh-gorgeous-review` workflow.
 //!
 //! The workflow (`harness_defs/gh-gorgeous-review.yml`) reviews a GitHub pull request with
-//! every harness this machine can actually run, then publishes one review. Three of its
+//! eligible harnesses on this machine, then publishes one review. Cursor and Grok
+//! share one Grok 4.5 lane; only the better-funded route runs. Three of its
 //! steps run on the host, because they need the operator's credentials rather than a model:
 //!
 //! - `plan`: which harnesses run. Credentials first ([`crate::runtime::check_harness_host`]),
 //!   then quota ([`crate::quota::fetch`]): a harness sits out when its long window (weekly,
-//!   monthly, billing cycle) has under 10% left or its 5-hour window under 25%. Fewer than
+//!   monthly, billing cycle) has under 10% left or its 5-hour window under 25%.
+//!   Cursor checks only its native-model pool; Grok checks shared credits and GrokBuild.
+//!   Selection prefers spendable quota per day until reset. Fewer than
 //!   [`MIN_HARNESSES`] runnable harnesses fails the plan — and with it the job — up front.
 //! - `publish`: post the review the in-container `prepare_review` step wrote, through `gh`,
 //!   with the head-unchanged and duplicate checks in [`crate::daemon::github_publish`].
@@ -15,6 +18,8 @@
 //! Every decision is data on the job page: the plan's per-harness verdicts are its outputs,
 //! each gated-off reviewer shows the verdict that skipped it, and the publish step carries
 //! the review URL.
+
+mod selection;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -36,6 +41,7 @@ pub const VERDICT_RUN: &str = "run";
 pub const VERDICT_NO_CREDENTIALS: &str = "no_credentials";
 pub const VERDICT_EXPIRED: &str = "expired";
 pub const VERDICT_LOW_QUOTA: &str = "low_quota";
+pub const VERDICT_ALTERNATIVE_SELECTED: &str = "alternative_selected";
 
 /// One harness's place in the fleet, and the one-line reason a reader sees on the job page.
 #[derive(Debug, Clone, PartialEq)]
@@ -72,7 +78,7 @@ pub fn decide(harness: Harness, credentials: Result<(), String>, quota: Option<&
     "missing" => HarnessPlan { harness, verdict: VERDICT_NO_CREDENTIALS, note: q.summary.clone() },
     "expired" => HarnessPlan { harness, verdict: VERDICT_EXPIRED, note: q.summary.clone() },
     "ok" => {
-      for w in &q.windows {
+      for w in q.windows.iter().filter(|w| selection::relevant(harness, &w.id)) {
         let (max_used, floor) = if w.id.starts_with("session") {
           (SESSION_WINDOW_MAX_USED, 100.0 - SESSION_WINDOW_MAX_USED)
         } else {
@@ -86,7 +92,15 @@ pub fn decide(harness: Harness, credentials: Result<(), String>, quota: Option<&
           };
         }
       }
-      HarnessPlan { harness, verdict: VERDICT_RUN, note: q.summary.clone() }
+      let pool_note = match harness {
+        Harness::Cursor if !q.windows.iter().any(|w| w.id == "auto_pool") => {
+          "; native-model quota unavailable; running anyway"
+        }
+        Harness::Cursor => "; eligibility uses native-model pool only",
+        Harness::Grok => "; eligibility uses shared credits and GrokBuild",
+        _ => "",
+      };
+      HarnessPlan { harness, verdict: VERDICT_RUN, note: format!("{}{pool_note}", q.summary) }
     }
     _ => HarnessPlan { harness, verdict: VERDICT_RUN, note: format!("{}; running anyway", q.summary) },
   }
@@ -202,7 +216,7 @@ pub fn plan_cmd() -> i32 {
     }
   };
   let mut quotas: Vec<HarnessQuota> = Vec::new();
-  let plans: Vec<HarnessPlan> = PUBLISHER_PREFERENCE
+  let mut plans: Vec<HarnessPlan> = PUBLISHER_PREFERENCE
     .into_iter()
     .map(|h| {
       let credentials = crate::runtime::check_harness_host(h);
@@ -214,6 +228,8 @@ pub fn plan_cmd() -> i32 {
       decide(h, credentials, quota.as_ref())
     })
     .collect();
+  let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+  selection::select(&mut plans, &quotas, now);
   for p in &plans {
     println!("{} {}: {}", if p.runs() { "✓" } else { "⊘" }, p.harness.as_str(), p.note);
   }
@@ -722,7 +738,7 @@ mod tests {
     let dry_week =
       decide(Harness::Codex, Ok(()), Some(&quota(Harness::Codex, "ok", vec![("session_5h", 1.0), ("weekly", 90.5)])));
     assert_eq!(dry_week.verdict, VERDICT_LOW_QUOTA);
-    let dry_cycle = decide(Harness::Cursor, Ok(()), Some(&quota(Harness::Cursor, "ok", vec![("billing_cycle", 95.0)])));
+    let dry_cycle = decide(Harness::Cursor, Ok(()), Some(&quota(Harness::Cursor, "ok", vec![("auto_pool", 95.0)])));
     assert_eq!(dry_cycle.verdict, VERDICT_LOW_QUOTA);
     let unreadable = decide(Harness::Codex, Ok(()), Some(&quota(Harness::Codex, "error", vec![])));
     assert_eq!(unreadable.verdict, VERDICT_RUN);
