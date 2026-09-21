@@ -340,6 +340,24 @@ fn installskills_installs_skill_and_symlinks() {
     assert!(p.is_file(), "the bundled {name} skill should be installed; got: {}", r.out);
     assert!(std::fs::read_to_string(&p).unwrap().contains(&format!("name: {name}")));
   }
+  // A skill is its whole directory: each reviewer arrives WITH the writer its body tells the
+  // agent to run, and that writer works from the repository root by its installed path.
+  for name in
+    ["conventions-reviewer", "justification-reviewer", "reviewability-reviewer", "sanity-reviewer", "testing-reviewer"]
+  {
+    let writer = d.join(format!(".skills/{name}/scripts/write_review.py"));
+    assert!(writer.is_file(), "{name} should ship its result writer; got: {}", r.out);
+    let ran = std::process::Command::new("python3")
+      .arg(&writer)
+      .arg("--grade=excellent")
+      .current_dir(&d)
+      .env_remove("SCSH_RESULT")
+      .status()
+      .expect("python3 runs the installed writer");
+    assert!(ran.success(), "{name}'s installed writer should run");
+    let result = std::fs::read_to_string(d.join(format!("tmp/code-review-{name}.json"))).expect("writer result");
+    assert!(result.contains("\"grade\": \"excellent\"") && result.contains("\"issues\": []"), "got: {result}");
+  }
   let manifest = std::fs::read_to_string(d.join(".scsh.yml")).expect("bundled profiles should be installed");
   assert_eq!(manifest.matches("      codex-spark:").count(), 5, "one Spark route per reviewer; got: {manifest}");
   assert_eq!(manifest.matches("      claude-opus-4-8:").count(), 5, "one Opus route per reviewer; got: {manifest}");
