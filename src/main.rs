@@ -9374,7 +9374,7 @@ fn link_agent_global_skills(_scsh_home: &Path) -> usize {
 /// Install scsh's own skills, embedded in the binary at build time.
 fn install_bundled(root: &Path, overwrite: bool) -> InstallCounts {
   let mut c = InstallCounts::default();
-  for (rel, body) in config::bundled_skills() {
+  for (rel, body) in config::bundled_skills().into_iter().chain(config::bundled_skill_scripts()) {
     write_one(&root.join(rel), body.as_bytes(), rel, overwrite, &mut c);
   }
   merge_bundled_manifest(root);

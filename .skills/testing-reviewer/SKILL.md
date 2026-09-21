@@ -12,7 +12,7 @@ You make sure changed behavior is verifiable. Not everything needs a unit test �
 - You are inside a git repository, on a branch that is **not** the default branch (assume `main`).
 - The working tree is clean unless `SCSH=1`: on the host a dirty repo is a non-starter; under scsh the per-run clone is expectedly dirty (sandbox scratch). Either way, review committed history (`origin/main..HEAD`) only.
 - Under `SCSH=1`, never contact a git remote — the clone was pushed in; code flows **in** only. No `git fetch`/`pull`/`push`/`clone`; use only local refs. Missing `origin/main` or an empty range is a precondition failure — exit, never fetch. Review-only: never commit; scsh pulls your JSON result out afterward.
-- **Look, understand, analyze — never execute.** Read commits, diffs, source, tests, and docs; never build, run, lint, format, or test anything — no test runners, no `cargo`/`npm`/`python`, no `docker`/`make`/repo scripts — and never "try" or "verify" behavior by executing. Builds, runs, lint, and tests are handled elsewhere. (`git log`, `git show`, and `git diff` to read history are fine.)
+- **Look, understand, analyze — never execute.** Read commits, diffs, source, tests, and docs; never build, run, lint, format, or test anything — no test runners, no `cargo`/`npm`/`python`, no `docker`/`make`/repo scripts — and never "try" or "verify" behavior by executing. Builds, runs, lint, and tests are handled elsewhere. (`git log`, `git show`, and `git diff` to read history are fine.) The one exception is this skill's own shipped `scripts/write_review.py`: it is part of the skill rather than the change under review, it only records your findings, and running it is how you report.
 
 ## What you review
 
@@ -26,7 +26,7 @@ A settled decision is not a fresh finding. Never re-raise a request that one of 
 
 ## Output
 
-Write a single JSON object to `$SCSH_RESULT` when it is set (write **only** there), else to `tmp/code-review-testing-reviewer.json`:
+The result is a single JSON object at `$SCSH_RESULT` when it is set (**only** there), else at `tmp/code-review-testing-reviewer.json` — produced by the shipped writer described below, never by hand:
 
 ```ts
 type Grade = "excellent" | "good" | "average" | "poor";
@@ -54,6 +54,23 @@ When scsh appends a workflow-specific `## Output` contract after this skill, tha
 - **Pre-existing issues are out of scope** — a problem already on `origin/main` in code this diff does not touch is at most one `nit` noting a follow-up, and never lowers the grade.
 - **One root cause, one finding** — anchor it at its clearest site and list the other affected locations in the description; never file the same defect once per line it manifests on.
 - **Cite your evidence** — check checkable claims (a symbol does not exist, nothing calls this function) by reading or searching (`grep`, `git log`) and say so in the description; the no-execute rule stands.
+
+Never write or repair the JSON yourself. Set `SKILL_DIR` to the absolute path of the directory containing this `SKILL.md` — the path you loaded this file from — and run its shipped `scripts/write_review.py` by that absolute path from the repository root; never `cd` into the skill, or the result lands in the wrong place. If the script is not found, re-resolve it against this `SKILL.md`'s directory; if it is truly absent, report the failure — never recreate it. Pass `--grade`, then one `--issue` group per finding with scalar `--commit`, `--severity`, `--file`, `--line`, `--description`, and `--suggestion` flags. Put every value in **single quotes**: the shell expands nothing inside them, so double quotes, backticks, `$`, backslashes, and newlines all arrive verbatim. The one escape is an apostrophe, written `'\''`. Never use double quotes around a value — the shell would run its backticks and `$(…)` as commands and expand its `$names` before the writer sees them. Complete two-finding example:
+
+```sh
+SKILL_DIR='<absolute directory of this SKILL.md>'
+python3 "$SKILL_DIR/scripts/write_review.py" --grade='good' \
+  --issue --commit='abc123' --severity='should-fix' \
+  --file='src/parser.py' --line='17' \
+  --description='`parse()` returns "ok" before validating $input, so the caller'\''s error is lost.' \
+  --suggestion='Validate first; return "ok" only after `check($input)` passes.' \
+  --issue --commit='def456' --severity='nit' \
+  --file='README.md' --line='9' \
+  --description='Document the "strict" mode.' \
+  --suggestion='Add one example.'
+```
+
+The script validates the values, computes `issues_found`, and atomically writes valid JSON to `$SCSH_RESULT` or the standalone fallback. With no findings, pass `--grade` alone. When scsh appends a workflow output contract requesting `grade` and `comments`, add `--workflow`; the same issue flags are converted into that shape. Do not create Python, shell, or JSON serialization code during the review.
 
 ## Repository guidelines — read first
 

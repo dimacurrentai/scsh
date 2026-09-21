@@ -435,18 +435,23 @@ pub const CODE_REVIEWER_SKILLS: [&str; 5] =
   ["conventions-reviewer", "justification-reviewer", "reviewability-reviewer", "sanity-reviewer", "testing-reviewer"];
 
 /// The drift guard's pins: sha256 of each shipped reviewer body, in
-/// [`CODE_REVIEWER_SKILLS`] order, matching dkorolev/code-review-skills @ 5dde611
-/// ("Fold the scsh-side reviewer evolution back into the canonical bodies."). A reviewer
+/// [`CODE_REVIEWER_SKILLS`] order, matching dkorolev/code-review-skills @ 2143053
+/// ("Name the skill directory by placeholder, never by a guessed install path"). A reviewer
 /// edit that lands here without first landing canonically fails the drift-guard test;
 /// a legitimate mirror updates these hashes and this comment's canonical commit.
 #[cfg(test)]
 pub const REVIEWER_BODY_SHA256: [&str; 5] = [
-  "01aff90cc2ffa4595fcee388a167e5e19d7ada71f4caf84e6db1058f29760330",
-  "0fbaf3b2afb19b22c08f5d9e4822aa59d07334e3433d85962f01a65af18bf932",
-  "4761dd0f3d5eecffa582531b57f388d674ceedfcf619452e42c5c54bf36fd41b",
-  "6c074e90f3812d8c70fe808621401322b1b578e9075c6d433a25f5b7516f209b",
-  "0c6cf79e014cebae13d0db3974ec9f5c16396a8f0ed0c842d2fa631b987565c7",
+  "71ed05498ebc482b0ea29efcdb89153d3f969e3059232a5a039f6cc028f84ed8",
+  "a0963dbd26ddd7f4feb3a7f10f438b23bd4e18d025f5c99c36cdc04743f9f9bb",
+  "10fc3d4ea4df6d89f4fcec0103a07bd8e54d094981a35f1576fb737f3a7b14fe",
+  "926a50cfc7e9619ef95c4d02b46b84927d2594c22f26fd0a717a14bbaba89cab",
+  "3302506b96795bd852b5d846e14df56929429b7696d5cbc8d400db49c3faa6a0",
 ];
+
+/// The pin for the one result writer all five reviewers ship byte-identically
+/// (`scripts/write_review.py`), at the same canonical revision as [`REVIEWER_BODY_SHA256`].
+#[cfg(test)]
+pub const REVIEWER_WRITER_SHA256: &str = "66b31870123e52d2739242a05c15295066b3c5edd7e11b55707fcc67e2595ffc";
 
 pub fn bundled_skills() -> [(&'static str, &'static str); 6] {
   [
@@ -458,6 +463,35 @@ pub fn bundled_skills() -> [(&'static str, &'static str); 6] {
     (
       ".skills/scsh-harness-demo-and-selftest/SKILL.md",
       include_str!("../.skills/scsh-harness-demo-and-selftest/SKILL.md"),
+    ),
+  ]
+}
+
+/// The files a bundled skill ships BESIDE its `SKILL.md`, as `(repo-relative path, contents)`
+/// pairs. A skill is its whole directory: a reviewer delivered without its writer would be
+/// told to run a file that does not exist. Skills name the interpreter (`python3 …`), so no
+/// install depends on the executable bit.
+pub fn bundled_skill_scripts() -> [(&'static str, &'static str); 5] {
+  [
+    (
+      ".skills/conventions-reviewer/scripts/write_review.py",
+      include_str!("../.skills/conventions-reviewer/scripts/write_review.py"),
+    ),
+    (
+      ".skills/justification-reviewer/scripts/write_review.py",
+      include_str!("../.skills/justification-reviewer/scripts/write_review.py"),
+    ),
+    (
+      ".skills/reviewability-reviewer/scripts/write_review.py",
+      include_str!("../.skills/reviewability-reviewer/scripts/write_review.py"),
+    ),
+    (
+      ".skills/sanity-reviewer/scripts/write_review.py",
+      include_str!("../.skills/sanity-reviewer/scripts/write_review.py"),
+    ),
+    (
+      ".skills/testing-reviewer/scripts/write_review.py",
+      include_str!("../.skills/testing-reviewer/scripts/write_review.py"),
     ),
   ]
 }
@@ -1840,6 +1874,22 @@ mod tests {
          Reviewer changes land in dkorolev/code-review-skills FIRST, then mirror here:\n\
          copy the canonical body into .skills/{name}/SKILL.md, update REVIEWER_BODY_SHA256\n\
          with this hash, and name the canonical commit in the pin's comment."
+      );
+    }
+  }
+
+  /// Every bundled reviewer ships its writer, and the writer is the pinned canonical one.
+  #[test]
+  fn bundled_reviewers_ship_the_pinned_canonical_writer() {
+    let scripts = bundled_skill_scripts();
+    for name in CODE_REVIEWER_SKILLS {
+      let expected_path = format!(".skills/{name}/scripts/write_review.py");
+      let (_, body) =
+        scripts.iter().find(|(path, _)| *path == expected_path).unwrap_or_else(|| panic!("{name} ships no writer"));
+      assert_eq!(
+        crate::sha256::sha256_hex(body.as_bytes()),
+        REVIEWER_WRITER_SHA256,
+        "{name}'s writer drifted from its canonical pin; mirror it from dkorolev/code-review-skills"
       );
     }
   }
