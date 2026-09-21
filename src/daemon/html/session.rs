@@ -4,7 +4,8 @@ use super::escape::esc;
 use super::fleet::fleet_sections_by_anchor;
 use super::layout::wrap_page;
 use super::proc::{
-  cast_embed_html, proc_elapsed_phrase, proc_has_cast, proc_meta_html, proc_usage_html, summary_stats_html,
+  cast_embed_html, proc_elapsed_phrase, proc_has_cast, proc_meta_html, proc_note_html, proc_usage_html,
+  summary_stats_html,
 };
 use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html_for};
 use crate::daemon::model::{ProcKind, ProcStatus, ReportSection, Session, SessionLifecycle, Store};
@@ -34,10 +35,7 @@ pub fn session_page_for(session: &Session, lifecycle: SessionLifecycle) -> Strin
       proc.fail_reason.as_deref(),
       Some(crate::failure::reason::STOP_REQUESTED) | Some(crate::failure::reason::RESTART_REQUESTED)
     );
-    let finished = !matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting);
-    let note = if finished && !detail.is_empty() { detail } else { proc.note.as_deref().unwrap_or("") };
-    let note_html =
-      if finished && looks_like_artifact_path(note) { format!("<code>{}</code>", esc(note)) } else { esc(note) };
+    let note_html = proc_note_html(proc);
     // Recorded procs (skills and image builds alike — scsh records builds itself) show
     // the inline cast player; a proc without a recording — annotate rows are the
     // canonical case — stays a slim summary-only row. There is deliberately no text-log
@@ -386,7 +384,7 @@ pub(crate) fn original_attempt_link_html(session: &Session, proc: &crate::daemon
 
 /// A bare repo-relative artifact path (`tmp/scsh/<id>/add.json`-shaped) — system info, not
 /// an agent's prose. Mirrored by `looksLikeArtifactPath` in the client JS.
-fn looks_like_artifact_path(text: &str) -> bool {
+pub(crate) fn looks_like_artifact_path(text: &str) -> bool {
   !text.is_empty()
     && (text.starts_with('/') || text.starts_with("tmp/") || text.starts_with(".harness/"))
     && !text.contains(char::is_whitespace)

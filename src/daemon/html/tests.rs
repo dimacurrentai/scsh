@@ -105,7 +105,7 @@ fn usage_footer_matches_the_live_client_and_new_rows() {
   }
   let source = live_client_js();
   let mut script = String::new();
-  for name in ["esc", "procIsLive", "procUsageHtml", "procHtml"] {
+  for name in ["esc", "procIsLive", "procUsageHtml", "isCacheHit", "looksLikeArtifactPath", "procNoteHtml", "procHtml"] {
     let start = source.find(&format!("function {name}(")).unwrap();
     let end = source[start..].find("\n}\n").unwrap() + start + 3;
     script.push_str(&source[start..end]);
@@ -147,6 +147,40 @@ const originalAttemptLinkHtml = () => '', procMetaHtml = () => '';
   }
   let output = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
   assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn compact_task_previews_match_live_and_offline_rows() {
+  let source = live_client_js();
+  let mut script = String::new();
+  for name in ["esc", "isCacheHit", "looksLikeArtifactPath", "procNoteHtml"] {
+    let start = source.find(&format!("function {name}(")).unwrap();
+    let end = source[start..].find("\n}\n").unwrap() + start + 3;
+    script.push_str(&source[start..end]);
+  }
+  for (status, detail, expected) in [
+    (ProcStatus::Skipped, "skipped — when: plan.grok = run", ""),
+    (ProcStatus::Ok, "summary: old result (cached · source run took 6m)", "old result"),
+    (ProcStatus::Ok, "review_url: https://github.com/o/r/pull/12#pullrequestreview-… · published: true", "<a href=\"https://github.com/o/r/pull/12\">View pull request</a> · Review published"),
+    (ProcStatus::Ok, "summary: <script>bad</script>", "&lt;script&gt;bad&lt;/script&gt;"),
+    (ProcStatus::Fail, "failed <input>", "failed &lt;input&gt;"),
+  ] {
+    let mut store = store_with_cast_proc(status);
+    let session = store.sessions.get_mut("castab").unwrap();
+    session.procs[0].detail = Some(detail.into());
+    assert_eq!(super::proc::proc_note_html(&session.procs[0]), expected);
+    let offline = session_export_page(session, &[super::session_export::CastExport::Note { text: "No recording".into(), diff_html: None }], None, 10);
+    assert!(offline.contains(&format!(r#"<span class="note dim">{expected}</span>"#)));
+    assert!(offline.contains(&format!(r#"<div class="detail">{}</div>"#, super::escape::esc(detail))));
+    script.push_str(&format!(
+      "if (procNoteHtml(({}).procs[0]) !== {}) throw new Error('preview parity');\n",
+      crate::daemon::jsonio::session_json_store(session), crate::json::quote(expected)
+    ));
+  }
+  if crate::runtime::which("node").is_some() {
+    let output = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+  }
 }
 
 /// The job page carries every section's card in a fixed order — errors, results, the job
@@ -382,12 +416,8 @@ fn skipped_workflow_step_renders_as_a_dim_slashed_row() {
   assert!(procs.contains(r#"class="chamfer proc skipped""#), "got: {procs}");
   assert!(!procs.contains("class=\"glyph\""), "proc rows no longer carry a status glyph: {procs}");
   assert!(procs.contains(">skipped</span>"), "skipped elapsed phrase: {procs}");
-  // A skipped step is FINISHED, so its collapsed row shows the outcome (the skip reason),
-  // not the transient step note — same rule that puts a finished skill's answer in the row.
-  assert!(
-    procs.contains(r#"<span class="note dim">skipped — its when: gate is false</span>"#),
-    "skip reason in the collapsed row: {procs}"
-  );
+  assert!(procs.contains(r#"<span class="note dim"></span>"#), "skips stay compact: {procs}");
+  assert!(procs.contains(r#"<div class="detail">skipped — its when: gate is false</div>"#));
   assert!(!procs.contains("data-proc-stop"), "skipped step has no Force stop: {procs}");
   // Live updates speak the same phrases; workflow graph keeps its own icon map.
   let js = live_client_js();
@@ -4128,7 +4158,7 @@ fn workflow_graph_renders_builtin_shapes() {
     "zooming keeps the content under the pointer stationary"
   );
   assert!(
-    js.contains("zoomAt(workflowZoom + (ev.deltaY < 0 ? 0.1 : -0.1), ev.clientX, ev.clientY)"),
+    js.contains("zoomAt(wfWheelZoom(workflowZoom, ev.deltaY, ev.deltaMode, scroller.clientHeight), ev.clientX, ev.clientY)"),
     "pinch zoom anchors at the pointer, not the viewport center"
   );
   assert!(js.contains("addEventListener('dblclick'"), "double-clicking empty graph area zooms in at that point");
@@ -4181,7 +4211,7 @@ fn workflow_graph_renders_builtin_shapes() {
     "both graph run links and status-summary run links close large view before navigation"
   );
   assert!(!js.contains("requestFullscreen"), "large view deliberately avoids the browser Fullscreen API");
-  assert!(js.contains("stage.style.zoom"), "zoom changes the graph without changing its topology");
+  assert!(js.contains("stage.style.transform"), "zoom scales the graph as one surface in every browser");
   assert!(js.contains("let workflowZoom = 1"), "zoom survives dynamic graph remounts");
   assert!(!js.contains("window.scrollBy"), "the page viewport never moves except on direct human input");
   assert!(!js.contains("scroller.style.height"), "zoom scales inside the fixed viewport, never resizing the card");
@@ -4413,4 +4443,33 @@ fn job_graph_legend_sits_above_the_viewport_and_can_be_hidden() {
   let view = super::workflow_view_js::WORKFLOW_VIEW_JS;
   assert!(view.contains("root.querySelector('[data-wf-legend]')"), "the shared view script binds the checkbox");
   assert!(view.contains("root.classList.toggle('wf-legend-hidden', !legendToggle.checked)"));
+}
+
+#[test]
+fn pinch_zoom_is_gentle_proportional_and_reversible() {
+  if crate::runtime::which("node").is_none() {
+    return;
+  }
+  let source = live_client_js();
+  let start = source.find("function wfWheelZoom(").unwrap();
+  let end = source[start..].find("\n}\n").unwrap() + start + 3;
+  let script = format!(
+    r#"
+{}
+const assert = require('node:assert/strict');
+const zoom = (current, delta, mode = 0) => wfWheelZoom(current, delta, mode, 500);
+assert.equal(zoom(0.22, 0), 0.22);
+assert(zoom(0.22, -1) > 0.22 && zoom(0.22, -1) < 0.221);
+assert(zoom(0.22, 1) < 0.22);
+assert(Math.abs(zoom(zoom(0.22, -10), 10) - 0.22) < 1e-10);
+assert(Math.abs(zoom(1, -10) - zoom(0.22, -10) / 0.22) < 1e-10);
+assert(Math.abs(zoom(zoom(0.22, -5), -5) - zoom(0.22, -10)) < 1e-10);
+assert.equal(zoom(1, -1, 1), zoom(1, -16));
+assert.equal(zoom(1, -0.01, 2), zoom(1, -5));
+assert(zoom(1, -10000) < 1.11);
+"#,
+    &source[start..end]
+  );
+  let output = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
+  assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }

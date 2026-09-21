@@ -171,12 +171,42 @@ pub(crate) fn proc_elapsed_phrase(proc: &ProcRecord, now: u64) -> String {
   }
 }
 
+/// A compact preview; the expanded row retains the complete diagnostic detail.
+/// Keep this in sync with procNoteHtml in client_js.rs.
+pub(crate) fn proc_note_html(proc: &ProcRecord) -> String {
+  if proc.status == ProcStatus::Skipped {
+    return String::new();
+  }
+  let finished = !proc_is_live(proc.status);
+  let text = if finished {
+    proc.detail.as_deref().filter(|s| !s.is_empty()).or(proc.note.as_deref()).unwrap_or("")
+  } else {
+    proc.note.as_deref().unwrap_or("")
+  };
+  if let Some(rest) = text.strip_prefix("review_url: https://github.com/") {
+    let url = rest.split_whitespace().next().unwrap_or("");
+    // The stored headline may shorten the review fragment; link to the intact PR.
+    let path = url.split('#').next().unwrap_or("");
+    if !path.contains('…') && !path.contains("...") && path.contains("/pull/") {
+      return format!(r#"<a href="https://github.com/{}">View pull request</a> · Review published"#, esc(path));
+    }
+  }
+  let text = if proc_is_cache_hit(proc) { text.split(" (cached").next().unwrap_or(text) } else { text };
+  let text = text.strip_prefix("summary: ").or_else(|| text.strip_prefix("deltas: ")).unwrap_or(text);
+  let text = text.split(" · approval_bar:").next().unwrap_or(text);
+  if finished && super::session::looks_like_artifact_path(text) {
+    format!("<code>{}</code>", esc(text))
+  } else {
+    esc(text)
+  }
+}
+
 pub(crate) fn summary_stats_html(proc: &ProcRecord, now: u64) -> String {
   let idle = idle_since_line(proc, now).map(format_idle).unwrap_or_default();
   format!(
     r#"<span class="proc-stat" data-proc-stat="{index}">
 <span class="line-count">{}</span><span class="idle">{idle}</span></span>"#,
-    line_count_label(proc.lines.len()),
+    if proc.lines.is_empty() { String::new() } else { line_count_label(proc.lines.len()) },
     index = proc.index,
     idle = idle,
   )

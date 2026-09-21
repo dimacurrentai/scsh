@@ -1,5 +1,7 @@
 # Offline graph controls
 
+Run these checks in Safari/WebKit and Chromium, including a tall review graph at roughly 20% zoom. Node text, padding, borders, and edges must scale together, with no overlapping cards or clipped labels beyond their normal ellipsis. After Fit, the scroll extent must match the visible graph, without empty space from its unscaled dimensions.
+
 The shared viewport in `src/daemon/html/workflow_view_js.rs` serves live job pages and offline snapshots. The export unit test guards script inclusion and initialization; these browser checks exercise layout, actual scrolling, and navigation.
 
 1. Build with `cargo build`, and use that binary to start an isolated session browser with `SCSH_HOME` and `TMPDIR` pointing into this repository's gitignored `tmp/`. Choose an unused localhost port with `socket.bind(('127.0.0.1', 0))`, then set `SCSH_DAEMON_PORT` to it. Run a host-only workflow with at least six dependent steps, and open its job page. Download **Job snapshot** into `tmp/`, then open the downloaded file directly with `file://`. Keep the live page open for comparison.
@@ -9,6 +11,8 @@ The shared viewport in `src/daemon/html/workflow_view_js.rs` serves live job pag
 2. On each page, click the zoom-percentage button to reset to **100%**, then **+** until the graph exceeds its viewport. Drag empty graph space left and right; use horizontal trackpad scrolling. Click **Fit**, then **−** and **+**.
 
    **Predict:** dragging and horizontal scrolling reach both ends of the graph; Fit restores the complete graph; the zoom percentage changes with the buttons. The surrounding document stays in place. At the fitted minimum, zoom-out is disabled. At every zoom the status legend stays in its own row above the graph viewport, right-aligned, and never covers a node. Unticking **Legend** (left of **−**, ticked by default) removes that row and gives its height to the graph; ticking it brings the legend back.
+
+   Pinch slowly in and out over the graph. Small finger movements should make small proportional changes, including when the graph starts below 25%. Reversing the gesture should return smoothly toward the original zoom; ordinary scrolling should still pan.
 
 3. Open **Full screen**, resize the browser, and click **Fit**. Check at desktop and phone widths (for example 1280 px and 390 px). Close using **Close**, **Escape**, and a click outside the modal. Use Tab and Shift+Tab while expanded.
 
