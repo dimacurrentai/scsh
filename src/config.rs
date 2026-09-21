@@ -158,11 +158,25 @@ pub struct ResolvedInvocation {
   pub terminal: Terminal,
   /// How the skill's `SKILL.md` reaches the agent inside the container.
   pub delivery: SkillDelivery,
+  /// Files `scsh` writes into the run directory before launch, as `(run-dir-relative path,
+  /// contents)`: a carried skill arrives as its WHOLE directory — `SKILL.md` and the scripts
+  /// it tells the agent to run — never as a body with nothing beside it. Empty for a
+  /// repo-delivered skill (its directory already rides in the clone) and for a plain prompt.
+  pub installed_files: SkillFiles,
   /// Repo-relative files (beyond `result`) the run must produce and scsh copies back to the
   /// caller — a workflow step's declared `artifacts:`, resolved against its session dir.
   /// Empty for `.scsh.yml` skills.
   pub artifacts: Vec<String>,
 }
+
+/// Files that travel with a skill, as `(relative path, contents)` pairs.
+pub type SkillFiles = Vec<(String, Vec<u8>)>;
+
+/// Where a workflow step's named skill is written inside a run: under the run directory's
+/// `tmp/`, which is mounted on both transports and gitignored, so the checkout never contains
+/// the skill. Harness-neutral on purpose — the step's prompt states this path, so no CLI's
+/// own skill discovery is involved.
+pub const RUN_SKILLS_REL: &str = "tmp/.scsh-skills";
 
 /// How a skill's instructions reach the agent inside the container.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,7 +184,8 @@ pub enum SkillDelivery {
   /// The repo's own committed `.skills/<name>/SKILL.md`, already present in the clone.
   Repo,
   /// An inline harness-def `task:` / workflow-step `prompt:` — passed to the harness as a
-  /// **custom prompt** (no `SKILL.md` is written; harnesses already accept free-form prompts).
+  /// **custom prompt** (harnesses already accept free-form prompts). A workflow step naming a
+  /// `skill:` is pasted the same way, with its directory carried in `installed_files`.
   DirectPrompt(String),
   /// A carried body (an `--override-dot-scsh-yml` run), installed into the harness's GLOBAL
   /// skills location inside the container ([`Harness::global_skills_rel`]) — the repo
@@ -228,6 +243,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       result: skill.result.clone(),
       terminal,
       delivery: SkillDelivery::Repo,
+      installed_files: Vec::new(),
       artifacts: Vec::new(),
     }];
   }
@@ -252,6 +268,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       result: skill.result.replace("{name}", &route.name),
       terminal,
       delivery: SkillDelivery::Repo,
+      installed_files: Vec::new(),
       artifacts: Vec::new(),
     })
     .collect()
@@ -369,7 +386,7 @@ impl Harness {
     match self {
       Harness::Claude => "tmp/.claude-auth/.claude/skills",
       Harness::Cursor => "tmp/.cursor/skills",
-      Harness::Opencode | Harness::Codex | Harness::Grok => "tmp/.scsh-skills",
+      Harness::Opencode | Harness::Codex | Harness::Grok => RUN_SKILLS_REL,
     }
   }
 

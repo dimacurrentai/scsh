@@ -331,6 +331,9 @@ pub enum StepTask {
     name: String,
     /// The resolved `SKILL.md` body delivered to the agent.
     body: String,
+    /// Everything else in the skill's directory, as `(skill-relative path, contents)` — the
+    /// scripts the body tells the agent to run. Delivered beside the body, never dropped.
+    files: config::SkillFiles,
   },
 }
 
@@ -611,13 +614,35 @@ impl Step {
     }
   }
 
+  /// The files `scsh` writes into the run before launching this step: a named skill's whole
+  /// directory (its `SKILL.md` and everything beside it) under [`config::RUN_SKILLS_REL`].
+  /// Empty for an inline `prompt:`, which has no directory.
+  pub fn installed_files(&self) -> config::SkillFiles {
+    let Some(StepTask::Skill { name, body, files }) = self.task() else { return Vec::new() };
+    let dir = format!("{}/{name}", config::RUN_SKILLS_REL);
+    std::iter::once((format!("{dir}/SKILL.md"), body.as_bytes().to_vec()))
+      .chain(files.iter().map(|(rel, contents)| (format!("{dir}/{rel}"), contents.clone())))
+      .collect()
+  }
+
   /// The full prompt scsh sends to the harness for this step: the author's `prompt` plus the
   /// scsh-generated I/O contract — which env vars carry the inputs, and the exact JSON shape to
   /// write to `$SCSH_RESULT`. The author writes intent; scsh guarantees the machine contract.
-  /// Delivered as a harness custom prompt ([`crate::config::SkillDelivery::DirectPrompt`]), not
-  /// as a synthetic `SKILL.md`.
+  /// Delivered as a harness custom prompt ([`crate::config::SkillDelivery::DirectPrompt`]); a
+  /// named skill's directory travels beside it ([`Self::installed_files`]).
   pub fn render_skill_body(&self) -> String {
     let mut s = self.task().map(StepTask::body).unwrap_or_default().trim_end().to_string();
+    if let Some(StepTask::Skill { name, .. }) = self.task() {
+      // The body is pasted, so the agent loads no file whose path it could take. State the
+      // installed directory instead: the skill's own instructions resolve its scripts from it.
+      s.push_str(&format!(
+        "\n\n## Skill directory\n\nThis skill is installed at `{}/{}/{name}`: that is the directory containing \
+its `SKILL.md`, and everything the skill ships (such as `scripts/`) is there. Run its scripts by that \
+absolute path, from the current directory.\n",
+        crate::runtime::AGENT_REPO,
+        config::RUN_SKILLS_REL
+      ));
+    }
     s.push_str("\n\n## Inputs\n\n");
     if self.inputs.is_empty() {
       s.push_str("This step takes no inputs.\n");
@@ -627,7 +652,20 @@ impl Step {
         s.push_str(&format!("- `{}`\n", b.name));
       }
     }
-    s.push_str("\n## Output\n\nWrite a single JSON object to the file at `$SCSH_RESULT` with exactly these fields:\n");
+    // A skill that ships scripts may ship its own result writer, and then hand-written JSON is
+    // exactly what it forbids: state the shape as a requirement and send the agent to that writer.
+    let ships_scripts = matches!(self.task(), Some(StepTask::Skill { files, .. }) if files.iter().any(|(rel, _)| rel.starts_with("scripts/")));
+    if ships_scripts {
+      s.push_str(
+        "\n## Output\n\nThe file at `$SCSH_RESULT` must hold a single JSON object with exactly the fields below. \
+If this skill ships a result writer, produce the file with it, in the mode it documents for this contract — \
+never by hand.\n",
+      );
+    } else {
+      s.push_str(
+        "\n## Output\n\nWrite a single JSON object to the file at `$SCSH_RESULT` with exactly these fields:\n",
+      );
+    }
     for o in &self.outputs {
       let ty = match o.ty {
         OutputType::Enum => format!("one of: {}", o.choices.join(", ")),
@@ -1241,8 +1279,8 @@ fn validate_step_task(
     (Some(node), None) => required_scalar(Some(node), &format!("steps.{id}.prompt"), errors).map(StepTask::Prompt),
     (None, Some(Node::Scalar(name))) if !name.trim().is_empty() => {
       let name = name.trim();
-      match resolve_skill_body(name, repo_root) {
-        Some(body) => Some(StepTask::Skill { name: name.to_string(), body }),
+      match resolve_skill(name, repo_root) {
+        Some((body, files)) => Some(StepTask::Skill { name: name.to_string(), body, files }),
         None => {
           errors.push(format!(
             "'steps.{id}.skill' names '{name}', which is neither bundled nor installed — install it into this repo's .skills/ (scsh installskills <url>) or machine-wide (scsh installskills --global <url>)"
@@ -1262,22 +1300,31 @@ fn validate_step_task(
   }
 }
 
-/// Resolve a step's `skill:` reference to its `SKILL.md` body: the bundle first, then the
+/// Resolve a step's `skill:` reference to its `SKILL.md` body and the rest of its directory:
+/// the bundle first, then the
 /// enclosing repository's `.skills/`, then the machine-wide install
 /// (`$SCSH_HOME/.skills/`, written by `scsh installskills --global`). The delivery-pipeline
 /// skill families deliberately live OUTSIDE the bundle — their source repositories are
 /// canonical and the bundle must never drift from them — so a definition referencing one
 /// resolves wherever the user actually installed it.
-fn resolve_skill_body(name: &str, repo_root: Option<&Path>) -> Option<String> {
+fn resolve_skill(name: &str, repo_root: Option<&Path>) -> Option<(String, config::SkillFiles)> {
   if let Some(body) = config::bundled_skill_body(name) {
-    return Some(body.to_string());
+    let prefix = format!(".skills/{name}/");
+    let files = config::bundled_skill_scripts()
+      .into_iter()
+      .filter_map(|(path, script)| Some((path.strip_prefix(&prefix)?.to_string(), script.as_bytes().to_vec())))
+      .collect();
+    return Some((body.to_string(), files));
   }
   let mut candidates: Vec<PathBuf> = Vec::new();
   if let Some(root) = repo_root {
-    candidates.push(root.join(".skills").join(name).join("SKILL.md"));
+    candidates.push(root.join(".skills").join(name));
   }
-  candidates.push(crate::runtime::scsh_home().join(".skills").join(name).join("SKILL.md"));
-  candidates.into_iter().find_map(|p| std::fs::read_to_string(p).ok())
+  candidates.push(crate::runtime::scsh_home().join(".skills").join(name));
+  candidates.into_iter().find_map(|dir| {
+    let body = std::fs::read_to_string(dir.join("SKILL.md")).ok()?;
+    Some((body, crate::runtime::skill_dir_files(&dir)))
+  })
 }
 
 /// Validate a step's `agent:` block into a [`StepAgent`] (harness required; model/effort optional).
@@ -2182,13 +2229,29 @@ mod tests {
         .unwrap_or_else(|| panic!("{} has a known reviewer specialty", r.id));
       let expected_body = crate::config::bundled_skill_body(expected_name).expect("reviewer is bundled");
       match r.task().unwrap() {
-        StepTask::Skill { name, body } => {
+        StepTask::Skill { name, body, files } => {
           actual_reviewer_skills.insert(name.as_str());
           assert_eq!(name, expected_name, "{} references its canonical reviewer", r.id);
           assert_eq!(body, expected_body, "{} receives the bundled prompt byte-for-byte", r.id);
+          let shipped: Vec<&str> = files.iter().map(|(rel, _)| rel.as_str()).collect();
+          assert_eq!(shipped, ["scripts/write_review.py"], "{} carries the writer its body runs", r.id);
         }
         StepTask::Prompt(_) => panic!("{} must reference the canonical skill, not copy its prompt", r.id),
       }
+      // The skill reaches the run as its whole directory, and the prompt says where: the
+      // pasted body gives the agent no file path of its own to resolve `scripts/` from.
+      let dir = format!("tmp/.scsh-skills/{expected_name}");
+      let installed: Vec<String> = r.installed_files().into_iter().map(|(rel, _)| rel).collect();
+      assert_eq!(installed, [format!("{dir}/SKILL.md"), format!("{dir}/scripts/write_review.py")], "{}", r.id);
+      assert!(
+        r.render_skill_body().contains(&format!("installed at `/home/agent/repo/{dir}`")),
+        "{} states its skill directory",
+        r.id
+      );
+      // The appended contract must not tell a reviewer to hand-write the JSON its body forbids.
+      let prompt = r.render_skill_body();
+      assert!(!prompt.contains("Write a single JSON object"), "{} is not told to hand-write JSON", r.id);
+      assert!(prompt.contains("produce the file with it, in the mode it documents for this contract"), "{}", r.id);
       assert!(
         r.task().unwrap().body().contains("Look, understand, analyze — never execute"),
         "{} is static-only",
@@ -2512,6 +2575,8 @@ steps:
     let dir = root.join(".skills").join(name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("SKILL.md"), body).unwrap();
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    std::fs::write(dir.join("scripts/report.py"), "print('ok')\n").unwrap();
     root
   }
 
@@ -2537,9 +2602,10 @@ steps:
     assert!(step.commits);
     assert_eq!(step.artifacts, ["big-beautiful-build.md"]);
     match step.task().unwrap() {
-      StepTask::Skill { name, body } => {
+      StepTask::Skill { name, body, files } => {
         assert_eq!(name, "big-beautiful-build");
         assert_eq!(body, stub, "the INSTALLED body is what the agent gets");
+        assert_eq!(files, &[("scripts/report.py".to_string(), b"print('ok')\n".to_vec())], "with its scripts");
       }
       StepTask::Prompt(_) => panic!("the built-in must execute the canonical skill, not a copied prompt"),
     }

@@ -5,7 +5,7 @@ This directory contains the skills that `scsh` develops, exercises, or embeds. E
 The source of truth depends on the skill family:
 
 - The example, smoke, and self-test skills are authored here because they document or exercise `scsh` itself.
-- The five reviewer bodies are synchronized mirrors of [`dkorolev/code-review-skills`](https://github.com/dkorolev/code-review-skills), their canonical authoring repository. `src/config.rs` pins their content hashes to a named canonical revision, and tests reject an unpinned local edit. Reviewer changes land in `code-review-skills` first and are then mirrored here.
+- The five reviewers are synchronized mirrors of [`dkorolev/code-review-skills`](https://github.com/dkorolev/code-review-skills), their canonical authoring repository — each body **and** the byte-identical `scripts/write_review.py` it runs to serialize its result. `src/config.rs` pins the bodies' and the writer's content hashes to a named canonical revision, and tests reject an unpinned local edit. Reviewer changes land in `code-review-skills` first and are then mirrored here.
 - Delivery and publishing workflows such as `big-beautiful-build`, `code-gorgeous-review`, and `gh-gorgeous-review` are authored in [`dkorolev/beautiful-skills`](https://github.com/dkorolev/beautiful-skills). They are installed from that repository and are deliberately not bundled into the `scsh` binary.
 
 Edit a skill here only when this repository is its source of truth or when deliberately mirroring a canonical reviewer revision. Do not edit through the tool-specific paths below; they are symlinks.
@@ -42,7 +42,7 @@ The root `.scsh.yml` is the manifest embedded by no-URL `scsh installskills`: it
 
 ## Changing a skill
 
-1. Identify its source of truth above. For a reviewer, change `dkorolev/code-review-skills` first, then mirror the exact body here and update the pinned hashes and canonical revision in `src/config.rs`.
+1. Identify its source of truth above. For a reviewer, change `dkorolev/code-review-skills` first, then mirror the exact body and `scripts/` here and update the pinned hashes (`REVIEWER_BODY_SHA256`, `REVIEWER_WRITER_SHA256`) and canonical revision in `src/config.rs`.
 2. Keep the directory name equal to the skill's frontmatter `name`.
 3. Author only under `.skills/<name>/`, never through a symlinked host path.
 4. Update the appropriate manifest only when the skill is actually shipped by that manifest, then run the repository test suite.

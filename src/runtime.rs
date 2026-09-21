@@ -537,6 +537,33 @@ fn harness_container_env_verbose(harness: Harness, verbose: bool) -> Vec<(String
   }
 }
 
+/// Every regular file in a skill directory except its `SKILL.md`, as `(skill-relative path,
+/// contents)` in a stable order. Symlinks are skipped rather than followed: a skill is a
+/// self-contained directory, and a link could point outside it or back into itself.
+pub fn skill_dir_files(dir: &Path) -> crate::config::SkillFiles {
+  fn walk(root: &Path, dir: &Path, out: &mut crate::config::SkillFiles) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+      let path = entry.path();
+      let Ok(kind) = entry.file_type() else { continue };
+      if kind.is_dir() {
+        walk(root, &path, out);
+      } else if kind.is_file() {
+        let Some(rel) = path.strip_prefix(root).ok().and_then(Path::to_str) else { continue };
+        if rel != "SKILL.md" {
+          if let Ok(contents) = std::fs::read(&path) {
+            out.push((rel.to_string(), contents));
+          }
+        }
+      }
+    }
+  }
+  let mut files = Vec::new();
+  walk(dir, dir, &mut files);
+  files.sort();
+  files
+}
+
 /// The shell command a harness runs *inside the container* for one skill.
 /// Output is always teed to [`RUN_LOG_VAR`] for the daemon; `SCSH_QUIET=1` drops the debug flags.
 /// `effort` is the `.scsh.yml` reasoning-effort level (codex and grok only; expansion
@@ -3775,6 +3802,7 @@ TAG
         result: "tmp/a.json".into(),
         terminal: crate::config::Terminal::default(),
         delivery: crate::config::SkillDelivery::Repo,
+        installed_files: Vec::new(),
         artifacts: Vec::new(),
       },
       crate::config::ResolvedInvocation {
@@ -3795,6 +3823,7 @@ TAG
         result: "tmp/b.json".into(),
         terminal: crate::config::Terminal::default(),
         delivery: crate::config::SkillDelivery::Repo,
+        installed_files: Vec::new(),
         artifacts: Vec::new(),
       },
       crate::config::ResolvedInvocation {
@@ -3815,6 +3844,7 @@ TAG
         result: "tmp/c.json".into(),
         terminal: crate::config::Terminal::default(),
         delivery: crate::config::SkillDelivery::Repo,
+        installed_files: Vec::new(),
         artifacts: Vec::new(),
       },
     ];
@@ -3872,6 +3902,7 @@ TAG
       result: "tmp/add.json".into(),
       terminal: crate::config::Terminal::default(),
       delivery: crate::config::SkillDelivery::Repo,
+      installed_files: Vec::new(),
       artifacts: Vec::new(),
     }];
     let probe = OpencodeModelProbe::for_selected(&skills);
