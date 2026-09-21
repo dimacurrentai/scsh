@@ -146,7 +146,7 @@ fn accounting_bytes(harness: crate::config::Harness, dir: &Path) -> u64 {
     crate::config::Harness::Codex => {
       jsonl_files(&dir.join(crate::runtime::CODEX_FORWARD_REL).join("sessions")).unwrap_or_default()
     }
-    crate::config::Harness::Grok => grok_transcripts(dir).unwrap_or_default(),
+    crate::config::Harness::Grok => grok_transcript(dir).into_iter().collect(),
     _ => return 0,
   };
   paths.iter().map(|path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)).sum()
@@ -162,7 +162,7 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
       jsonl_files(&dir.join(crate::runtime::CLAUDE_AUTH_REL).join(".claude/projects")).ok()?
     }
     crate::config::Harness::Codex => jsonl_files(&dir.join(crate::runtime::CODEX_FORWARD_REL).join("sessions")).ok()?,
-    crate::config::Harness::Grok => grok_transcripts(dir).ok()?,
+    crate::config::Harness::Grok => vec![grok_transcript(dir).ok()?],
     _ => return None,
   };
   let mut fresh = false;
@@ -175,7 +175,10 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
       return None;
     }
     fresh |= after.modified().ok()? >= result_time;
-    if harness != crate::config::Harness::Cursor && !crate::usage::turn_finished(harness, &stream) {
+    // Cursor and Grok have no separate turn boundary: their one summary below already
+    // reports whether the latest turn is terminal, so their stream is parsed once.
+    let summarized = matches!(harness, crate::config::Harness::Cursor | crate::config::Harness::Grok);
+    if !summarized && !crate::usage::turn_finished(harness, &stream) {
       return None;
     }
     streams.push(Some(stream));
@@ -212,9 +215,9 @@ pub fn from_run_dir(harness: crate::config::Harness, run_dir: &Path) -> Option<S
       )
     }
     crate::config::Harness::Grok => Some(
-      grok_transcripts(run_dir)
+      grok_transcript(run_dir)
+        .and_then(std::fs::read_to_string)
         .ok()
-        .and_then(|paths| std::fs::read_to_string(paths.first()?).ok())
         .map(|stream| crate::usage::grok_session_summary(&stream))
         .unwrap_or_else(|| unavailable(Harness::Grok)),
     ),
@@ -224,10 +227,10 @@ pub fn from_run_dir(harness: crate::config::Harness, run_dir: &Path) -> Option<S
 
 /// Fresh GROK_HOME contains one primary session plus optional children. The primary
 /// bills already fold in child spend. Select it by native metadata, never directory order.
-fn grok_transcripts(run_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+fn grok_transcript(run_dir: &Path) -> std::io::Result<PathBuf> {
   let root = run_dir.join(crate::runtime::GROK_FORWARD_REL).join("sessions");
   let files = jsonl_files(&root)?;
-  let mut primary = Vec::new();
+  let mut primary = None;
   for events in files.iter().filter(|path| path.file_name().is_some_and(|name| name == "events.jsonl")) {
     let text = std::fs::read_to_string(events)?;
     let id =
@@ -241,13 +244,12 @@ fn grok_transcripts(run_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
       if !files.contains(&updates) {
         return Err(std::io::Error::other("missing Grok session updates"));
       }
-      primary.push(updates);
+      if primary.replace(updates).is_some() {
+        return Err(std::io::Error::other("more than one primary Grok session in one attempt"));
+      }
     }
   }
-  if primary.len() != 1 {
-    return Err(std::io::Error::other("expected exactly one primary Grok session per attempt"));
-  }
-  Ok(primary)
+  primary.ok_or_else(|| std::io::Error::other("no primary Grok session in this attempt"))
 }
 
 pub(crate) fn claude_session_summary(root: &Path) -> Option<Summary> {
@@ -359,7 +361,7 @@ mod completion_tests {
       r#"{"type":"turn_started","session_relationship":"primary","session_id":"child"}"#,
     )
     .unwrap();
-    assert!(grok_transcripts(&run.0).is_err(), "ambiguous primaries must not double-count");
+    assert!(grok_transcript(&run.0).is_err(), "ambiguous primaries must not double-count");
   }
 
   #[test]
