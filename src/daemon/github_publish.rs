@@ -110,8 +110,10 @@ fn payload(
       // request description, the change as a whole, or a file and line, quoted as code.
       let heading = if path == "PR-DESCRIPTION.md" {
         "Pull Request Description".to_string()
-      } else if path.starts_with('<') {
+      } else if path.trim().is_empty() || path.starts_with('<') {
         "Overall change".to_string()
+      } else if line == 0 {
+        format!("`{path}`")
       } else {
         format!("`{path}:{line}`")
       };
@@ -362,6 +364,51 @@ mod tests {
     let body = string(&parse(&published).unwrap(), "body").unwrap();
     assert!(body.contains("\n\n### `src/lib.rs:40`\n\nOut of range."), "got: {body}");
     assert!(body.contains("\n\n### Overall change\n\nSplit the change."), "got: {body}");
+  }
+
+  #[test]
+  fn zero_line_locations_have_readable_headings() {
+    for (path, heading) in [
+      ("", "Overall change"),
+      ("   ", "Overall change"),
+      ("<overall>", "Overall change"),
+      ("common/configuration/dto/configuration.py", "`common/configuration/dto/configuration.py`"),
+      ("PR-DESCRIPTION.md", "Pull Request Description"),
+    ] {
+      let issue = parse(&format!(r#"{{"file":"{path}","line":0,"description":"Check the default."}}"#)).unwrap();
+      let value = parse(&payload("abc", "COMMENT", &[issue], &[], "marker", "").unwrap()).unwrap();
+      assert_eq!(field(&value, "comments"), Some(&Value::Array(vec![])));
+      let body = string(&value, "body").unwrap();
+      assert!(body.contains(&format!("\n\n### {heading}\n\nCheck the default.")), "{body}");
+      assert!(!body.contains(":0"), "{body}");
+    }
+  }
+
+  #[test]
+  fn markdown_survives_inline_and_unanchored_publication() {
+    let description = "In `rootExplicitlyClosed`, `additionalProperties` is false when closed.\n\nSee [schema](https://example.com/schema).";
+    let suggestion = "Keep `return isBool && !closed`.\n\n```suggestion\nreturn isBool && !allowsAdditional\n```";
+    let issue = parse(&format!(
+      r#"{{"file":"schema.go","line":852,"description":{},"suggestion":{}}}"#,
+      quote(description),
+      quote(suggestion)
+    ))
+    .unwrap();
+    let expected = format!("{description}\n\nSuggestion: {suggestion}");
+    let diff = parse(r#"{"filename":"schema.go","patch":"@@ -852 +852 @@\n+new"}"#).unwrap();
+    for files in [vec![], vec![diff]] {
+      let value =
+        parse(&payload("abc", "COMMENT", &[issue.clone(), issue.clone()], &files, "marker", "").unwrap()).unwrap();
+      if files.is_empty() {
+        let body = string(&value, "body").unwrap();
+        assert!(body.contains(&format!("### `schema.go:852`\n\n{expected}\n\nmarker")), "{body}");
+        assert_eq!(body.matches(description).count(), 1);
+      } else {
+        let Some(Value::Array(comments)) = field(&value, "comments") else { panic!("missing comments") };
+        assert_eq!(comments.len(), 1);
+        assert_eq!(string(&comments[0], "body").unwrap(), expected);
+      }
+    }
   }
 
   #[test]

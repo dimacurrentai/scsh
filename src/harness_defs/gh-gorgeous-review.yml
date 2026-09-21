@@ -415,10 +415,18 @@ steps:
               a finding is commit- or PR-level rather than tied to a line. Merge duplicate findings
               that different reviewers raise about the same file and line into one item, keeping
               every distinct observation. Order items by file, then line. Emit `{"items": []}` when
-              there are no findings.
+              there are no findings. Use an empty file for PR-level findings with no real path.
+              Treat descriptions and suggestions as Markdown: preserve inline backticks, fenced
+              code and suggestion blocks, links, and paragraph breaks when extracting or merging.
+              Quote code identifiers, expressions, paths, commands, and commit hashes in new prose.
+              For example, keep `rootExplicitlyClosed` and `return isBool && !closed` quoted.
+              Before returning, compare the prepared text with the source findings to catch lost
+              code quoting. Do not repair quoting with blanket word replacement in ordinary prose.
             - `summary`: a short, gracious, human-voiced paragraph opening the review — the greeting
               and overall read a careful human reviewer would write. No AI, agent, model, or tooling
               attribution of any kind. Do not restate every finding here; the items carry those.
+              Do not promise every finding is inline: publication decides anchors later and may
+              place findings in the review body. Preserve Markdown code quoting in this paragraph.
             - `approval_bar`: the boolean `true` only when every reviewer that ran graded excellent
               or good AND there are at least as many excellent as good grades; otherwise `false`.
               (Whether the PR actually qualifies for an approval is decided later at publication.)
@@ -500,10 +508,18 @@ steps:
               a finding is commit- or PR-level rather than tied to a line. Merge duplicate findings
               that different reviewers raise about the same file and line into one item, keeping
               every distinct observation. Order items by file, then line. Emit `{"items": []}` when
-              there are no findings.
+              there are no findings. Use an empty file for PR-level findings with no real path.
+              Treat descriptions and suggestions as Markdown: preserve inline backticks, fenced
+              code and suggestion blocks, links, and paragraph breaks when extracting or merging.
+              Quote code identifiers, expressions, paths, commands, and commit hashes in new prose.
+              For example, keep `rootExplicitlyClosed` and `return isBool && !closed` quoted.
+              Before returning, compare the prepared text with the source findings to catch lost
+              code quoting. Do not repair quoting with blanket word replacement in ordinary prose.
             - `summary`: a short, gracious, human-voiced paragraph opening the review — the greeting
               and overall read a careful human reviewer would write. No AI, agent, model, or tooling
               attribution of any kind. Do not restate every finding here; the items carry those.
+              Do not promise every finding is inline: publication decides anchors later and may
+              place findings in the review body. Preserve Markdown code quoting in this paragraph.
             - `approval_bar`: the boolean `true` only when every reviewer that ran graded excellent
               or good AND there are at least as many excellent as good grades; otherwise `false`.
               (Whether the PR actually qualifies for an approval is decided later at publication.)
@@ -584,10 +600,18 @@ steps:
               a finding is commit- or PR-level rather than tied to a line. Merge duplicate findings
               that different reviewers raise about the same file and line into one item, keeping
               every distinct observation. Order items by file, then line. Emit `{"items": []}` when
-              there are no findings.
+              there are no findings. Use an empty file for PR-level findings with no real path.
+              Treat descriptions and suggestions as Markdown: preserve inline backticks, fenced
+              code and suggestion blocks, links, and paragraph breaks when extracting or merging.
+              Quote code identifiers, expressions, paths, commands, and commit hashes in new prose.
+              For example, keep `rootExplicitlyClosed` and `return isBool && !closed` quoted.
+              Before returning, compare the prepared text with the source findings to catch lost
+              code quoting. Do not repair quoting with blanket word replacement in ordinary prose.
             - `summary`: a short, gracious, human-voiced paragraph opening the review — the greeting
               and overall read a careful human reviewer would write. No AI, agent, model, or tooling
               attribution of any kind. Do not restate every finding here; the items carry those.
+              Do not promise every finding is inline: publication decides anchors later and may
+              place findings in the review body. Preserve Markdown code quoting in this paragraph.
             - `approval_bar`: the boolean `true` only when every reviewer that ran graded excellent
               or good AND there are at least as many excellent as good grades; otherwise `false`.
               (Whether the PR actually qualifies for an approval is decided later at publication.)
@@ -668,10 +692,18 @@ steps:
               a finding is commit- or PR-level rather than tied to a line. Merge duplicate findings
               that different reviewers raise about the same file and line into one item, keeping
               every distinct observation. Order items by file, then line. Emit `{"items": []}` when
-              there are no findings.
+              there are no findings. Use an empty file for PR-level findings with no real path.
+              Treat descriptions and suggestions as Markdown: preserve inline backticks, fenced
+              code and suggestion blocks, links, and paragraph breaks when extracting or merging.
+              Quote code identifiers, expressions, paths, commands, and commit hashes in new prose.
+              For example, keep `rootExplicitlyClosed` and `return isBool && !closed` quoted.
+              Before returning, compare the prepared text with the source findings to catch lost
+              code quoting. Do not repair quoting with blanket word replacement in ordinary prose.
             - `summary`: a short, gracious, human-voiced paragraph opening the review — the greeting
               and overall read a careful human reviewer would write. No AI, agent, model, or tooling
               attribution of any kind. Do not restate every finding here; the items carry those.
+              Do not promise every finding is inline: publication decides anchors later and may
+              place findings in the review body. Preserve Markdown code quoting in this paragraph.
             - `approval_bar`: the boolean `true` only when every reviewer that ran graded excellent
               or good AND there are at least as many excellent as good grades; otherwise `false`.
               (Whether the PR actually qualifies for an approval is decided later at publication.)
