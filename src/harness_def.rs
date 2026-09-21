@@ -1555,6 +1555,17 @@ pub fn when_failure_note(when: &When, value_of: &impl Fn(&Ref) -> Option<String>
   failed.join("; ")
 }
 
+/// Why a `when:` gate is ALREADY false, judged only by the conditions whose reference is
+/// `settled` (its value can no longer change) — `None` while no settled condition fails. The
+/// gate is an AND, so one settled false condition decides it for good, and the step can be
+/// skipped at once instead of sitting "waiting" on needs that cannot change the verdict.
+pub fn when_settled_failure_note(
+  when: &When, settled: &impl Fn(&Ref) -> bool, value_of: &impl Fn(&Ref) -> Option<String>,
+) -> Option<String> {
+  let failed: When = when.iter().filter(|c| settled(&c.reference) && !c.eval(value_of)).cloned().collect();
+  (!failed.is_empty()).then(|| when_failure_note(&failed, value_of))
+}
+
 fn parse_needs(node: Option<&Node>) -> Vec<String> {
   let Some(Node::Scalar(s)) = node else { return Vec::new() };
   s.trim()
@@ -1925,6 +1936,30 @@ mod tests {
     assert_eq!(note, "plan.grok = run, but plan.grok is `expired`");
     let empty = when_failure_note(&when, &|_| None);
     assert_eq!(empty, "plan.grok = run, but plan.grok is empty");
+  }
+
+  /// Only a settled condition can decide the gate early; an unsettled one is neither a
+  /// failure nor part of the note.
+  #[test]
+  fn when_settled_failure_note_ignores_unsettled_conditions() {
+    let cond = |step: &str, field: &str, value: &str| Cond {
+      reference: Ref::StepField { step: step.into(), field: field.into() },
+      op: CondOp::Eq,
+      values: vec![value.into()],
+    };
+    let when = vec![cond("plan", "publisher", "grok"), cond("review", "grade", "good")];
+    let value_of = |r: &Ref| match r {
+      Ref::StepField { step, .. } if step == "plan" => Some("claude".to_string()),
+      _ => None,
+    };
+    let plan_settled = |r: &Ref| matches!(r, Ref::StepField { step, .. } if step == "plan");
+    assert_eq!(
+      when_settled_failure_note(&when, &plan_settled, &value_of).as_deref(),
+      Some("plan.publisher = grok, but plan.publisher is `claude`")
+    );
+    assert_eq!(when_settled_failure_note(&when, &|_| false, &value_of), None, "nothing settled, nothing decided");
+    let holds = vec![cond("plan", "publisher", "claude"), cond("review", "grade", "good")];
+    assert_eq!(when_settled_failure_note(&holds, &plan_settled, &value_of), None, "the settled condition holds");
   }
 
   #[test]

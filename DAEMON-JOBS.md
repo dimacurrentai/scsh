@@ -142,7 +142,8 @@ cd "$REPO" && WORDS="apple, carrot, pear, onion" "$SCSH_BIN" run --def fruits
 
 **Expect:** every step appears in the session browser immediately — one row per step, noted
 `step k/n` (plus `needs …`), waiting rows included; a step whose gate is false finishes as a
-dim ⊘ `skipped` row instead of vanishing. Above the rows, a **Job graph** card shows the DAG
+dim ⊘ `skipped` row instead of vanishing — as soon as the gate is decided, even while other
+steps it needs are still running. Above the rows, a **Job graph** card shows the DAG
 (`categorize` → `sort_fruits` / `sort_vegetables`); node colors track live state, and clicking a
 node opens that step's panel (`#task-…`). `categorize` runs first, then `sort_fruits` and
 `sort_vegetables` run in parallel;
