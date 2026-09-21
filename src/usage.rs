@@ -422,9 +422,6 @@ pub(crate) fn unavailable(harness: Harness) -> Summary {
 /// Native turn boundaries, separate from token snapshots: a tool-call response or
 /// cumulative counter alone does not mean the agent has finished its last turn.
 pub(crate) fn turn_finished(harness: crate::config::Harness, stream: &str) -> bool {
-  if harness == crate::config::Harness::Grok {
-    return grok_session_summary(stream).complete;
-  }
   let mut finished = false;
   for line in stream.lines().filter(|line| !line.trim().is_empty()) {
     let Ok(event) = json::parse(line) else { return false };
@@ -871,8 +868,8 @@ mod tests {
   #[test]
   fn grok_waits_for_final_bill_and_rejects_stale_completion_after_resuming() {
     let open = GROK.lines().filter(|line| !line.contains("turn_completed")).collect::<Vec<_>>().join("\n");
-    assert!(!turn_finished(crate::config::Harness::Grok, &open));
-    assert!(turn_finished(crate::config::Harness::Grok, GROK));
+    assert!(!grok_session_summary(&open).complete);
+    assert!(grok_session_summary(GROK).complete);
     let resumed = format!("{GROK}{}\n", GROK.lines().next().unwrap());
     assert!(!grok_session_summary(&resumed).complete);
     assert!(!grok_session_summary(&format!("{resumed}{}", GROK.lines().last().unwrap())).complete);
