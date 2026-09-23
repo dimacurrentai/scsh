@@ -1423,33 +1423,159 @@ pub fn run_command(
   v
 }
 
-/// True when a named container still exists (running or stopped) for the given runtime.
-/// docker, podman, and Apple `container` all support `inspect <name>`, but Apple's exits 0
-/// with an empty `[]` for a missing container — so require a non-empty JSON result too.
-pub fn container_named_exists(runtime: &str, name: &str) -> bool {
+/// What `inspect` could establish. A failed inspection is not proof the container is gone:
+/// deleting a host mount while the guest might still have it open is the race cleanup exists
+/// to avoid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerProbe {
+  Present,
+  Absent,
+  Unknown,
+}
+
+/// How long one runtime CLI call (inspect, kill, delete) may run during cleanup.
+/// A hung daemon socket must not stall job completion or the prune tick.
+pub const CLEANUP_COMMAND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run `cmd` and return its output, or an error if it cannot start or exceeds `deadline`.
+pub fn command_output(cmd: &mut Command, deadline: std::time::Duration) -> Result<std::process::Output, String> {
+  use std::io::Read;
   use std::process::Stdio;
-  if name.is_empty() {
-    return false;
+  if deadline.is_zero() {
+    return Err("cleanup deadline exceeded".into());
   }
-  let Ok(out) = Command::new(runtime).args(["inspect", name]).stderr(Stdio::null()).output() else {
-    return false;
+  cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+  #[cfg(unix)]
+  {
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+  }
+  let mut child = cmd.spawn().map_err(|e| format!("could not start: {e}"))?;
+  // Drain while the process runs: inspect output can exceed a pipe's capacity.
+  let drain = |mut pipe: Box<dyn Read + Send>| {
+    std::thread::spawn(move || {
+      let mut bytes = Vec::new();
+      let result = pipe.read_to_end(&mut bytes);
+      result.map(|_| bytes)
+    })
   };
-  if !out.status.success() {
-    return false;
+  let stdout = drain(Box::new(child.stdout.take().expect("piped stdout")));
+  let stderr = drain(Box::new(child.stderr.take().expect("piped stderr")));
+  let started = std::time::Instant::now();
+  let status = loop {
+    match child.try_wait() {
+      Ok(Some(status)) if stdout.is_finished() && stderr.is_finished() => break Ok(status),
+      Ok(_) if started.elapsed() >= deadline => {
+        crate::ui::signals::signal_child_group(child.id(), "KILL");
+        let _ = child.kill();
+        let _ = child.wait();
+        break Err(format!("timed out after {:.1}s", deadline.as_secs_f64()));
+      }
+      Ok(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+      Err(e) => {
+        crate::ui::signals::signal_child_group(child.id(), "KILL");
+        let _ = child.kill();
+        let _ = child.wait();
+        break Err(e.to_string());
+      }
+    }
+  }?;
+  let read = |thread: std::thread::JoinHandle<std::io::Result<Vec<u8>>>| {
+    thread.join().map_err(|_| "output reader panicked".to_string())?.map_err(|e| e.to_string())
+  };
+  Ok(std::process::Output { status, stdout: read(stdout)?, stderr: read(stderr)? })
+}
+
+/// Classify one `inspect` result. `spawned` is false when the runtime binary could not be run.
+///
+/// Absence is a positive claim. Apple `container` reports either exit 0 and `[]`, or
+/// `Error: container not found: NAME`. Docker says `no such object` or `no such container`. Podman says `no such container`
+/// or `no container with name or id`. A socket error (`no such file or directory`) is not
+/// evidence that a container is absent.
+pub fn classify_inspect(runtime: &str, spawned: bool, status_ok: bool, stdout: &str, stderr: &str) -> ContainerProbe {
+  if !spawned {
+    return ContainerProbe::Unknown;
   }
-  let body = String::from_utf8_lossy(&out.stdout);
-  let body = body.trim();
-  !(body.is_empty() || body == "[]" || body == "null")
+  let body = stdout.trim();
+  if status_ok {
+    return if body == "[]" {
+      ContainerProbe::Absent
+    } else if matches!(crate::json::parse(body), Ok(crate::json::Value::Array(values)) if !values.is_empty()) {
+      ContainerProbe::Present
+    } else {
+      ContainerProbe::Unknown
+    };
+  }
+  if missing_container_message(runtime, stdout, stderr) {
+    ContainerProbe::Absent
+  } else {
+    ContainerProbe::Unknown
+  }
+}
+
+fn missing_container_message(runtime: &str, stdout: &str, stderr: &str) -> bool {
+  let blob = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+  blob.lines().any(|line| match runtime {
+    "docker" => {
+      line.starts_with("error: no such object:")
+        || line.starts_with("error: no such container:")
+        || line.starts_with("error response from daemon: no such container:")
+    }
+    "podman" => {
+      line.starts_with("error: no such container:")
+        || (line.starts_with("error: no container with name or id ") && line.ends_with(": no such container"))
+    }
+    "container" => line.starts_with("error: container not found:"),
+    _ => false,
+  })
+}
+
+/// docker, podman, and Apple `container` all support `inspect <name>`. Apple exits 0 with
+/// an empty `[]` for a missing container.
+pub fn container_probe(runtime: &str, name: &str) -> ContainerProbe {
+  container_probe_until(runtime, name, std::time::Instant::now() + CLEANUP_COMMAND_DEADLINE)
+}
+
+pub fn container_probe_until(runtime: &str, name: &str, deadline: std::time::Instant) -> ContainerProbe {
+  if name.is_empty() {
+    return ContainerProbe::Absent;
+  }
+  match command_output(
+    Command::new(runtime).args(["inspect", name]),
+    deadline.saturating_duration_since(std::time::Instant::now()),
+  ) {
+    Ok(out) => classify_inspect(
+      runtime,
+      true,
+      out.status.success(),
+      &String::from_utf8_lossy(&out.stdout),
+      &String::from_utf8_lossy(&out.stderr),
+    ),
+    Err(_) => ContainerProbe::Unknown,
+  }
 }
 
 /// Probe every runtime scsh might use — for orphan prune jobs with no runtime recorded.
-pub fn container_named_exists_any(name: &str) -> bool {
+/// Unknown on any installed runtime blocks a delete; a missing binary does not count as absent.
+pub fn container_probe_any(name: &str) -> ContainerProbe {
+  let mut saw_runtime = false;
+  let mut saw_unknown = false;
   for rt in runtime_candidates(cfg!(target_os = "macos")) {
-    if which(rt).is_some() && container_named_exists(rt, name) {
-      return true;
+    if which(rt).is_none() {
+      continue;
+    }
+    saw_runtime = true;
+    match container_probe(rt, name) {
+      ContainerProbe::Present => return ContainerProbe::Present,
+      ContainerProbe::Unknown => saw_unknown = true,
+      ContainerProbe::Absent => {}
     }
   }
-  false
+  if !saw_runtime || saw_unknown {
+    ContainerProbe::Unknown
+  } else {
+    ContainerProbe::Absent
+  }
 }
 
 pub fn opencode_auth_in(xdg_data_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
@@ -3624,6 +3750,63 @@ TAG
     let memory = MemoryLimit::parse("8G").unwrap();
     assert_eq!(crate::config::resolve_tmpfs(Some(&big), Some(&memory)).unwrap().as_str(), "2G");
     assert_eq!(crate::config::resolve_tmpfs(None, None).unwrap().as_str(), "256M");
+  }
+
+  #[test]
+  fn inspect_failure_is_not_absence() {
+    assert_eq!(classify_inspect("docker", false, false, "", ""), ContainerProbe::Unknown);
+    assert_eq!(classify_inspect("docker", true, false, "", "Error: No such object: x"), ContainerProbe::Absent);
+    assert_eq!(classify_inspect("docker", true, false, "", "Error: No such container: x"), ContainerProbe::Absent);
+    assert_eq!(
+      classify_inspect(
+        "docker",
+        true,
+        false,
+        "",
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock: no such file or directory",
+      ),
+      ContainerProbe::Unknown
+    );
+    assert_eq!(
+      classify_inspect("podman", true, false, "", "Error: no container with name or ID \"x\" found: no such container"),
+      ContainerProbe::Absent
+    );
+    assert_eq!(classify_inspect("container", true, false, "", "no such file or directory"), ContainerProbe::Unknown);
+    assert_eq!(
+      classify_inspect("container", true, false, "", "Error: container not found: scsh-probe"),
+      ContainerProbe::Absent
+    );
+    assert_eq!(classify_inspect("container", true, true, "[]", ""), ContainerProbe::Absent);
+    assert_eq!(classify_inspect("docker", true, true, "[{\"Id\":\"abc\"}]", ""), ContainerProbe::Present);
+  }
+
+  #[test]
+  fn command_output_enforces_its_deadline() {
+    let err = command_output(Command::new("sleep").arg("30"), std::time::Duration::from_millis(200)).unwrap_err();
+    assert!(err.contains("timed out"), "{err}");
+  }
+
+  #[test]
+  fn command_output_drains_full_pipes_while_the_child_runs() {
+    let out = command_output(
+      Command::new("sh")
+        .args(["-c", "i=0; while [ $i -lt 10000 ]; do echo abcdefghijklmnopqrstuvwxyz; i=$((i+1)); done"]),
+      std::time::Duration::from_secs(3),
+    )
+    .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout.len(), 270_000);
+  }
+
+  #[test]
+  fn inspect_empty_or_malformed_success_is_not_proof_of_absence() {
+    for text in ["", "null", "garbage"] {
+      assert_eq!(classify_inspect("docker", true, true, text, ""), ContainerProbe::Unknown);
+    }
+    assert_eq!(
+      classify_inspect("docker", true, false, "", "cannot open /tmp/no such container: socket"),
+      ContainerProbe::Unknown
+    );
   }
 
   #[test]

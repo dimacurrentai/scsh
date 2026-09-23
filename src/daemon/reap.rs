@@ -121,7 +121,7 @@ pub fn reap_pass(
     decide_reaps(&unclaimed, &mut counts)
   };
   for (rt, name) in &victims {
-    crate::ui::signals::stop_container(rt, name);
+    let _ = crate::ui::signals::stop_container(rt, name);
     eprintln!("scsh daemon: reaped orphaned container {name} ({rt})");
   }
   if !victims.is_empty() {
