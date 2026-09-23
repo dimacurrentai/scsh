@@ -296,6 +296,11 @@ fn tokens_json(tokens: Option<&Tokens>) -> Value {
 
 #[derive(Default)]
 struct Conversation {
+  /// Every event so far is a tool hook using the conversation id as generation id.
+  child_tools_only: bool,
+  /// At least one tool hook explicitly lacked a transcript, as child startup does.
+  /// Later child hooks can name a transcript without supplying separate accounting.
+  has_child_marker: bool,
   generations: BTreeSet<String>,
   /// Most recent event generation, used to recognize Cursor's trailing response hook.
   active_generation: Option<String>,
@@ -325,7 +330,16 @@ pub fn cursor_hook_summary(stream: &str) -> Summary {
     };
     let id =
       string(&event, "conversation_id").or_else(|| string(&event, "session_id")).unwrap_or("session").to_string();
-    let conversation = conversations.entry(id).or_default();
+    let conversation = conversations
+      .entry(id.clone())
+      .or_insert_with(|| Conversation { child_tools_only: true, ..Conversation::default() });
+    // Cursor child streams initially report a null transcript and use their
+    // conversation id as generation id, even after a transcript becomes available.
+    // Missing metadata alone is not evidence of a child.
+    conversation.child_tools_only &=
+      event_name == "postToolUse" && string(&event, "generation_id") == Some(id.as_str());
+    conversation.has_child_marker |=
+      event_name == "postToolUse" && matches!(field(&event, "transcript_path"), Some(Value::Null));
     if matches!(event_name, "afterAgentResponse" | "stop" | "postToolUse") {
       if let Some(generation) = string(&event, "generation_id") {
         conversation.generations.insert(generation.to_string());
@@ -390,22 +404,22 @@ pub fn cursor_hook_summary(stream: &str) -> Summary {
     .map(|c| if !c.generations.is_empty() { c.generations.len() as u64 } else { c.responses })
     .sum();
   let tool_calls = conversations.values().map(|c| c.tools.len() as u64).sum();
-  let tokens = conversations.values().try_fold(
-    Tokens { input: 0, output: 0, cache_read: 0, cache_write: Some(0) },
-    |mut total, c| {
+  let accounting: Vec<_> = conversations.values().filter(|c| !(c.child_tools_only && c.has_child_marker)).collect();
+  let tokens =
+    accounting.iter().try_fold(Tokens { input: 0, output: 0, cache_read: 0, cache_write: Some(0) }, |mut total, c| {
       let t = c.tokens.as_ref()?;
       total.input = total.input.checked_add(t.input).filter(|n| *n <= 9_007_199_254_740_991)?;
       total.output = total.output.checked_add(t.output).filter(|n| *n <= 9_007_199_254_740_991)?;
       total.cache_read = total.cache_read.checked_add(t.cache_read).filter(|n| *n <= 9_007_199_254_740_991)?;
       total.cache_write = Some(total.cache_write?.checked_add(t.cache_write?).filter(|n| *n <= 9_007_199_254_740_991)?);
       Some(total)
-    },
-  );
-  let tokens = tokens.filter(|_| !conversations.is_empty() && invalid == 0);
+    });
+  let tokens = tokens.filter(|_| !accounting.is_empty() && invalid == 0);
   let complete = tokens.is_some()
     && invalid == 0
-    && !conversations.is_empty()
-    && conversations.values().all(|c| c.stopped && c.tokens.is_some() && !c.missing_tool_id);
+    && !accounting.is_empty()
+    && accounting.iter().all(|c| c.stopped && c.tokens.is_some())
+    && conversations.values().all(|c| !c.missing_tool_id);
   Summary {
     harness: Harness::Cursor,
     complete,
@@ -898,6 +912,46 @@ mod tests {
     assert_eq!(summary.tool_calls, Some(2));
     assert!(summary.phrase().contains("190 output tokens"));
     assert!(summary.phrase().contains("3 LLM calls"));
+  }
+
+  #[test]
+  fn cursor_child_tools_do_not_require_separate_token_totals() {
+    // Reduced from job awsoof: children emit only tools, with null transcripts.
+    let children = r#"{"hook_event_name":"postToolUse","conversation_id":"child1","generation_id":"child1","transcript_path":null,"tool_use_id":"a"}
+{"hook_event_name":"postToolUse","conversation_id":"child2","generation_id":"child2","transcript_path":null,"tool_use_id":"b"}
+{"hook_event_name":"postToolUse","conversation_id":"child3","generation_id":"child3","transcript_path":null,"tool_use_id":"c"}
+{"hook_event_name":"postToolUse","conversation_id":"child1","generation_id":"child1","transcript_path":"child1.jsonl","tool_use_id":"d"}
+"#;
+    let stream = format!("{children}{HOOKS}");
+    let summary = cursor_hook_summary(&stream);
+    assert!(summary.complete);
+    assert_eq!(summary.tokens, cursor_hook_summary(HOOKS).tokens);
+    assert_eq!(summary.tool_calls, Some(6));
+    assert_eq!(summary.llm_round_trips, Some(6));
+    assert!(!cursor_hook_summary(children).complete, "children alone cannot authorize shutdown");
+    assert_eq!(cursor_hook_summary(children).tokens, None);
+    for altered in [
+      stream.replace("\"transcript_path\":null,", ""),
+      stream.replace("\"transcript_path\":null", "\"transcript_path\":\"parent.jsonl\""),
+      stream.replace("\"generation_id\":\"child1\"", "\"generation_id\":\"other\""),
+      stream.replace("\"tool_use_id\":\"a\"", "\"unused\":\"a\""),
+      stream.lines().filter(|line| !line.contains("\"stop\"")).collect::<Vec<_>>().join("\n"),
+    ] {
+      assert!(!cursor_hook_summary(&altered).complete, "unproven completion must still block shutdown");
+    }
+  }
+
+  #[test]
+  fn cursor_child_shape_cannot_hide_an_incomplete_accounted_conversation() {
+    let child = r#"{"hook_event_name":"postToolUse","conversation_id":"child","generation_id":"child","transcript_path":null,"tool_use_id":"a"}
+"#;
+    let response = r#"{"hook_event_name":"afterAgentResponse","conversation_id":"child","generation_id":"child"}
+"#;
+    for stream in [format!("{HOOKS}{child}{response}"), format!("{HOOKS}{response}{child}")] {
+      let summary = cursor_hook_summary(&stream);
+      assert!(!summary.complete);
+      assert_eq!(summary.tokens, None);
+    }
   }
 
   #[test]
