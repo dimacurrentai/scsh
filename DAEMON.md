@@ -519,6 +519,7 @@ steps:
   sort_fruits:                    # sort_fruits and sort_vegetables run in parallel
     needs: categorize             # DAG edge (comma-separated for several)
     memory: 8G                    # optional run-container limit
+    tmpfs: 256M                   # optional cap for the container's ephemeral /tmp
     agent:
       harness: claude
       model: sonnet
@@ -543,6 +544,9 @@ steps:
   available). The step prompt should tell the agent what to commit.
 - **`memory: 8G`** — optional run-container limit for a resource-heavy step. Use a positive
   integer with an `M` or `G` suffix. When omitted, each runtime keeps its existing default.
+- **`tmpfs: 256M`** — optional cap for the ephemeral `/tmp` mounted in that step's container.
+  Same `M`/`G` grammar. It must be smaller than the step's memory limit, or smaller than
+  `1536M` when `memory:` is omitted. The default is `256M`. A host step cannot set it.
 
 Every `inputs:`/`when:` reference must resolve to a declared param or an upstream step's declared
 output field, and any referenced step must be in `needs:` — checked when the definition is

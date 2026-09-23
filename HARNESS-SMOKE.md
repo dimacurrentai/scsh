@@ -36,7 +36,7 @@ these harnesses.
 3. **Profile exists.** `$SCSH check-profile harness-smoke`
    - **Predict:** exit 0, prints `profile 'harness-smoke' has 3 skills`.
 
-4. **Run** (kept run dirs help post-mortem). `SCSH_KEEP_RUNS=1 $SCSH run --profile harness-smoke`
+4. **Run.** `$SCSH run --profile harness-smoke`
    - **Predict:** exit 0. Each *available* harness prints `✓ <harness>: harness-smoke-<route>`.
      Unavailable harnesses print an `N/A`/skip line and do **not** fail the run.
 
@@ -71,8 +71,61 @@ cd /path/to/scsh
 | Run | `scsh run --profile harness-smoke` exits 0 (skipped harnesses don't fail it) |
 | Results | Every present `tmp/harness-smoke-<route>.json` has `result.status == "OK"`, ≥1 present |
 
-**Overall PASS** = all three rows pass. On failure, inspect the kept run dir (`SCSH_KEEP_RUNS=1`
-prints the path) and its `tmp/scsh-run.log`, or the persisted log in `tmp/logs/<stem>.log`.
+**Overall PASS** = all three rows pass. On failure, inspect the persisted log under
+`~/.scsh/sessions/<id>/logs/` (the run clone is removed when the attempt finishes).
+
+## Ephemeral /tmp
+
+After a harness image exists (`scsh build-images`, or a previous run built it):
+
+```sh
+(
+set -eu
+runtime=docker   # or: container, podman
+probe="scsh-tmpfs-probe-$$"
+cleanup_probe() {
+  if [ "$runtime" = container ]; then
+    "$runtime" stop "$probe" 2>/dev/null || true
+    "$runtime" delete "$probe" 2>/dev/null || true
+  else
+    "$runtime" rm -f "$probe" 2>/dev/null || true
+  fi
+}
+trap cleanup_probe EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"$runtime" run --rm --name "$probe" --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 \
+  scsh-claude:latest /bin/sh -ec '
+    test "$(id -u)" != 0
+    test "$(stat -f -c %T /tmp)" = tmpfs
+    test "$(stat -c %a /tmp)" = 1777
+    test "$(stat -f -c %b /tmp)" -eq 65536
+    test "$(stat -f -c %S /tmp)" -eq 4096
+    touch /tmp/scsh-tmpfs-probe
+  '
+"$runtime" run --rm --name "$probe" --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 \
+  scsh-claude:latest /bin/sh -ec 'test ! -e /tmp/scsh-tmpfs-probe'
+cleanup_probe
+trap - EXIT INT TERM
+)
+```
+
+**Predict:** both commands exit zero: the filesystem type is `tmpfs`, its capacity
+is 256 MiB, `mode` is `1777`, `touch` succeeds as the image's agent user, and a second
+`run` does not see `/tmp/scsh-tmpfs-probe`. The real `scsh run` argv is
+`--tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777`. This checks the mount. It does not
+reproduce a guest root that returned EROFS.
+
+The network-free cleanup regression tests cover setup failures before cloning,
+artifact-copy failure and retry, a key-channel sibling directory, protection of
+a live runner's commits, commit recovery after clone removal, and an interrupted
+runner whose container survives. Run them with `cargo test cleanup::tests`.
+Runtime deadline and inspection parsing tests live in `src/runtime.rs`.
+
+After a real `scsh` run, use `scsh prune` to inspect any outstanding ownership
+records. Successful teardown leaves neither the attempt's system-temp run directory
+nor its key-channel directory. A copy or engine failure must be reported as pending;
+once corrected, `scsh prune --now` retries cleanup without rerunning the harness.
 
 ## For agents
 

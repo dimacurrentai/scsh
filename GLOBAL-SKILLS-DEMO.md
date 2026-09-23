@@ -110,16 +110,10 @@ and the greeting; `no .skills in the repo: PASS`; `repo still clean: PASS`.
 
 ## 8. (Optional) See the global install with your own eyes
 
-Re-run step 6 with `SCSH_KEEP_RUNS=1`, then inspect the kept run clone under `/tmp`:
-
-```sh
-SCSH_KEEP_RUNS=1 scsh run --override-dot-scsh-yml "$DEMO_ROOT/bundle/.scsh.yml"
-ls /tmp/scsh-*-run-*/tmp/.claude-auth/.claude/skills/greet/ 2>/dev/null || ls /tmp/scsh-*-run-*/tmp/.cursor/skills/greet/ 2>/dev/null
-```
-
-**Expect:** `SKILL.md` — sitting in the harness's **user-level skills directory** (what the
-container sees as `$CLAUDE_CONFIG_DIR/skills/…` / `$CURSOR_CONFIG_DIR/skills/…`), not in the
-repository. Clean up the kept clones afterwards: `rm -rf /tmp/scsh-*-run-*`.
+The run clone is removed when the attempt finishes. The recording under
+`~/.scsh/sessions/` is what shows the skill landing in the harness's user-level skills
+directory (`$CLAUDE_CONFIG_DIR/skills/…` or `$CURSOR_CONFIG_DIR/skills/…`), not in the
+repository.
 
 ## 9. Cleanup
 

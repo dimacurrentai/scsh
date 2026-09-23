@@ -38,7 +38,7 @@ echo "=== check-profile ==="
 echo ""
 echo "=== run (profile harness-smoke) using $SCSH ==="
 run_exit=0
-SCSH_KEEP_RUNS=1 "$SCSH" run --profile harness-smoke || run_exit=$?
+"$SCSH" run --profile harness-smoke || run_exit=$?
 
 # Step 5: validate every result file the run produced (≥1 required, each must be status OK).
 echo ""
