@@ -439,7 +439,7 @@ pub const AGENT_REPO: &str = "/home/agent/repo";
 
 /// Apple Container gives each Linux VM 1 GiB by default; harness workloads need a little more
 /// headroom while still keeping the per-run allocation explicit and bounded.
-const APPLE_CONTAINER_MEMORY: &str = "1536M";
+const APPLE_CONTAINER_MEMORY: &str = crate::config::DEFAULT_CONTAINER_MEMORY;
 
 /// opencode's data dir (`XDG_DATA_HOME`), RELATIVE to the repo, where scsh drops the forwarded
 /// Per-run log path the harness tees every line of its output to, RELATIVE to the repo. It
@@ -1374,8 +1374,9 @@ pub enum RepoMountMode {
 /// `container`) map the UID directly and need no such flag.
 #[allow(clippy::too_many_arguments)]
 pub fn run_command(
-  runtime: &str, tag: &str, run_dir: &str, name: &str, memory: Option<&MemoryLimit>, env: &[(String, String)],
-  volumes: &[(&str, &str)], key_channel: Option<&str>, command: &str, repo_mount: RepoMountMode,
+  runtime: &str, tag: &str, run_dir: &str, name: &str, memory: Option<&MemoryLimit>, tmpfs: &crate::config::TmpfsLimit,
+  env: &[(String, String)], volumes: &[(&str, &str)], key_channel: Option<&str>, command: &str,
+  repo_mount: RepoMountMode,
 ) -> Vec<String> {
   let mut v = vec![runtime.into(), "run".into(), "--rm".into(), "--name".into(), name.into()];
   if let Some(memory) = memory {
@@ -1385,6 +1386,11 @@ pub fn run_command(
     v.push("--memory".into());
     v.push(APPLE_CONTAINER_MEMORY.into());
   }
+  // Ephemeral /tmp for every harness. The repository mount is never scratch, and the
+  // VM root disk is not either: Claude's Bash capture dir and every other CLI's
+  // temp files land here and disappear with the container.
+  v.push("--tmpfs".into());
+  v.push(tmpfs.mount_arg());
   if runtime == "podman" {
     v.push("--userns=keep-id".into());
   }
@@ -3425,6 +3431,7 @@ TAG
         "/tmp/run",
         "run-s",
         None,
+        &crate::config::default_tmpfs(),
         &[],
         &[],
         None,
@@ -3437,6 +3444,8 @@ TAG
         "--rm",
         "--name",
         "run-s",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
         "-v",
         "/tmp/run:/home/agent/repo",
         "scsh-opencode:latest",
@@ -3452,6 +3461,7 @@ TAG
         "/tmp/run",
         "run-s",
         None,
+        &crate::config::default_tmpfs(),
         &[],
         &[],
         None,
@@ -3466,6 +3476,8 @@ TAG
         "run-s",
         "--memory",
         "1536M",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
         "-v",
         "/tmp/run/tmp:/home/agent/repo/tmp",
         "scsh-opencode:latest",
@@ -3481,6 +3493,7 @@ TAG
         "/tmp/run",
         "run-s",
         None,
+        &crate::config::default_tmpfs(),
         &[],
         &[("/home/u/.claude", "/home/agent/.claude:ro")],
         Some("/tmp/run.keys"),
@@ -3493,6 +3506,8 @@ TAG
         "--rm",
         "--name",
         "run-s",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
         "--userns=keep-id",
         "-v",
         "/home/u/.claude:/home/agent/.claude:ro",
@@ -3515,6 +3530,7 @@ TAG
         "/tmp/run",
         "run-s",
         None,
+        &crate::config::default_tmpfs(),
         &[],
         &[],
         None,
@@ -3527,6 +3543,8 @@ TAG
         "--rm",
         "--name",
         "run-s",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
         "-v",
         "/tmp/run:/home/agent/repo",
         "scsh-opencode:latest",
@@ -3547,6 +3565,7 @@ TAG
         "/tmp/run",
         "run-s",
         None,
+        &crate::config::default_tmpfs(),
         &env,
         &[],
         None,
@@ -3559,6 +3578,8 @@ TAG
         "--rm",
         "--name",
         "run-s",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
         "-e",
         "A=20",
         "-e",
@@ -3583,6 +3604,7 @@ TAG
         "/tmp/run",
         "run-s",
         Some(&memory),
+        &crate::config::default_tmpfs(),
         &[],
         &[],
         None,
@@ -3591,7 +3613,17 @@ TAG
       );
       assert_eq!(&command[5..7], ["--memory", "8G"], "{runtime}");
       assert_eq!(command.iter().filter(|arg| arg.as_str() == "--memory").count(), 1, "{runtime}");
+      assert!(command.iter().any(|arg| arg == "/tmp:rw,nosuid,nodev,size=256m,mode=1777"), "{runtime}");
     }
+  }
+
+  #[test]
+  fn tmpfs_mount_is_rejected_when_it_is_not_smaller_than_memory() {
+    let big = crate::config::TmpfsLimit::parse("2G").unwrap();
+    assert!(crate::config::resolve_tmpfs(Some(&big), None).is_err());
+    let memory = MemoryLimit::parse("8G").unwrap();
+    assert_eq!(crate::config::resolve_tmpfs(Some(&big), Some(&memory)).unwrap().as_str(), "2G");
+    assert_eq!(crate::config::resolve_tmpfs(None, None).unwrap().as_str(), "256M");
   }
 
   #[test]
@@ -3791,6 +3823,7 @@ TAG
         model: Some("openai/gpt-5.5".into()),
         effort: None,
         memory: None,
+        tmpfs: None,
         profile: None,
         commits: false,
         commit_identity: None,
@@ -3812,6 +3845,7 @@ TAG
         model: Some("sonnet".into()),
         effort: None,
         memory: None,
+        tmpfs: None,
         profile: None,
         commits: false,
         commit_identity: None,
@@ -3833,6 +3867,7 @@ TAG
         model: None,
         effort: None,
         memory: None,
+        tmpfs: None,
         profile: None,
         commits: false,
         commit_identity: None,
@@ -3891,6 +3926,7 @@ TAG
       model: None,
       effort: None,
       memory: None,
+      tmpfs: None,
       profile: None,
       commits: false,
       commit_identity: None,

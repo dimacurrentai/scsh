@@ -83,6 +83,9 @@ pub mod reason {
   /// transient because a container harness can fail for reasons another attempt may not hit: a
   /// host command is deterministic, and re-running it would only spend the same wall clock again.
   pub const HOST_STEP_NONZERO: &str = "host_step_nonzero";
+  /// `tmpfs:` is larger than the container memory it has to fit inside. A config
+  /// error: another attempt would refuse it the same way.
+  pub const TMPFS: &str = "tmpfs_invalid";
 }
 
 const LOG_NAME: &str = "failures.log";
@@ -747,6 +750,7 @@ mod tests {
     assert!(!is_transient(reason::ENV_UNRESOLVED));
     assert!(!is_transient(reason::RESULT_MISSING));
     assert!(!is_transient(reason::BUILD_FAILED));
+    assert!(!is_transient(reason::TMPFS));
     assert!(harness_reported_overload("API Error: service overloaded; try again later"));
     assert!(harness_reported_overload("HTTP 429: Too Many Requests"));
     assert!(harness_reported_overload("status 529"));
