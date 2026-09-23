@@ -474,6 +474,22 @@ mod completion_tests {
   }
 
   #[test]
+  fn cursor_child_tools_allow_parent_accounting_to_release_shutdown() {
+    let run = Run::new();
+    std::fs::write(run.artifact("cursor-hooks.jsonl"), r#"{"hook_event_name":"postToolUse","conversation_id":"child","generation_id":"child","transcript_path":null,"tool_use_id":"t1"}
+{"hook_event_name":"afterAgentResponse","conversation_id":"parent","generation_id":"g","input_tokens":853434,"output_tokens":12287,"cache_read_tokens":640384,"cache_write_tokens":0}
+{"hook_event_name":"stop","conversation_id":"parent","generation_id":"g","status":"completed","input_tokens":853434,"output_tokens":12287,"cache_read_tokens":640384,"cache_write_tokens":0}
+"#).unwrap();
+    let mut completion = Completion::new();
+    assert!(run.poll(&mut completion, Agent::Cursor, true));
+    assert!(run.artifact("shutdown").exists());
+    assert!(!run.artifact("usage-error").exists());
+    let saved = Summary::from_json(&std::fs::read_to_string(run.artifact("usage-final")).unwrap()).unwrap();
+    assert!(saved.complete);
+    assert_eq!(saved.tokens.unwrap().input, 213_050);
+  }
+
+  #[test]
   fn a_live_cursor_turn_after_the_result_does_not_start_the_deadline() {
     let run = Run::new();
     std::fs::write(
