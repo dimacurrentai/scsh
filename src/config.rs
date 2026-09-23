@@ -50,6 +50,11 @@ impl Default for Terminal {
   }
 }
 
+/// Memory scsh gives an Apple container when a step does not set `memory:`. A `tmpfs:`
+/// cap is compared with this when no explicit memory limit is present, so a scratch
+/// mount cannot be as large as the smallest VM scsh launches.
+pub const DEFAULT_CONTAINER_MEMORY: &str = "1536M";
+
 /// A validated container-memory limit (`1536M`, `8G`). Workflow definitions may opt a
 /// resource-heavy step into more memory without weakening the bounded Apple Container default.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,16 +62,80 @@ pub struct MemoryLimit(String);
 
 impl MemoryLimit {
   pub fn parse(value: &str) -> Option<MemoryLimit> {
-    let value = value.trim();
-    let (amount, unit) =
-      if let Some(amount) = value.strip_suffix('M') { (amount, 'M') } else { (value.strip_suffix('G')?, 'G') };
-    let amount = amount.parse::<u64>().ok()?;
-    (amount > 0).then(|| MemoryLimit(format!("{amount}{unit}")))
+    parse_size_unit(value).map(MemoryLimit)
   }
 
   pub fn as_str(&self) -> &str {
     &self.0
   }
+
+  /// Size in bytes. `M` and `G` are mebibytes and gibibytes, matching the `size=`
+  /// suffix a tmpfs mount reports (`256m` = 262144 KiB).
+  pub fn bytes(&self) -> Option<u64> {
+    size_bytes(&self.0)
+  }
+}
+
+/// Candidate default for the ephemeral `/tmp` mount inside a harness container.
+pub const DEFAULT_TMPFS: &str = "256M";
+
+/// A validated cap for the container's ephemeral `/tmp` (`256M`, `1G`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmpfsLimit(String);
+
+impl TmpfsLimit {
+  pub fn parse(value: &str) -> Option<TmpfsLimit> {
+    parse_size_unit(value).map(TmpfsLimit)
+  }
+
+  pub fn as_str(&self) -> &str {
+    &self.0
+  }
+
+  pub fn bytes(&self) -> Option<u64> {
+    size_bytes(&self.0)
+  }
+
+  /// `--tmpfs` value: a writable sticky `/tmp` with an explicit size cap.
+  pub fn mount_arg(&self) -> String {
+    format!("/tmp:rw,nosuid,nodev,size={},mode=1777", self.0.to_ascii_lowercase())
+  }
+}
+
+pub fn default_tmpfs() -> TmpfsLimit {
+  TmpfsLimit::parse(DEFAULT_TMPFS).expect("256M is a valid tmpfs cap")
+}
+
+/// The cap a container will actually mount. An omitted request uses [`DEFAULT_TMPFS`].
+/// The result must be strictly smaller than the container's memory: the explicit
+/// `memory:` when set, otherwise [`DEFAULT_CONTAINER_MEMORY`].
+pub fn resolve_tmpfs(requested: Option<&TmpfsLimit>, memory: Option<&MemoryLimit>) -> Result<TmpfsLimit, String> {
+  let tmpfs = requested.cloned().unwrap_or_else(default_tmpfs);
+  let bound = memory.cloned().or_else(|| MemoryLimit::parse(DEFAULT_CONTAINER_MEMORY)).expect("1536M");
+  let tmpfs_bytes = tmpfs.bytes().ok_or_else(|| format!("tmpfs {} overflowed", tmpfs.as_str()))?;
+  let bound_bytes = bound.bytes().ok_or_else(|| format!("memory {} overflowed", bound.as_str()))?;
+  if tmpfs_bytes >= bound_bytes {
+    Err(format!("tmpfs {} is not smaller than the container memory {}", tmpfs.as_str(), bound.as_str()))
+  } else {
+    Ok(tmpfs)
+  }
+}
+
+fn parse_size_unit(value: &str) -> Option<String> {
+  let value = value.trim();
+  let (amount, unit) =
+    if let Some(amount) = value.strip_suffix('M') { (amount, 'M') } else { (value.strip_suffix('G')?, 'G') };
+  let amount = amount.parse::<u64>().ok()?;
+  (amount > 0 && size_bytes(&format!("{amount}{unit}")).is_some()).then(|| format!("{amount}{unit}"))
+}
+
+fn size_bytes(value: &str) -> Option<u64> {
+  let (amount, scale) = if let Some(amount) = value.strip_suffix('M') {
+    (amount, 1024u64 * 1024)
+  } else {
+    (value.strip_suffix('G')?, 1024u64 * 1024 * 1024)
+  };
+  amount.parse::<u64>().ok()?.checked_mul(scale)
 }
 
 /// One manifest row in `.scsh.yml`. The key must match the `.skills/<name>/` folder.
@@ -96,6 +165,9 @@ pub struct Skill {
   /// Consecutive identical failures before the retry circuit breaker trips
   /// (`retry_signature_cap: 3`; `None` = default).
   pub retry_signature_cap: Option<u32>,
+  /// Ephemeral `/tmp` cap for this skill's container. `None` uses [`DEFAULT_TMPFS`].
+  /// A route's own `tmpfs:` overrides it. Must stay smaller than the container memory.
+  pub tmpfs: Option<TmpfsLimit>,
   pub env: Vec<EnvVar>,
   /// Default profile for direct runs, or for matrix routes that omit their own `profile:`.
   pub profile: Option<String>,
@@ -126,6 +198,8 @@ pub struct InvocationRoute {
   pub retry_for: Option<u64>,
   /// When set, overrides the skill-level `retry_signature_cap:` for this route only.
   pub retry_signature_cap: Option<u32>,
+  /// When set, overrides the skill-level `tmpfs:` for this route only.
+  pub tmpfs: Option<TmpfsLimit>,
 }
 
 /// A concrete run invocation after expanding matrix skills — what `scsh run` executes.
@@ -140,6 +214,8 @@ pub struct ResolvedInvocation {
   /// Explicit run-container memory limit. Only workflow steps currently author this;
   /// `None` preserves each runtime's existing default.
   pub memory: Option<MemoryLimit>,
+  /// Ephemeral `/tmp` cap. `None` uses [`DEFAULT_TMPFS`] at launch.
+  pub tmpfs: Option<TmpfsLimit>,
   pub timeout: Option<u64>,
   /// Seconds the recorded screen may stay frozen before the run is killed as inactive
   /// (`None` = harness default via [`effective_inactivity_timeout`] at run time).
@@ -232,6 +308,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       model: default_model(harness, skill.model.clone()),
       effort: effort_for(harness, None),
       memory: None,
+      tmpfs: skill.tmpfs.clone(),
       timeout: skill.timeout,
       inactivity_timeout: skill.inactivity_timeout,
       retry_for: skill.retry_for,
@@ -257,6 +334,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       model: default_model(route.harness, route.model.clone()),
       effort: effort_for(route.harness, route.effort.as_ref()),
       memory: None,
+      tmpfs: route.tmpfs.clone().or_else(|| skill.tmpfs.clone()),
       timeout: skill.timeout,
       inactivity_timeout: route.inactivity_timeout.or(skill.inactivity_timeout),
       retry_for: route.retry_for.or(skill.retry_for),
@@ -743,6 +821,7 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
     "inactivity_timeout",
     "retry_for",
     "retry_signature_cap",
+    "tmpfs",
     "env",
     "profile",
     "commits",
@@ -753,7 +832,7 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
   for (k, _) in fields {
     if !SK.contains(&k.as_str()) {
       errors.push(format!(
-        "unknown key 'skills.{name}.{k}' (allowed: harness, model, effort, timeout, inactivity_timeout, retry_for, retry_signature_cap, env, profile, commits, autoinstall, invocations, result)"
+        "unknown key 'skills.{name}.{k}' (allowed: harness, model, effort, timeout, inactivity_timeout, retry_for, retry_signature_cap, tmpfs, env, profile, commits, autoinstall, invocations, result)"
       ));
     }
   }
@@ -876,6 +955,12 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
   // retry_for / retry_signature_cap: the route's automatic-retry policy overrides.
   let retry_for = parse_retry_for(&fm, &format!("skills.{name}"), errors);
   let retry_signature_cap = parse_retry_signature_cap(&fm, &format!("skills.{name}"), errors);
+  let tmpfs = parse_tmpfs_limit_at(&fm, &format!("skills.{name}"), errors);
+  if let Some(limit) = &tmpfs {
+    if let Err(message) = resolve_tmpfs(Some(limit), None) {
+      errors.push(format!("'skills.{name}.tmpfs' {message}"));
+    }
+  }
 
   // env: optional list/mapping of forwarded variables.
   let env = match fm.get("env").copied() {
@@ -959,6 +1044,7 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
         inactivity_timeout,
         retry_for,
         retry_signature_cap,
+        tmpfs,
         env,
         profile,
         commits,
@@ -1002,8 +1088,27 @@ pub(crate) fn parse_positive_secs_at(
   }
 }
 
-/// Parse one optional workflow-step `memory:` limit. The deliberately small M/G grammar is
-/// accepted by Apple Container, Docker, and Podman and keeps runtime argv portable.
+/// Parse one optional `tmpfs:` cap. Same `M`/`G` grammar as [`MemoryLimit`].
+pub(crate) fn parse_tmpfs_limit_at(
+  fm: &BTreeMap<&str, &Node>, prefix: &str, errors: &mut Vec<String>,
+) -> Option<TmpfsLimit> {
+  match fm.get("tmpfs").copied() {
+    None => None,
+    Some(Node::Map(_)) => {
+      errors.push(format!("'{prefix}.tmpfs' must be a size like 256M or 1G, not a mapping"));
+      None
+    }
+    Some(Node::Scalar(s)) => match TmpfsLimit::parse(s) {
+      Some(limit) => Some(limit),
+      None => {
+        errors.push(format!("'{prefix}.tmpfs' must be a positive size like 256M or 1G (got '{}')", s.trim()));
+        None
+      }
+    },
+  }
+}
+
+/// Parse one optional workflow-step `memory:` limit using the portable M/G grammar.
 pub(crate) fn parse_memory_limit_at(
   fm: &BTreeMap<&str, &Node>, prefix: &str, errors: &mut Vec<String>,
 ) -> Option<MemoryLimit> {
@@ -1110,11 +1215,12 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
       "inactivity_timeout",
       "retry_for",
       "retry_signature_cap",
+      "tmpfs",
     ];
     for (k, _) in fields {
       if !IK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, effort, profile, commits, inactivity_timeout, retry_for, retry_signature_cap)"
+          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, effort, profile, commits, inactivity_timeout, retry_for, retry_signature_cap, tmpfs)"
         ));
       }
     }
@@ -1205,6 +1311,12 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
     let retry_for = parse_retry_for(&fm, &format!("skills.{skill}.invocations.{default_name}"), errors);
     let retry_signature_cap =
       parse_retry_signature_cap(&fm, &format!("skills.{skill}.invocations.{default_name}"), errors);
+    let tmpfs = parse_tmpfs_limit_at(&fm, &format!("skills.{skill}.invocations.{default_name}"), errors);
+    if let Some(limit) = &tmpfs {
+      if let Err(message) = resolve_tmpfs(Some(limit), None) {
+        errors.push(format!("'skills.{skill}.invocations.{default_name}.tmpfs' {message}"));
+      }
+    }
     if let Some(harness) = harness {
       out.push(InvocationRoute {
         name: route_name,
@@ -1216,6 +1328,7 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
         inactivity_timeout,
         retry_for,
         retry_signature_cap,
+        tmpfs,
       });
     }
   }
@@ -1586,6 +1699,32 @@ mod tests {
   s:
 {body}"#
     )
+  }
+
+  #[test]
+  fn tmpfs_sizes_reject_invalid_input_and_routes_override_defaults() {
+    for value in ["0M", "256", "1T", "-2G", "18446744073709551615G"] {
+      assert!(TmpfsLimit::parse(value).is_none(), "{value}");
+    }
+    let cfg = validate(
+      r#"skills:
+  review:
+    tmpfs: 512M
+    result: tmp/{name}.json
+    invocations:
+      a:
+        harness: claude
+      b:
+        harness: claude
+        tmpfs: 1G
+"#,
+    )
+    .unwrap();
+    let runs = expand_skill(&cfg.skills[0], Terminal::default());
+    assert_eq!(runs[0].tmpfs.as_ref().unwrap().as_str(), "512M");
+    assert_eq!(runs[1].tmpfs.as_ref().unwrap().as_str(), "1G");
+    let equal = TmpfsLimit::parse("1536M").unwrap();
+    assert!(resolve_tmpfs(Some(&equal), None).is_err());
   }
 
   #[test]

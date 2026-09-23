@@ -467,6 +467,9 @@ pub struct Step {
   /// Explicit run-container memory limit (`1536M`, `8G`). `None` preserves the runtime
   /// default (including scsh's bounded 1536M Apple Container default).
   pub memory: Option<crate::config::MemoryLimit>,
+  /// Ephemeral `/tmp` inside this step's container (`256M`, `1G`). `None` uses the
+  /// default cap. A host step cannot set it.
+  pub tmpfs: Option<crate::config::TmpfsLimit>,
   /// Who authors this step's `commits: true` work (`commit-identity: runner|notes`). `Notes`
   /// (the default) is the recognizable scsh bot — the special notes author reviewers exclude
   /// from review. `Runner` is the human running the pipeline, inferred from the caller repo's
@@ -536,6 +539,7 @@ impl HarnessDef {
       commits: false,
       autoinstall: false,
       invocations: self.invocations.clone(),
+      tmpfs: None,
       result: format!("tmp/{}_{{name}}.json", self.name),
     }
   }
@@ -1013,6 +1017,7 @@ fn validate_steps(
       "retry_signature_cap",
       "inactivity_timeout",
       "memory",
+      "tmpfs",
       "max-iterations",
       "run",
       "timeout",
@@ -1020,7 +1025,7 @@ fn validate_steps(
     for (k, _) in fields {
       if !SK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, run, timeout, inputs, output, when, needs, artifacts, commits, repeat, do-while, break, max-iterations, retry_for, retry_signature_cap, inactivity_timeout, memory)"
+          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, run, timeout, inputs, output, when, needs, artifacts, commits, repeat, do-while, break, max-iterations, retry_for, retry_signature_cap, inactivity_timeout, memory, tmpfs)"
         ));
       }
     }
@@ -1175,6 +1180,12 @@ fn validate_steps(
     let retry_signature_cap = crate::config::parse_retry_signature_cap(&fm, &step_path, errors);
     let inactivity_timeout = crate::config::parse_positive_secs_at(&fm, &step_path, "inactivity_timeout", errors);
     let memory = crate::config::parse_memory_limit_at(&fm, &step_path, errors);
+    let tmpfs = crate::config::parse_tmpfs_limit_at(&fm, &step_path, errors);
+    if let Some(limit) = &tmpfs {
+      if let Err(message) = crate::config::resolve_tmpfs(Some(limit), memory.as_ref()) {
+        errors.push(format!("'{step_path}.tmpfs' {message}"));
+      }
+    }
 
     if host {
       // A host step runs the caller's own repository, not a throwaway clone: there is no
@@ -1184,6 +1195,7 @@ fn validate_steps(
         ("commits", "a host step runs in the caller's repository — commit from an agent step instead"),
         ("artifacts", "a host step reports through its exit code and output"),
         ("memory", "a host step runs outside any container"),
+        ("tmpfs", "a host step runs outside any container"),
         ("retry_for", "use 'timeout' to bound a host step"),
         ("retry_signature_cap", "use 'timeout' to bound a host step"),
         ("inactivity_timeout", "use 'timeout' to bound a host step"),
@@ -1220,6 +1232,7 @@ fn validate_steps(
         retry_signature_cap,
         inactivity_timeout,
         memory,
+        tmpfs,
       });
     }
   }
@@ -2809,6 +2822,7 @@ steps:
       ("commits", "    commits: true\n"),
       ("artifacts", "    artifacts: notes.txt\n"),
       ("memory", "    memory: 8G\n"),
+      ("tmpfs", "    tmpfs: 1G\n"),
       ("retry_for", "    retry_for: 2h\n"),
       ("inactivity_timeout", "    inactivity_timeout: 600\n"),
     ] {

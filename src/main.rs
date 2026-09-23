@@ -2229,6 +2229,7 @@ fn step_invocation(
     model: config::default_model(agent.harness, agent.model.clone()),
     effort: agent.effort.clone(),
     memory: step.memory.clone(),
+    tmpfs: step.tmpfs.clone(),
     retry_for: step.retry_for,
     retry_signature_cap: step.retry_signature_cap,
     timeout: None,
@@ -4197,19 +4198,25 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
             runtime::RepoMountMode::Full
           };
           let key_channel = (skill.harness == config::Harness::Claude).then(|| format!("{run_dir}.keys"));
-          let run = runtime::run_command(
-            &rt.name,
-            &tag,
-            &run_dir,
-            &name,
-            skill.memory.as_ref(),
-            &env,
-            &vol_refs,
-            key_channel.as_deref(),
-            &cmd,
-            repo_mount,
-          );
-          println!("  run:   {}", runtime::shell_join(&run));
+          match config::resolve_tmpfs(skill.tmpfs.as_ref(), skill.memory.as_ref()) {
+            Ok(tmpfs) => {
+              let run = runtime::run_command(
+                &rt.name,
+                &tag,
+                &run_dir,
+                &name,
+                skill.memory.as_ref(),
+                &tmpfs,
+                &env,
+                &vol_refs,
+                key_channel.as_deref(),
+                &cmd,
+                repo_mount,
+              );
+              println!("  run:   {}", runtime::shell_join(&run));
+            }
+            Err(message) => println!("  run:   (skill would be REFUSED before running — {message})"),
+          }
         }
         Err(message) => println!("  run:   (skill would be REFUSED before running — {message})"),
       }
@@ -6627,12 +6634,21 @@ fn run_one_skill(
     harness
   };
   let repo_mount = if git_transport { runtime::RepoMountMode::TmpOnly } else { runtime::RepoMountMode::Full };
+  let tmpfs = match config::resolve_tmpfs(skill.tmpfs.as_ref(), skill.memory.as_ref()) {
+    Ok(limit) => limit,
+    Err(message) => {
+      spinner.finish_fail(failure::reason::TMPFS, Some(&message));
+      return SkillRun::failed(failure::reason::TMPFS, Some(run_dir_str), Some(log), clone_dir)
+        .with_fail_detail(&message);
+    }
+  };
   let run = runtime::run_command(
     &rt.name,
     &tag,
     &run_dir_str,
     &name,
     skill.memory.as_ref(),
+    &tmpfs,
     &container_env,
     &vol_refs,
     key_channel.as_ref().map(|channel| channel.dir.to_string_lossy()).as_deref(),
@@ -10939,6 +10955,8 @@ fn print_help_defs() {
       artifacts: out.txt   extra files written next to $SCSH_RESULT, copied to the session dir
       commits: true        bring the step's commits back onto the caller's branch (packdiff'd)
       memory: 8G           optional run-container limit; positive integer with M or G suffix
+      tmpfs: 256M          optional cap for the container's ephemeral /tmp; must be smaller
+                           than memory (or 1536M when memory is omitted). Default 256M
       commit-identity:     who authors those commits: `notes` (default — the recognizable scsh
                            bot, excluded from review as the notes author) or `runner` (the
                            person running the pipeline, from this repo's git user.name/email)
@@ -12559,6 +12577,7 @@ steps:
       model: None,
       effort: None,
       memory: None,
+      tmpfs: None,
       timeout: None,
       inactivity_timeout: None,
       retry_for: None,
@@ -13300,6 +13319,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       retry_signature_cap: None,
       inactivity_timeout: Some(3600),
       memory: config::MemoryLimit::parse("8G"),
+      tmpfs: None,
       do_while: None,
       break_loop: false,
       max_iterations: None,
@@ -13341,6 +13361,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       retry_signature_cap: None,
       inactivity_timeout: None,
       memory: None,
+      tmpfs: None,
       do_while: None,
       break_loop: false,
       max_iterations: None,
@@ -13510,6 +13531,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       model: None,
       effort: None,
       memory: None,
+      tmpfs: None,
       timeout: None,
       inactivity_timeout: None,
       retry_for: None,
