@@ -225,7 +225,8 @@ definition declares a `description`, typed `params` (which become environment va
 `steps:` — a DAG where each step runs an agent, writes typed `output` (plus any declared
 `artifacts:` — plain files copied back beside its result, e.g. a `summary.txt`), optional
 `commits: true` (same as a skill — rebase the step's commits onto your branch / packdiff), optional
-`memory: 8G` (an explicit run-container limit; positive integer with an `M` or `G` suffix), and feeds later steps
+`memory: 8G` (an explicit run-container limit; positive integer with an `M` or `G` suffix), optional
+`tmpfs: 256M` (cap for the container's ephemeral `/tmp`, smaller than that memory limit), and feeds later steps
 whose `inputs` bind to `params.NAME` or `stepid.field` (`needs:` gives the edges, `when:` gates a
 step). A step declaring `run: <command>` instead of an `agent` is a **host step**: `scsh` runs that
 command on the host, in your own repository, with no container — the escape hatch for checks that
@@ -541,10 +542,15 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
 - **Least privilege.** The container runs as a non-root `agent` user whose UID/GID
   match yours, so files it writes are owned by you.
 - **Secrets don't linger.** Harness credentials and the GitHub CLI's `hosts.yml` are copied into a run only for its duration and removed afterward. Opt out of GitHub credential forwarding with `SCSH_NO_GH_AUTH=1`.
-- **Scratch is cleaned up.** Each skill's container is `--rm`, and its throwaway clone in
-  the system temp dir is removed after the skill **succeeds**; a **failed** skill's clone is
-  kept for inspection (its path is printed), and clones older than a day are swept at the next
-  run's start. Keep every clone with `SCSH_KEEP_RUNS=1`.
+- **Scratch is cleaned up.** Each skill's container is `--rm`, and `/tmp` inside it is an
+  ephemeral tmpfs. The throwaway clone in the system temp dir is removed after every outcome,
+  once results, logs, and commits have been copied out. Each attempt has an ownership record
+  under `$SCSH_HOME/cleanup/`; the daemon recovers interrupted attempts after their runner
+  exits, preserving selected artifacts and a commit recovery bundle before removing scratch.
+  A failed copy or unverifiable container leaves cleanup pending with its error recorded.
+  Inspect or retry it with `scsh prune` / `scsh prune --now`. Active runners remain protected
+  while they integrate commits. Legacy unregistered clones still use the stale sweep.
+  `SCSH_KEEP_RUNS` is accepted and ignored.
 - **`scsh` itself does nothing outward for you.** It never pushes or publishes. A host step may
   do either when its configured command explicitly says to, just as running that command yourself would.
 
@@ -578,7 +584,7 @@ The one place they are all listed. Host-side knobs, all optional:
 | `SCSH_GIT_TRANSPORT` | auto | `1` forces the git push/clone transport, `0` forces the bind-mount clone (ignored on Apple Containers, which always use the transport). |
 | `SCSH_GIT_HOST` | route gateway | Git-daemon host IP as seen from inside the container. |
 | `SCSH_GIT_PORT` | ephemeral | Git-daemon port on the host. |
-| `SCSH_KEEP_RUNS` | off | `1` keeps every `/tmp/scsh-*-run-*` clone (and skips the stale sweep). |
+| `SCSH_KEEP_RUNS` | ignored | Accepted so older commands still run. Run clones are removed on every outcome; recordings stay under `SCSH_HOME`. |
 | `SCSH_NO_USAGE` | off | `1` skips required native token accounting and its bounded completion wait. |
 | `SCSH_USAGE_ACCOUNTING_TIMEOUT` | `30` (`90` for Cursor) | Seconds to wait for native counters after the turn goes quiet. |
 | `SCSH_REPAIR_RESULT_JSON` | on | `0` requires strict result JSON. Default (or `1`) repairs undefined escapes before schema validation — the same rescue used for agent-authored writes. |

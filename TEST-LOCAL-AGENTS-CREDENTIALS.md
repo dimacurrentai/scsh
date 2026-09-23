@@ -51,8 +51,8 @@ profile.
 3. **Profile exists.** `$SCSH check-profile local-agents-credentials`
    - **Predict:** exit 0, prints `profile 'local-agents-credentials' has 4 skills`.
 
-4. **Run** (kept run dirs help post-mortem).
-   `SCSH_KEEP_RUNS=1 $SCSH run --profile local-agents-credentials`
+4. **Run.**
+   `$SCSH run --profile local-agents-credentials`
    - **Predict:** exit 0. Each *available* route prints
      `✓ <harness>: harness-smoke-creds-<route>`; each unavailable one prints a
      `skipping 'harness-smoke-creds-<route>' — …` warning up front and does **not** fail
@@ -103,9 +103,8 @@ Overall:
 | Chapters | Every fresh cast has a `.chapters.json` sidecar — or cursor is unavailable (then SKIPPED) |
 | Browser | The session shows playable casts (with chapter markers when annotated) |
 
-**Overall PASS** = all five rows pass. On failure, inspect the kept run dir
-(`SCSH_KEEP_RUNS=1` prints the path) and its `tmp/scsh-run.log`, or the persisted log in
-`tmp/logs/<stem>.log`. A route that probed available but failed with an auth error at run
+**Overall PASS** = all five rows pass. On failure, inspect the persisted log under
+`~/.scsh/sessions/<id>/logs/`. A route that probed available but failed with an auth error at run
 time (e.g. `Token refresh failed: 401`) means a stale OAuth token — re-run that tool's
 login command per the gotcha note in [`HUMAN-CONFIG.md`](HUMAN-CONFIG.md).
 
