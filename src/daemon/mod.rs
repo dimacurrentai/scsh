@@ -22,6 +22,7 @@ mod websocket;
 mod workflow;
 
 pub use client::{acquire_launch_permit, post_once, spawn_daemon, Client};
+pub(crate) use paths::pid_alive;
 /// Generate a session id: six lowercase letters (delegates to runtime nonce helper).
 pub fn new_session_id() -> String {
   crate::runtime::random_nonce_6()

@@ -56,6 +56,7 @@ pub struct Server {
   db: Option<Arc<StoreDb>>,
   last_persist: Mutex<Option<Instant>>,
   last_prune_tick: Mutex<Instant>,
+  prune_running: Arc<AtomicBool>,
   ws_hub: Arc<Hub>,
 }
 
@@ -132,6 +133,7 @@ impl Server {
       db,
       last_persist: Mutex::new(None),
       last_prune_tick: Mutex::new(Instant::now()),
+      prune_running: Arc::new(AtomicBool::new(false)),
       ws_hub: Hub::new(),
     }
   }
@@ -141,12 +143,7 @@ impl Server {
     // Record this daemon's mode where the CLI can read it cross-process (redb is exclusive).
     crate::daemon::paths::write_mode_marker(self.port, lock_store(&self.store).mode);
     self.persist_now();
-    {
-      let now = now_unix_secs();
-      let mut queue = self.prune.lock().unwrap_or_else(|e| e.into_inner());
-      let _ = queue.tick(now);
-      queue.save(self.port);
-    }
+    self.start_prune();
 
     // Serve the local machine only. We bind every interface rather than just loopback so a
     // remote caller gets an explicit, readable denial (see [`peer_is_local`]) instead of a
@@ -373,10 +370,25 @@ impl Server {
     }
     *last = Instant::now();
     drop(last);
-    let now = now_unix_secs();
-    let mut queue = self.prune.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = queue.tick(now);
-    queue.save(self.port);
+    self.start_prune();
+  }
+
+  fn start_prune(&self) {
+    if self.prune_running.swap(true, Ordering::SeqCst) {
+      return;
+    }
+    let queue = Arc::clone(&self.prune);
+    let flag = Arc::clone(&self.prune_running);
+    let port = self.port;
+    std::thread::spawn(move || {
+      let _ = catch_unwind(AssertUnwindSafe(|| {
+        crate::cleanup::recover_pending(Instant::now() + crate::cleanup::BUDGET);
+        let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.tick(now_unix_secs());
+        queue.save(port);
+      }));
+      flag.store(false, Ordering::SeqCst);
+    });
   }
 }
 
@@ -3032,7 +3044,7 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   // Tear down outside the store lock: container stop sleeps up to ~1s each.
   if let Some(rt) = runtime.as_deref() {
     for name in &containers {
-      crate::ui::signals::stop_container(rt, name);
+      let _ = crate::ui::signals::stop_container(rt, name);
     }
   }
   if let Some(pid) = run_pid {
@@ -3108,7 +3120,7 @@ fn proc_stop_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>>, 
   }
   // Tear down outside the store lock: container stop sleeps up to ~1s.
   if let (Some(rt), Some(name)) = (runtime.as_deref(), container.as_deref()) {
-    crate::ui::signals::stop_container(rt, name);
+    let _ = crate::ui::signals::stop_container(rt, name);
   }
   if let Some(pid) = annotation_pid {
     signal_run_pid(pid);
@@ -3215,7 +3227,7 @@ fn proc_restart_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>
   }
   // Tear down outside the store lock: container stop sleeps up to ~1s.
   if let (Some(rt), Some(name)) = (runtime.as_deref(), container.as_deref()) {
-    crate::ui::signals::stop_container(rt, name);
+    let _ = crate::ui::signals::stop_container(rt, name);
   }
   let replacement_pending = {
     let mut store = lock_store(store);
@@ -3298,7 +3310,7 @@ fn harness_stop_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>
   }
   for (sid, index, label, container) in &stopped {
     if let (Some(rt), Some(name)) = (runtime.as_deref(), container.as_deref()) {
-      crate::ui::signals::stop_container(rt, name);
+      let _ = crate::ui::signals::stop_container(rt, name);
     }
     let finalized = {
       let mut store = lock_store(store);
@@ -4474,18 +4486,22 @@ mod tests {
 
   #[test]
   fn prune_tick_endpoint_runs_janitor_pass() {
-    let name = "scsh-tickab-run-add";
-    let dir = std::env::temp_dir().join(name);
+    let name = format!("scsh-{}-run-add", crate::runtime::random_nonce_6());
+    let dir = std::env::temp_dir().join(&name);
+    let stub = dir.with_extension("sh");
+    std::fs::write(&stub, "#!/bin/sh\nprintf '[]\\n'\n").unwrap();
+    assert!(std::process::Command::new("chmod").arg("+x").arg(&stub).status().unwrap().success());
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 59999, 50)));
     let prune = Arc::new(Mutex::new(PruneQueue::default()));
     {
       let mut q = prune.lock().unwrap();
-      // Eligible immediately: scheduled far enough in the past that the grace period elapsed.
-      q.schedule(&dir.to_string_lossy(), name, "docker", true, 0);
+      // An explicit empty inspect result proves the container is absent.
+      q.schedule(&dir.to_string_lossy(), &name, &stub.to_string_lossy(), true, 0);
     }
     assert!(handle_api_post("/api/v1/prune/tick", "{}", &store, &prune));
+    let _ = std::fs::remove_file(stub);
     assert!(!dir.exists(), "eligible run dir should be deleted by the forced pass");
     assert!(prune.lock().unwrap().jobs.is_empty());
     let _ = std::fs::remove_file(super::super::paths::prune_file(59999));

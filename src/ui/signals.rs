@@ -221,32 +221,69 @@ fn remove_container_args(runtime: &str, name: &str) -> Vec<String> {
 /// Explicitly remove one named container and its writable layer. This is deliberately issued
 /// even though harness runs use `--rm`: Apple Container can retain a stopped container, and an
 /// interrupted runtime client can leave any engine's container outside `--rm`'s normal path.
-fn remove_container(runtime: &str, name: &str) {
-  let _ = Command::new(runtime)
-    .args(remove_container_args(runtime, name))
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status();
+fn remove_container(runtime: &str, name: &str) -> Result<(), String> {
+  cleanup_command(
+    runtime,
+    &remove_container_args(runtime, name),
+    std::time::Instant::now() + crate::runtime::CLEANUP_COMMAND_DEADLINE,
+  )
 }
 
 /// Stop and explicitly remove one named container: SIGTERM, one-second grace, SIGKILL, then
-/// `delete`/`rm -f`. A missing container returns immediately, keeping normal `--rm` runs cheap.
-pub fn stop_container(runtime: &str, name: &str) {
-  if !crate::runtime::container_named_exists(runtime, name) {
-    return;
-  }
-  signal_container(runtime, name, "TERM");
-  thread::sleep(Duration::from_secs(1));
-  signal_container(runtime, name, "KILL");
-  remove_container(runtime, name);
+/// `delete`/`rm -f`. A container inspection already proved absent returns immediately.
+/// An inspection that failed is not treated as absence: the stop is still attempted, and
+/// the caller hears about it if the container cannot afterwards be shown to be gone.
+pub fn stop_container(runtime: &str, name: &str) -> Result<(), String> {
+  stop_container_until(runtime, name, std::time::Instant::now() + std::time::Duration::from_secs(30))
 }
 
-fn signal_container(runtime: &str, name: &str, sig: &str) {
-  let _ = Command::new(runtime)
-    .args(["kill", "-s", sig, name])
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status();
+pub fn stop_container_until(runtime: &str, name: &str, deadline: std::time::Instant) -> Result<(), String> {
+  if crate::runtime::container_probe_until(runtime, name, deadline) == crate::runtime::ContainerProbe::Absent {
+    return Ok(());
+  }
+  // TERM may race --rm, or fail on an already stopped container. Still attempt removal;
+  // only the final inspection can establish whether teardown is complete.
+  let mut errors = Vec::new();
+  for args in [
+    vec!["kill".into(), "-s".into(), "TERM".into(), name.into()],
+    vec!["kill".into(), "-s".into(), "KILL".into(), name.into()],
+    remove_container_args(runtime, name),
+  ] {
+    if let Err(error) = cleanup_command(runtime, &args, deadline) {
+      errors.push(error);
+    }
+    if args.get(2).is_some_and(|arg| arg == "TERM") {
+      thread::sleep(Duration::from_secs(1).min(deadline.saturating_duration_since(std::time::Instant::now())));
+    }
+  }
+  match crate::runtime::container_probe_until(runtime, name, deadline) {
+    crate::runtime::ContainerProbe::Absent => Ok(()),
+    probe => Err(format!("container {name} cleanup pending ({probe:?}): {}", errors.join("; "))),
+  }
+}
+
+fn cleanup_command(runtime: &str, args: &[String], deadline: std::time::Instant) -> Result<(), String> {
+  let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+  if remaining.is_zero() {
+    return Err("cleanup deadline exceeded".into());
+  }
+  let out = crate::runtime::command_output(
+    Command::new(runtime).args(args),
+    remaining.min(crate::runtime::CLEANUP_COMMAND_DEADLINE),
+  )?;
+  if out.status.success() {
+    Ok(())
+  } else {
+    Err(format!("{runtime} {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()))
+  }
+}
+
+fn signal_container(runtime: &str, name: &str, sig: &str) -> Result<(), String> {
+  cleanup_command(
+    runtime,
+    &["kill".into(), "-s".into(), sig.into(), name.into()],
+    std::time::Instant::now() + crate::runtime::CLEANUP_COMMAND_DEADLINE,
+  )
 }
 
 /// SIGTERM/SIGKILL every registered child and every tracked container — used on Ctrl-C / SIGTERM.
@@ -254,14 +291,14 @@ pub fn terminate_all() {
   let containers = CONTAINERS.lock().map(|v| v.clone()).unwrap_or_default();
   terminate_children();
   for (runtime, name) in &containers {
-    signal_container(runtime, name, "TERM");
+    let _ = signal_container(runtime, name, "TERM");
   }
   if !containers.is_empty() {
     thread::sleep(Duration::from_secs(1));
   }
   for (runtime, name) in &containers {
-    signal_container(runtime, name, "KILL");
-    remove_container(runtime, name);
+    let _ = signal_container(runtime, name, "KILL");
+    let _ = remove_container(runtime, name);
   }
 }
 

@@ -1,17 +1,15 @@
 //! Backup janitor for `/tmp/scsh-*-run-*` dirs — the `scsh run` client deletes first;
 //! the daemon retries later only when the dir still exists and the container is gone.
+//!
+//! Eligibility is immediate. A busy mount or an unverifiable container stays queued and
+//! is retried on the next tick. There is no success grace and no 24-hour failure hold:
+//! those were retention, and a completed attempt's scratch does not get a lifetime.
 
 use std::path::Path;
 
 use super::paths::prune_file;
 use crate::json::{parse, quote, Value};
 use crate::runtime;
-
-/// Seconds after schedule before a successful run dir may be removed (bind-mount teardown).
-pub const PRUNE_GRACE_SECS: u64 = 60;
-
-/// Failed run dirs — same retention as the CLI stale sweep in `main.rs`.
-pub const PRUNE_FAIL_RETENTION_SECS: u64 = 24 * 60 * 60;
 
 const MAX_JOBS: usize = 500;
 
@@ -46,11 +44,9 @@ impl PruneQueue {
     let _ = crate::atomic_write(&path, save_queue(self).as_bytes());
   }
 
-  /// Enqueue a backup delete. Idempotent per `run_dir`. Returns false when skipped (`SCSH_KEEP_RUNS`).
+  /// Enqueue a backup delete. Idempotent per `run_dir`. Returns false when the queue is
+  /// full — an outstanding record is never dropped to make room.
   pub fn schedule(&mut self, run_dir: &str, container_name: &str, runtime: &str, outcome_ok: bool, now: u64) -> bool {
-    if keep_run_dirs() {
-      return false;
-    }
     if run_dir.is_empty() || container_name.is_empty() {
       return false;
     }
@@ -60,38 +56,49 @@ impl PruneQueue {
     if self.jobs.iter().any(|j| j.run_dir == run_dir) {
       return true;
     }
-    let eligible_at =
-      if outcome_ok { now.saturating_add(PRUNE_GRACE_SECS) } else { now.saturating_add(PRUNE_FAIL_RETENTION_SECS) };
+    if self.jobs.len() >= MAX_JOBS {
+      return false;
+    }
     self.jobs.push(PruneJob {
       run_dir: run_dir.to_string(),
       container_name: container_name.to_string(),
       runtime: runtime.to_string(),
       outcome_ok,
       scheduled_at: now,
-      eligible_at,
+      eligible_at: now,
     });
-    trim_jobs(self);
     true
   }
 
   /// Advance the queue: delete eligible dirs that still exist. Returns how many were removed.
   pub fn tick(&mut self, now: u64) -> usize {
-    if keep_run_dirs() {
-      return 0;
-    }
+    let deadline = std::time::Instant::now() + crate::cleanup::BUDGET;
     let mut removed = 0;
     let mut remaining = Vec::with_capacity(self.jobs.len());
     for job in self.jobs.drain(..) {
-      if now < job.eligible_at {
+      if now < job.eligible_at || std::time::Instant::now() >= deadline {
+        remaining.push(job);
+        continue;
+      }
+      // The journal owns artifact preservation and live-run protection. A legacy
+      // orphan event must not bypass it while the host is integrating commits.
+      if crate::cleanup::journal_path(Path::new(&job.run_dir)).exists() {
         remaining.push(job);
         continue;
       }
       if !Path::new(&job.run_dir).is_dir() {
         continue;
       }
+      // A queued job is an attempt the host has already released. If the container is
+      // still there, finish the removal here — waiting does not stop it.
       if container_still_present(&job) {
-        remaining.push(job);
-        continue;
+        if !job.runtime.is_empty() {
+          let _ = crate::ui::signals::stop_container_until(&job.runtime, &job.container_name, deadline);
+        }
+        if container_still_present(&job) {
+          remaining.push(job);
+          continue;
+        }
       }
       if std::fs::remove_dir_all(&job.run_dir).is_ok() {
         removed += 1;
@@ -104,26 +111,17 @@ impl PruneQueue {
   }
 }
 
-fn keep_run_dirs() -> bool {
-  matches!(std::env::var("SCSH_KEEP_RUNS").ok().as_deref(), Some("1") | Some("true"))
-}
-
 fn is_scsh_run_dir_path(run_dir: &str) -> bool {
   Path::new(run_dir).file_name().and_then(|n| n.to_str()).is_some_and(runtime::is_scsh_run_dir_name)
 }
 
-fn trim_jobs(queue: &mut PruneQueue) {
-  while queue.jobs.len() > MAX_JOBS {
-    queue.jobs.remove(0);
-  }
-}
-
 fn container_still_present(job: &PruneJob) -> bool {
-  if job.runtime.is_empty() {
-    runtime::container_named_exists_any(&job.container_name)
+  let probe = if job.runtime.is_empty() {
+    runtime::container_probe_any(&job.container_name)
   } else {
-    runtime::container_named_exists(&job.runtime, &job.container_name)
-  }
+    runtime::container_probe(&job.runtime, &job.container_name)
+  };
+  probe != runtime::ContainerProbe::Absent
 }
 
 pub fn schedule_from_api(body: &str, queue: &mut PruneQueue, now: u64) -> bool {
@@ -224,25 +222,30 @@ mod tests {
   }
 
   #[test]
-  fn ok_jobs_eligible_after_grace() {
-    let name = "scsh-abcdef-run-add";
-    let dir = std::env::temp_dir().join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let run_dir = dir.to_string_lossy().into_owned();
-    let now = 5_000;
+  fn completed_jobs_are_eligible_immediately() {
     let mut q = PruneQueue::default();
-    q.schedule(&run_dir, name, "docker", true, now);
-    assert_eq!(q.tick(now + PRUNE_GRACE_SECS - 1), 0);
-    assert_eq!(q.tick(now + PRUNE_GRACE_SECS), 1);
-    assert!(!dir.exists());
+    for (i, outcome) in [true, false].into_iter().enumerate() {
+      assert!(q.schedule(&format!("/tmp/scsh-abcdef-run-{i}"), "scsh-abcdef-run-add", "docker", outcome, 5000));
+      assert_eq!(q.jobs[i].eligible_at, 5000);
+    }
+  }
+
+  #[test]
+  fn a_full_queue_does_not_drop_an_outstanding_job() {
+    let mut q = PruneQueue::default();
+    for i in 0..MAX_JOBS {
+      assert!(q.schedule(&format!("/tmp/scsh-abcdef-run-n{i}"), "scsh-abcdef-run-add", "docker", true, 1));
+    }
+    assert!(!q.schedule("/tmp/scsh-zzzzzz-run-add", "scsh-abcdef-run-add", "docker", true, 1));
+    assert_eq!(q.jobs.len(), MAX_JOBS);
+    assert_eq!(q.jobs[0].run_dir, "/tmp/scsh-abcdef-run-n0");
   }
 
   #[test]
   fn missing_dir_drops_job_without_error() {
     let mut q = PruneQueue::default();
     q.schedule("/tmp/scsh-no-such-run-add", "scsh-no-such-run-add", "docker", true, 0);
-    assert_eq!(q.tick(PRUNE_GRACE_SECS + 1), 0);
+    assert_eq!(q.tick(1), 0);
     assert!(q.jobs.is_empty());
   }
 

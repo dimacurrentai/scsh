@@ -6,6 +6,7 @@
 //! under its configured harness.
 
 mod annotate;
+mod cleanup;
 mod config;
 mod daemon;
 mod export;
@@ -2885,6 +2886,7 @@ fn run_workflow_step_with_retries(
       && !step.outputs.iter().any(|output| output.name == "SCSH_DO_WHILE_REPEAT"),
   };
   let mut retry = RouteRetryState::new(step.retry_for, step.retry_signature_cap, session_id, &invocation.name);
+  let mut leftover_cleanup: Option<String> = None;
   let mut proc = initial_proc;
   let mut proc_index = proc.index();
   let mut attempts = 0u64;
@@ -2913,6 +2915,7 @@ fn run_workflow_step_with_retries(
     run.attempts = attempts;
     if run.ok {
       daemon::consume_proc_restart(session_id, proc_index);
+      attach_leftover_cleanup(&mut run, leftover_cleanup);
       return run;
     }
 
@@ -2946,18 +2949,19 @@ fn run_workflow_step_with_retries(
       if decision == RetryDecision::StopBreaker {
         retry.mark_breaker_tripped(&mut run);
       }
+      attach_leftover_cleanup(&mut run, leftover_cleanup);
       return run;
     }
 
     let reason = match decision {
-      RetryDecision::Browser => failure::reason::RESTART_REQUESTED,
-      RetryDecision::Schema => failure::reason::RESULT_INVALID,
-      RetryDecision::Startup => failure::reason::STARTUP_STALLED,
-      RetryDecision::LimitWait { .. } => failure::reason::HARNESS_USAGE_LIMIT,
-      RetryDecision::Automatic => run.fail_reason.as_deref().unwrap_or("unknown"),
+      RetryDecision::Browser => failure::reason::RESTART_REQUESTED.to_string(),
+      RetryDecision::Schema => failure::reason::RESULT_INVALID.to_string(),
+      RetryDecision::Startup => failure::reason::STARTUP_STALLED.to_string(),
+      RetryDecision::LimitWait { .. } => failure::reason::HARNESS_USAGE_LIMIT.to_string(),
+      RetryDecision::Automatic => run.fail_reason.clone().unwrap_or_else(|| "unknown".into()),
       RetryDecision::Stop | RetryDecision::StopBreaker => unreachable!("terminal decisions returned above"),
     };
-    failure::log_retry(session_id, &invocation.name, invocation.harness.as_str(), invocation.model.as_deref(), reason);
+    failure::log_retry(session_id, &invocation.name, invocation.harness.as_str(), invocation.model.as_deref(), &reason);
     if decision == RetryDecision::Schema {
       retry.record_immediate_retry();
       schema_retry_used = true;
@@ -2974,12 +2978,8 @@ fn run_workflow_step_with_retries(
       );
       let detail = skill_fail_detail(&why, invocation.harness, run.run_dir.as_deref(), run.log.as_deref());
       proc.finish_fail(failure::reason::RESULT_INVALID, Some(&detail));
-      if !keep_run_dirs() {
-        if let Some(clone) = &run.clone_dir {
-          let _ = std::fs::remove_dir_all(clone);
-        }
-      }
     }
+    abandon_attempt_scratch(&mut run, &rt.name, daemon_client.as_ref(), &mut leftover_cleanup);
 
     let label = format!("{}: {} (retry)", invocation.harness.as_str(), invocation.name);
     let next = ui.proc(label.clone(), false);
@@ -3018,6 +3018,7 @@ fn run_workflow_step_with_retries(
           proc.note("job stopped — not retrying");
           proc.finish_fail(failure::reason::FORCE_STOPPED, Some("stopped from the session browser"));
           run.fail_reason = Some(failure::reason::FORCE_STOPPED.into());
+          attach_leftover_cleanup(&mut run, leftover_cleanup);
           return run;
         }
         BackoffWake::Elapsed => {}
@@ -3036,6 +3037,7 @@ fn run_workflow_step_with_retries(
           proc.note("job stopped \u{2014} not retrying");
           proc.finish_fail(failure::reason::FORCE_STOPPED, Some("stopped from the session browser"));
           run.fail_reason = Some(failure::reason::FORCE_STOPPED.into());
+          attach_leftover_cleanup(&mut run, leftover_cleanup);
           return run;
         }
         BackoffWake::Elapsed => {}
@@ -3290,6 +3292,7 @@ fn run_workflow(
   let mut ran_count = 0usize;
   let mut skipped_count = 0usize;
   let mut failure: Option<String> = None;
+  let mut cleanup_failed = false;
   // Bound concurrent container starts. The daemon grants machine-wide launch slots, so the
   // bound spans every job on the box; this run's own limiter is the fallback without one. A
   // 20-route review otherwise cold-starts every container at once and trips the startup
@@ -3520,9 +3523,14 @@ fn run_workflow(
     // clones, so later steps see earlier commits (the greet fake-PR chain depends on this).
     let mut by_id: HashMap<String, SkillRun> = results.into_iter().collect();
     for (s, run_id) in to_run.iter().zip(&run_ids) {
-      let Some(run) = by_id.remove(run_id) else { continue };
+      let Some(mut run) = by_id.remove(run_id) else { continue };
       if !run.ok {
         failure = Some(format!("step '{}' failed ({})", s.id, run.fail_reason.as_deref().unwrap_or("unknown")));
+        run.release_scratch(rt.map(|runtime| runtime.name.as_str()).unwrap_or(""), daemon_client.as_ref());
+        if let Some(message) = &run.cleanup_pending {
+          cleanup_failed = true;
+          hint(&format!("{}: cleanup pending — {message}", s.id));
+        }
         break;
       }
       match run.workflow_outputs.clone() {
@@ -3552,6 +3560,11 @@ fn run_workflow(
                   harness_def::DO_WHILE_MAX_ITERATIONS
                 ),
               });
+              run.release_scratch(rt.map(|runtime| runtime.name.as_str()).unwrap_or(""), daemon_client.as_ref());
+              if let Some(message) = &run.cleanup_pending {
+                cleanup_failed = true;
+                hint(&format!("{}: cleanup pending — {message}", s.id));
+              }
               break;
             }
             holds
@@ -3670,10 +3683,17 @@ fn run_workflow(
           }
         }
       }
-      if run.ok && !keep_run_dirs() {
-        if let Some(clone) = &run.clone_dir {
-          let _ = std::fs::remove_dir_all(clone);
-        }
+      run.release_scratch(rt.map(|runtime| runtime.name.as_str()).unwrap_or(""), daemon_client.as_ref());
+      if let Some(message) = &run.cleanup_pending {
+        cleanup_failed = true;
+        hint(&format!("{}: cleanup pending — {message}", s.id));
+      }
+    }
+    for (run_id, mut other) in by_id {
+      other.release_scratch(rt.map(|runtime| runtime.name.as_str()).unwrap_or(""), daemon_client.as_ref());
+      if let Some(message) = &other.cleanup_pending {
+        cleanup_failed = true;
+        hint(&format!("{run_id}: cleanup pending — {message}"));
       }
     }
   }
@@ -3692,6 +3712,11 @@ fn run_workflow(
   ui.finish();
   if let Some(msg) = failure {
     fail(&msg);
+    return 1;
+  }
+  if cleanup_failed {
+    fail("cleanup pending — the task outcome is unchanged; the daemon will retry removal");
+    annotate_run_casts(root, session_skill_casts(&session_id), daemon_client.as_deref(), &mut next_annotate_idx);
     return 1;
   }
   if let (Some(from), Some(to)) = (original_caller_tip.as_deref(), caller_tip.as_deref()) {
@@ -5233,23 +5258,28 @@ fn print_skill_aggregates(skill_rows: &[&stats::StatRecord]) {
 fn prune_cmd(now_flag: bool) -> i32 {
   let port = daemon::daemon_port();
   let queue = daemon::prune::PruneQueue::load(port);
+  let recorded = cleanup::pending_descriptions();
   if !now_flag {
-    if queue.jobs.is_empty() {
+    if queue.jobs.is_empty() && recorded.is_empty() {
       ok("run-dir prune queue is empty");
       return 0;
     }
     let now = daemon::now_unix_secs();
-    println!("{} pending run-dir prune job(s):", queue.jobs.len());
+    println!("{} registered cleanup job(s):", queue.jobs.len() + recorded.len());
     for j in &queue.jobs {
       let outcome = if j.outcome_ok { "ok" } else { "failed" };
       let when =
         if now >= j.eligible_at { "eligible now".to_string() } else { format!("eligible in {}s", j.eligible_at - now) };
       println!("  {}  ({outcome} run, {when})", j.run_dir);
     }
+    for pending in &recorded {
+      println!("  {pending}");
+    }
     hint("delete every eligible dir now with: scsh prune --now");
     return 0;
   }
-  let before = queue.jobs.len();
+  let before = queue.jobs.len() + recorded.len();
+  cleanup::recover_pending(Instant::now() + cleanup::BUDGET);
   if daemon::daemon_port_reachable(port) {
     if !daemon::post_once(port, "/api/v1/prune/tick", "{}") {
       fail("session browser daemon is running but rejected the prune request");
@@ -5261,7 +5291,7 @@ fn prune_cmd(now_flag: bool) -> i32 {
     let _ = q.tick(daemon::now_unix_secs());
     q.save(port);
   }
-  let after = daemon::prune::PruneQueue::load(port).jobs.len();
+  let after = daemon::prune::PruneQueue::load(port).jobs.len() + cleanup::pending_descriptions().len();
   ok(&format!("prune pass complete: {before} job(s) before, {after} remaining"));
   0
 }
@@ -5372,7 +5402,7 @@ fn build_and_run(
 
   let (uid, gid) = runtime::host_ids();
   let secs = now_secs();
-  if !keep_run_dirs() {
+  {
     let swept = sweep_stale_run_dirs(secs);
     if swept > 0 {
       hint(&format!("swept {swept} stale run dir{} from /tmp", plural(swept)));
@@ -5577,7 +5607,7 @@ fn build_and_run(
   // Bound concurrent container starts the same way the workflow wave does: daemon-wide slots
   // first, this run's own limiter only without a daemon.
   let launch_limiter = runtime::LaunchLimiter::new(runtime::max_parallel_runs());
-  let outcomes: Vec<SkillRun> = std::thread::scope(|scope| {
+  let mut outcomes: Vec<SkillRun> = std::thread::scope(|scope| {
     let dc = daemon_client.clone();
     let ui_ref = &ui;
     let session_ref = session_id.as_str();
@@ -5591,6 +5621,7 @@ fn build_and_run(
         scope.spawn(move || {
           let _permit = daemon::acquire_launch_permit(dc.as_deref(), limiter, first_index, &|msg| p.note(msg));
           let mut retry = RouteRetryState::new(skill.retry_for, skill.retry_signature_cap, session_ref, &skill.name);
+          let mut leftover_cleanup: Option<String> = None;
           let mut proc = p;
           let mut proc_index = first_index;
           let mut attempts = 0u64;
@@ -5618,6 +5649,7 @@ fn build_and_run(
               // A browser restart that lost the race against this attempt's own finish
               // must not linger and respawn some future proc of the same index.
               daemon::consume_proc_restart(session_ref, proc_index);
+              attach_leftover_cleanup(&mut run, leftover_cleanup);
               return run;
             }
             // A browser Force restart always respawns — each extra attempt costs the user
@@ -5643,9 +5675,13 @@ fn build_and_run(
               run.limit_resets_at,
             );
             match decision {
-              RetryDecision::Stop => return run,
+              RetryDecision::Stop => {
+                attach_leftover_cleanup(&mut run, leftover_cleanup);
+                return run;
+              }
               RetryDecision::StopBreaker => {
                 retry.mark_breaker_tripped(&mut run);
+                attach_leftover_cleanup(&mut run, leftover_cleanup);
                 return run;
               }
               RetryDecision::Browser
@@ -5655,11 +5691,12 @@ fn build_and_run(
               | RetryDecision::Automatic => {}
             }
             let reason = if restart_requested {
-              failure::reason::RESTART_REQUESTED
+              failure::reason::RESTART_REQUESTED.to_string()
             } else {
-              run.fail_reason.as_deref().unwrap_or("unknown")
+              run.fail_reason.clone().unwrap_or_else(|| "unknown".into())
             };
-            failure::log_retry(session_ref, &skill.name, skill.harness.as_str(), skill.model.as_deref(), reason);
+            abandon_attempt_scratch(&mut run, &rt.name, dc.as_ref(), &mut leftover_cleanup);
+            failure::log_retry(session_ref, &skill.name, skill.harness.as_str(), skill.model.as_deref(), &reason);
             let label = format!("{}: {} (retry)", skill.harness.as_str(), skill.name);
             let next = ui_ref.proc(label.clone(), false);
             if let Some(c) = &dc {
@@ -5694,6 +5731,7 @@ fn build_and_run(
                   proc.note("job stopped — not retrying");
                   proc.finish_fail(failure::reason::FORCE_STOPPED, Some("stopped from the session browser"));
                   run.fail_reason = Some(failure::reason::FORCE_STOPPED.into());
+                  attach_leftover_cleanup(&mut run, leftover_cleanup);
                   return run;
                 }
                 BackoffWake::Elapsed => {}
@@ -5712,6 +5750,7 @@ fn build_and_run(
                   proc.note("job stopped \u{2014} not retrying");
                   proc.finish_fail(failure::reason::FORCE_STOPPED, Some("stopped from the session browser"));
                   run.fail_reason = Some(failure::reason::FORCE_STOPPED.into());
+                  attach_leftover_cleanup(&mut run, leftover_cleanup);
                   return run;
                 }
                 BackoffWake::Elapsed => {}
@@ -5796,9 +5835,6 @@ fn build_and_run(
   let n = outcomes.len();
   let failed = outcomes.iter().filter(|o| !o.ok).count();
   for (skill, o) in skills.iter().zip(outcomes.iter()).filter(|(_, o)| !o.ok) {
-    if let Some(dir) = &o.run_dir {
-      hint(&format!("run dir kept: {dir}"));
-    }
     if let Some(log) = &o.log {
       hint(&format!("output log: {log}"));
     }
@@ -5926,15 +5962,15 @@ fn build_and_run(
     }
   }
 
-  // 5. Tidy up. A successful skill's clone has served its purpose — the result was
-  //    collected and any commits integrated — so remove it (the container was already
-  //    `--rm`; this is the host-side scratch). A FAILED skill's clone is kept for
-  //    inspection (its path was printed above). Opt out entirely with SCSH_KEEP_RUNS=1.
-  if !keep_run_dirs() {
-    for o in outcomes.iter().filter(|o| o.ok) {
-      if let Some(clone) = &o.clone_dir {
-        let _ = std::fs::remove_dir_all(clone);
-      }
+  // 5. Tidy up. Results, logs, and commits have been copied out. Every attempt's clone
+  //    goes, success or failure. A delete that cannot prove the container is gone stays
+  //    pending and is retried by the daemon; it does not change the skill's own outcome.
+  let mut cleanup_pending = 0usize;
+  for (skill, o) in skills.iter().zip(outcomes.iter_mut()) {
+    o.release_scratch(&rt.name, daemon_client.as_ref());
+    if let Some(message) = &o.cleanup_pending {
+      cleanup_pending += 1;
+      hint(&format!("{}: cleanup pending — {message}", skill.name));
     }
   }
 
@@ -5948,11 +5984,19 @@ fn build_and_run(
   // Annotate while the client is still registered (before DaemonSession drop / finish_session).
   annotate_run_casts(root, session_skill_casts(&session_id), daemon_session.client.as_deref(), &mut next_annotate_idx);
 
-  if failed == 0 {
+  if cleanup_pending > 0 {
+    fail(&format!(
+      "{cleanup_pending} of {n} skill{} left scratch behind (the task outcome is unchanged; the daemon will retry removal)",
+      plural(cleanup_pending)
+    ));
+  }
+  if failed == 0 && cleanup_pending == 0 {
     ok(&format!("all {n} skill{} completed successfully", plural(n)));
     0
   } else {
-    fail(&format!("{failed} of {n} skill{} failed", plural(n)));
+    if failed > 0 {
+      fail(&format!("{failed} of {n} skill{} failed", plural(n)));
+    }
     1
   }
 }
@@ -6006,6 +6050,12 @@ struct SkillRun {
   limit_resets_at: Option<u64>,
   /// Normalized per-attempt spend for a supported harness, including unavailable accounting.
   usage: Option<usage::Summary>,
+  /// Scratch for this attempt could not be removed. The task outcome is unchanged; the
+  /// process still must not report a clean success while this is set.
+  cleanup_pending: Option<String>,
+  /// A log, recording, or commit export failed. The run directory is the only remaining
+  /// copy, so cleanup must retry preservation before deleting it.
+  preserve_error: Option<String>,
 }
 
 impl SkillRun {
@@ -6027,6 +6077,8 @@ impl SkillRun {
       graceful_shutdown: false,
       limit_resets_at: None,
       usage: None,
+      cleanup_pending: None,
+      preserve_error: None,
     }
   }
   fn ok(
@@ -6067,6 +6119,52 @@ impl SkillRun {
   fn with_usage(mut self, usage: Option<usage::Summary>) -> SkillRun {
     self.usage = usage;
     self
+  }
+  /// Remember that a durable copy failed. Later calls do not overwrite the first reason.
+  fn preserve(mut self, error: Option<&str>) -> SkillRun {
+    if self.preserve_error.is_none() {
+      self.preserve_error = error.map(str::to_string);
+    }
+    self
+  }
+  /// Remove this attempt's host scratch once its consumers are finished. A failure is recorded
+  /// and handed to the daemon; it does not change `ok` or `fail_reason`. The directory is the
+  /// one allocated for the attempt (`clone_dir`, or `run_dir` when clone never finished).
+  /// Journal-backed attempts retry artifact preservation before deleting scratch.
+  /// Each attempt gets its own cleanup budget so a fleet does not share one deadline.
+  fn release_scratch(&mut self, runtime_name: &str, daemon_client: Option<&std::sync::Arc<daemon::Client>>) {
+    let deadline = Instant::now() + cleanup::BUDGET;
+    let dir = self.clone_dir.clone().or_else(|| self.run_dir.as_ref().map(PathBuf::from));
+    let Some(dir) = dir else { return };
+    match cleanup::load(&dir) {
+      Ok(Some(attempt)) => {
+        match attempt.finish(deadline) {
+          Ok(()) => {
+            self.clone_dir = None;
+            self.run_dir = None;
+            self.preserve_error = None;
+          }
+          Err(error) => self.cleanup_pending = Some(format!("{}: {error}", dir.display())),
+        }
+        return;
+      }
+      Err(error) => {
+        self.cleanup_pending = Some(error);
+        return;
+      }
+      Ok(None) => {}
+    }
+    if let Some(error) = &self.preserve_error {
+      self.cleanup_pending = Some(error.clone());
+      return;
+    }
+    match release_run_dir(&dir, runtime_name, daemon_client) {
+      Ok(()) => {
+        self.clone_dir = None;
+        self.run_dir = None;
+      }
+      Err(error) => self.cleanup_pending = Some(error),
+    }
   }
   /// Attach the result JSON even when the step failed, so the job page still has a card.
   fn with_result_content(mut self, content: String) -> SkillRun {
@@ -6247,6 +6345,17 @@ impl HostKeyChannel {
             }
           }
           let file = dir.join(runtime::RUN_KEYS_FILE);
+          let registered = cleanup::load(run_dir).and_then(|record| {
+            if let Some(mut record) = record {
+              record.key_dir = Some(dir.clone());
+              record.save()?;
+            }
+            Ok(())
+          });
+          if let Err(error) = registered {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(std::io::Error::other(error));
+          }
           return Ok(HostKeyChannel { dir, file });
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -6473,6 +6582,26 @@ fn run_one_skill(
     }
   };
   let run_dir_str = run_dir.to_string_lossy().into_owned();
+  let mut outputs = vec![skill.result.clone()];
+  outputs.extend(skill.artifacts.iter().cloned());
+  let ownership = cleanup::Attempt {
+    run_dir: run_dir.clone(),
+    runtime: rt.name.clone(),
+    session: session_id.to_string(),
+    skill: skill.name.clone(),
+    owner_pid: std::process::id(),
+    outputs,
+    commit_base: caller_tip.filter(|_| skill.commits).map(str::to_string),
+    key_dir: None,
+    container_started: false,
+    last_error: None,
+  };
+  if let Err(error) = ownership.save() {
+    let removal = std::fs::remove_dir_all(&run_dir);
+    let why = format!("could not register scratch cleanup: {error}; directory cleanup: {removal:?}");
+    spinner.finish_fail(failure::reason::RUN_DIR, Some(&why));
+    return SkillRun::failed(failure::reason::RUN_DIR, Some(run_dir_str), None, None).with_fail_detail(&why);
+  }
   let git_transport = runtime::uses_git_transport(&rt.name);
   let mut git_daemon = None;
   if git_transport {
@@ -6521,7 +6650,7 @@ fn run_one_skill(
   if let Some(parent) = log_path.parent() {
     let _ = std::fs::create_dir_all(parent);
   }
-  let log = log_path.to_string_lossy().into_owned();
+  let mut log = log_path.to_string_lossy().into_owned();
   // Copy host opencode auth/config into the run clone's tmp/ (rides the repo mount; no mounts).
   let opencode_forward = if skill.harness == config::Harness::Opencode && opencode_auth_enabled() {
     forward_opencode(&run_dir)
@@ -6655,6 +6784,16 @@ fn run_one_skill(
     &cmd,
     repo_mount,
   );
+  let registered = cleanup::load(&run_dir).and_then(|attempt| {
+    let mut attempt = attempt.ok_or("missing cleanup ownership record")?;
+    attempt.container_started = true;
+    attempt.save()
+  });
+  if let Err(error) = registered {
+    spinner.finish_fail(failure::reason::RUN_DIR, Some(&error));
+    return SkillRun::failed(failure::reason::RUN_DIR, Some(run_dir_str), Some(log), clone_dir)
+      .with_fail_detail(&error);
+  }
   let timeout = skill.timeout.map(Duration::from_secs);
   // Screen-inactivity watchdog: the bind-mounted cast is the heartbeat, counting only NOVEL
   // frames (timestamps stripped, digits erased) — so both a frozen TUI and a wedged one
@@ -6786,16 +6925,25 @@ fn run_one_skill(
   // `--rm` is the normal path, but verify cleanup eagerly. A killed runtime client can leave a
   // live container behind, and Apple Container can retain stopped containers and their disk.
   // `stop_container` returns immediately when the named container is already gone.
-  ui::signals::stop_container(&rt.name, &name);
+  let _ = ui::signals::stop_container(&rt.name, &name);
   if let Some(c) = &daemon_client {
     c.container_event(spinner.index(), "stop", &name, &rt.name);
   }
   // Run dirs are pruned shortly after the skill ends (on any outcome); keep the recording
   // and logs under $SCSH_HOME (default ~/.scsh) so session export survives throwaway clones.
-  let (durable_cast, usage) =
-    persist_run_artifacts(session_id, &run_dir, &skill.name, skill.harness, secs, accounting_complete);
+  let (durable_cast, usage, preserve_error) =
+    match persist_run_artifacts(session_id, &run_dir, &skill.name, skill.harness, secs, accounting_complete) {
+      Ok((cast, usage)) => (cast, usage, None),
+      Err(error) => (None, run_usage(&run_dir, skill.harness, accounting_complete), Some(error)),
+    };
   if let (Some(c), Some(durable)) = (&daemon_client, &durable_cast) {
     c.proc_cast(spinner.index(), durable);
+  }
+  if preserve_error.is_none() {
+    log = runtime::session_logs_dir(session_id)
+      .join(format!("{}.log", cleanup::artifact_stem(&run_dir, &skill.name)))
+      .to_string_lossy()
+      .into_owned();
   }
   if let (Some(c), Some(u)) = (&daemon_client, &usage) {
     c.proc_usage(spinner.index(), u);
@@ -6857,10 +7005,12 @@ fn run_one_skill(
     None
   };
   if let Some((reason, why)) = usage_failure {
-    schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
     let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
     finish_harness_failure(&spinner, reason, &detail, &run_dir);
-    return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir).with_fail_detail(&why).with_usage(usage);
+    return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir)
+      .with_fail_detail(&why)
+      .with_usage(usage)
+      .preserve(preserve_error.as_deref());
   }
   match result {
     Ok((true, _, _)) => {
@@ -6869,24 +7019,24 @@ fn run_one_skill(
       }
     }
     Ok((false, ui::screen::Killed::Timeout, _)) => {
-      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("timed out after {}s", skill.timeout.unwrap_or(0));
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       finish_harness_failure(&spinner, failure::reason::CONTAINER_TIMEOUT, &detail, &run_dir);
       return SkillRun::failed(failure::reason::CONTAINER_TIMEOUT, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
-        .with_usage(usage);
+        .with_usage(usage)
+        .preserve(preserve_error.as_deref());
     }
     Ok((false, ui::screen::Killed::Inactive, _)) => {
       // The recorded screen froze past the watchdog limit. Cleanup already ran above; retain
       // its own reason so stats can tell a stuck harness from a slow one.
-      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("no new screen content for {inactivity_secs}s (inactivity_timeout)");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       finish_harness_failure(&spinner, failure::reason::CONTAINER_INACTIVE, &detail, &run_dir);
       return SkillRun::failed(failure::reason::CONTAINER_INACTIVE, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
-        .with_usage(usage);
+        .with_usage(usage)
+        .preserve(preserve_error.as_deref());
     }
     Ok((false, ui::screen::Killed::LimitExhausted { resets_at }, _)) => {
       // The watch asks for the reset while parked; the harvest above reads the same capture one
@@ -6895,7 +7045,6 @@ fn run_one_skill(
       // The account's quota ran out and claude's own wait either never armed or gave up. Nothing
       // about the task went wrong and nothing about it will go right until the window reopens,
       // so this carries the reset instant out to the retry loop rather than a backoff.
-      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = match resets_at {
         Some(at) => format!("stopped by a claude.ai usage limit; resets {}", quota::human_epoch(at)),
         None => "stopped by a claude.ai usage limit with no reported reset time".to_string(),
@@ -6911,13 +7060,13 @@ fn run_one_skill(
       return SkillRun::failed(failure::reason::HARNESS_USAGE_LIMIT, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_limit_reset(resets_at)
-        .with_usage(usage);
+        .with_usage(usage)
+        .preserve(preserve_error.as_deref());
     }
     Ok((false, ui::screen::Killed::StartupStalled { silent }, _)) => {
       // The launch phase stalled: nothing of value was in flight, so the retry loop above
       // force-restarts this route immediately (no backoff) — the reason string keeps the
       // stalled attempt distinguishable from a mid-run stall in the UI and in stats.
-      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = if silent {
         format!("no terminal output in the first {}s (startup watchdog)", ui::screen::STARTUP_SILENCE_SECS)
       } else {
@@ -6931,23 +7080,23 @@ fn run_one_skill(
       finish_harness_failure(&spinner, failure::reason::STARTUP_STALLED, &detail, &run_dir);
       return SkillRun::failed(failure::reason::STARTUP_STALLED, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
-        .with_usage(usage);
+        .with_usage(usage)
+        .preserve(preserve_error.as_deref());
     }
     // Unreachable in practice: the completion watch fires only after confirming the result file,
     // so the recovery arm above has already turned this into a graceful success. Kept explicit
     // rather than folded into a catch-all so that a future change to `confirm` cannot silently
     // turn a stopped-because-finished run into an unexplained failure.
     Ok((false, ui::screen::Killed::Done, _)) => {
-      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = "stopped after the result file went quiet, but the result did not survive collection".to_string();
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       finish_harness_failure(&spinner, failure::reason::HARNESS_NONZERO, &detail, &run_dir);
       return SkillRun::failed(failure::reason::HARNESS_NONZERO, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
-        .with_usage(usage);
+        .with_usage(usage)
+        .preserve(preserve_error.as_deref());
     }
     Ok((false, ui::screen::Killed::No, last)) => {
-      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let tail = spinner.tail_lines(failure::FAILURE_TAIL_LINES);
       let why = failure::failure_excerpt(last.as_deref(), &tail, "harness exited non-zero (no output captured)");
       // Classify from the excerpt AND the rendered cast tail: the proc lines carry only the
@@ -6968,7 +7117,8 @@ fn run_one_skill(
         return SkillRun::failed(failure::reason::HARNESS_USAGE_LIMIT, Some(run_dir_str), Some(log), clone_dir)
           .with_fail_detail(&why)
           .with_limit_reset(observed_reset_at)
-          .with_usage(usage);
+          .with_usage(usage)
+          .preserve(preserve_error.as_deref());
       }
       let reason = if failure::harness_reported_overload(&sample) {
         failure::reason::HARNESS_OVERLOADED
@@ -6980,16 +7130,17 @@ fn run_one_skill(
       finish_harness_failure(&spinner, reason, &detail, &run_dir);
       return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
-        .with_usage(usage);
+        .with_usage(usage)
+        .preserve(preserve_error.as_deref());
     }
     Err(e) => {
-      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("could not run container: {e}");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       finish_harness_failure(&spinner, failure::reason::CONTAINER_RUN, &detail, &run_dir);
       return SkillRun::failed(failure::reason::CONTAINER_RUN, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
-        .with_usage(usage);
+        .with_usage(usage)
+        .preserve(preserve_error.as_deref());
     }
   }
 
@@ -6999,13 +7150,13 @@ fn run_one_skill(
   // missing one fails the skill exactly like a missing result.
   for artifact in &skill.artifacts {
     if let Err(e) = collect_skill_result(root, &run_dir, artifact, secs) {
-      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("declared artifact: {e}");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       finish_harness_failure(&spinner, failure::reason::RESULT_MISSING, &detail, &run_dir);
       return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
-        .with_usage(usage);
+        .with_usage(usage)
+        .preserve(preserve_error.as_deref());
     }
   }
   match collect_skill_result(root, &run_dir, &skill.result, secs) {
@@ -7018,13 +7169,13 @@ fn run_one_skill(
       let content = match read_collected_result(Path::new(&dest), &spinner) {
         Ok(content) => content,
         Err(error) => {
-          schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
           let why = format!("could not read collected result '{}': {error}", skill.result);
           let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
           finish_harness_failure(&spinner, failure::reason::RESULT_MISSING, &detail, &run_dir);
           return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
             .with_fail_detail(&why)
-            .with_usage(usage);
+            .with_usage(usage)
+            .preserve(preserve_error.as_deref());
         }
       };
       let workflow_outputs = match result_contract.map(|contract| extract_step_outputs(&content, contract)) {
@@ -7037,7 +7188,9 @@ fn run_one_skill(
           // The workflow owns one bounded correction attempt. Return the validation error so its
           // orchestrator can settle this attempt and register a fresh, explicitly linked proc.
           spinner.note("result schema invalid; preparing one correction retry…");
-          return SkillRun::invalid_result(error, run_dir_str, log, clone_dir, content).with_usage(usage);
+          return SkillRun::invalid_result(error, run_dir_str, log, clone_dir, content)
+            .with_usage(usage)
+            .preserve(preserve_error.as_deref());
         }
         Some(Ok(outputs)) => Some(outputs),
         None => None,
@@ -7081,20 +7234,23 @@ fn run_one_skill(
       } else {
         spinner.finish_ok(Some(headline));
       }
-      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, true);
       if graceful_shutdown_reason.is_some() {
-        SkillRun::graceful(log, clone_dir, Some(content), workflow_outputs).with_usage(usage)
+        SkillRun::graceful(log, clone_dir, Some(content), workflow_outputs)
+          .with_usage(usage)
+          .preserve(preserve_error.as_deref())
       } else {
-        SkillRun::ok(log, clone_dir, Some(content), workflow_outputs).with_usage(usage)
+        SkillRun::ok(log, clone_dir, Some(content), workflow_outputs)
+          .with_usage(usage)
+          .preserve(preserve_error.as_deref())
       }
     }
     Err(e) => {
-      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let detail = skill_fail_detail(&e, skill.harness, Some(&run_dir_str), Some(&log));
       finish_harness_failure(&spinner, failure::reason::RESULT_MISSING, &detail, &run_dir);
       SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&e)
         .with_usage(usage)
+        .preserve(preserve_error.as_deref())
     }
   }
 }
@@ -7111,74 +7267,98 @@ fn run_one_skill(
 /// clone under `tmp/` and delete it afterward — recordings must still be exportable from the
 /// session browser. Ordinary runs never delete under `sessions/`; use `scsh gc --apply`.
 ///
-/// The timestamp alone is not unique (every skill in one `scsh run` shares `epoch_secs`), so
-/// the random nonce prevents same-second runs from overwriting each other. Returns the durable
+/// The unique run-directory name keeps attempts separate and lets recovery reuse the same
+/// destinations. Returns the durable
 /// cast path (for the session browser) when a recording was copied, plus any native usage
 /// summary harvested from Claude Code, Codex, or Cursor's local records.
 fn persist_run_artifacts(
-  session_id: &str, run_dir: &Path, skill_name: &str, harness: config::Harness, epoch_secs: u64,
+  session_id: &str, run_dir: &Path, skill_name: &str, harness: config::Harness, _epoch_secs: u64,
   accounting_complete: bool,
-) -> (Option<String>, Option<usage::Summary>) {
-  let stem = format!("{skill_name}-{}-utc-{}", runtime::format_utc_timestamp(epoch_secs), runtime::random_nonce_6());
+) -> Result<(Option<String>, Option<usage::Summary>), String> {
+  let stem = cleanup::artifact_stem(run_dir, skill_name);
+  let mut copy_error: Option<String> = None;
+  let mut note = |error: String| {
+    if copy_error.is_none() {
+      copy_error = Some(error);
+    }
+  };
 
   // Logs: kept for every run (including failures, when they matter most). RUN_LOG_REL is the
   // teed harness output; `.debug` (claude/grok) and `.last` (codex) appear only in verbose runs.
+  // A file that exists and does not copy is the only copy — report it instead of ignoring it.
   let logs_dir = runtime::session_logs_dir(session_id);
-  if std::fs::create_dir_all(&logs_dir).is_ok() {
-    for (rel, ext) in [
-      (runtime::RUN_LOG_REL.to_string(), "log"),
-      (format!("{}.debug", runtime::RUN_LOG_REL), "debug.log"),
-      (format!("{}.last", runtime::RUN_LOG_REL), "last.log"),
-      (format!("{}.exit", runtime::RUN_LOG_REL), "exit"),
-      (format!("{}.tuidebug", runtime::RUN_LOG_REL), "tuidebug"),
-      (format!("{}.cursor-hooks.jsonl", runtime::RUN_LOG_REL), "cursor-hooks.jsonl"),
-      (format!("{}.usage-error", runtime::RUN_LOG_REL), "usage-error"),
-    ] {
-      let src = run_dir.join(&rel);
+  let log_sources = cleanup::log_sources();
+  let any_log = log_sources.iter().any(|(rel, _)| run_dir.join(rel).is_file());
+  if any_log && std::fs::create_dir_all(&logs_dir).is_err() {
+    note(format!("could not create {}", logs_dir.display()));
+  }
+  if logs_dir.is_dir() {
+    for (rel, ext) in &log_sources {
+      let src = run_dir.join(rel);
       if src.is_file() {
-        let _ = std::fs::copy(&src, logs_dir.join(format!("{stem}.{ext}")));
+        if let Err(error) = std::fs::copy(&src, logs_dir.join(format!("{stem}.{ext}"))) {
+          note(format!("could not copy {} to the session log: {error}", src.display()));
+        }
       }
     }
   }
 
-  let final_usage = std::fs::read_to_string(run_dir.join(format!("{}.usage-final", runtime::RUN_LOG_REL)))
-    .ok()
-    .and_then(|text| usage::Summary::from_json(&text));
-  let finalized = final_usage.is_some();
-  let usage = final_usage.or_else(|| daemon::usage::from_run_dir(harness, run_dir)).map(|mut summary| {
-    // Only the host's validated terminal snapshot survives a forced teardown as complete.
-    summary.complete &= finalized || accounting_complete;
-    persist_usage(session_id, skill_name, &stem, &logs_dir, &summary);
-    summary
-  });
+  let usage = run_usage(run_dir, harness, accounting_complete);
+  if let Some(summary) = &usage {
+    if let Err(error) = persist_usage(session_id, skill_name, &stem, &logs_dir, summary) {
+      note(error);
+    }
+  }
 
   // Cast: returned so the daemon can serve/replay/export it after the run dir (and any
   // throwaway caller clone) is gone.
   let cast_src = run_dir.join(runtime::RUN_CAST_REL);
-  if !cast_src.is_file() {
-    return (None, usage);
+  let cast = if !cast_src.is_file() {
+    None
+  } else {
+    let casts_dir = runtime::session_casts_dir(session_id);
+    if std::fs::create_dir_all(&casts_dir).is_err() {
+      note(format!("could not create {}", casts_dir.display()));
+      None
+    } else {
+      let dest = casts_dir.join(format!("{stem}.cast"));
+      match std::fs::copy(&cast_src, &dest) {
+        Ok(_) => Some(dest.to_string_lossy().into_owned()),
+        Err(error) => {
+          note(format!("could not copy {} to the session cast: {error}", cast_src.display()));
+          None
+        }
+      }
+    }
+  };
+  match copy_error {
+    Some(error) => Err(error),
+    None => Ok((cast, usage)),
   }
-  let casts_dir = runtime::session_casts_dir(session_id);
-  if std::fs::create_dir_all(&casts_dir).is_err() {
-    return (None, usage);
-  }
-  let dest = casts_dir.join(format!("{stem}.cast"));
-  if std::fs::copy(&cast_src, &dest).is_err() {
-    return (None, usage);
-  }
-  (Some(dest.to_string_lossy().into_owned()), usage)
 }
 
 /// Normalize the harness's local accounting records into one durable, caller-facing schema.
-fn persist_usage(session_id: &str, skill_name: &str, stem: &str, logs_dir: &Path, summary: &usage::Summary) {
-  if std::fs::create_dir_all(logs_dir).is_ok() {
-    let _ = std::fs::write(logs_dir.join(format!("{stem}.usage.json")), summary.to_json());
-  }
+fn run_usage(run_dir: &Path, harness: config::Harness, accounting_complete: bool) -> Option<usage::Summary> {
+  let final_usage = std::fs::read_to_string(run_dir.join(format!("{}.usage-final", runtime::RUN_LOG_REL)))
+    .ok()
+    .and_then(|text| usage::Summary::from_json(&text));
+  let finalized = final_usage.is_some();
+  final_usage.or_else(|| daemon::usage::from_run_dir(harness, run_dir)).map(|mut summary| {
+    summary.complete &= finalized || accounting_complete;
+    summary
+  })
+}
+
+fn persist_usage(
+  session_id: &str, skill_name: &str, stem: &str, logs_dir: &Path, summary: &usage::Summary,
+) -> Result<(), String> {
+  std::fs::create_dir_all(logs_dir).map_err(|e| e.to_string())?;
+  atomic_write(&logs_dir.join(format!("{stem}.usage.json")), summary.to_json().as_bytes())
+    .map_err(|e| e.to_string())?;
   let results_dir = runtime::session_results_dir(session_id);
-  if std::fs::create_dir_all(&results_dir).is_ok() {
-    let safe = skill_name.replace('/', "_");
-    let _ = std::fs::write(results_dir.join(format!("{safe}.usage.json")), summary.to_json());
-  }
+  std::fs::create_dir_all(&results_dir).map_err(|e| e.to_string())?;
+  let safe = skill_name.replace('/', "_");
+  atomic_write(&results_dir.join(format!("{safe}.usage.json")), summary.to_json().as_bytes()).map_err(|e| e.to_string())
 }
 
 /// Recreate a skill's result file from a cached `content` (creating parent dirs), so a
@@ -7233,6 +7413,11 @@ fn sweep_stale_run_dirs_in(dir: &Path, now: u64, max_age: u64) -> usize {
       continue;
     }
     let path = entry.path();
+    // Registered attempts are finalized from their durable record, after their owner
+    // exits and their selected artifacts/commits are preserved. Age never overrides it.
+    if cleanup::journal_path(&path).exists() {
+      continue;
+    }
     if !path.is_dir() {
       continue;
     }
@@ -7615,12 +7800,64 @@ fn github_auth_enabled() -> bool {
   !matches!(std::env::var("SCSH_NO_GH_AUTH").ok().as_deref(), Some("1") | Some("true"))
 }
 
-/// Whether scsh keeps every skill's `/tmp` run-clone instead of cleaning up. By default a
-/// successful skill's clone is removed after the run (its result was collected and any commits
-/// integrated) while a failed skill's clone is kept for inspection, and stale clones from past
-/// runs are swept at startup. Set `SCSH_KEEP_RUNS=1` to keep all clones and skip the sweep.
-fn keep_run_dirs() -> bool {
-  matches!(std::env::var("SCSH_KEEP_RUNS").ok().as_deref(), Some("1") | Some("true"))
+/// Delete one attempt's host clone after the container is confirmed gone. A busy directory
+/// or an unverifiable container is queued for the daemon and reported; the directory stays
+/// until a later tick can prove the guest is no longer using it.
+fn release_run_dir(
+  dir: &std::path::Path, runtime_name: &str, daemon_client: Option<&std::sync::Arc<daemon::Client>>,
+) -> Result<(), String> {
+  let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+  if !runtime_name.is_empty() && !name.is_empty() {
+    if let Err(error) = ui::signals::stop_container(runtime_name, name) {
+      schedule_run_dir_prune_backup(daemon_client, &dir.to_string_lossy(), name, runtime_name, false);
+      return Err(error);
+    }
+    match runtime::container_probe(runtime_name, name) {
+      runtime::ContainerProbe::Absent => {}
+      runtime::ContainerProbe::Present => {
+        let error = format!("container {name} is still present");
+        schedule_run_dir_prune_backup(daemon_client, &dir.to_string_lossy(), name, runtime_name, false);
+        return Err(error);
+      }
+      runtime::ContainerProbe::Unknown => {
+        let error = format!("could not verify that container {name} was removed");
+        schedule_run_dir_prune_backup(daemon_client, &dir.to_string_lossy(), name, runtime_name, false);
+        return Err(error);
+      }
+    }
+  }
+  match std::fs::remove_dir_all(dir) {
+    Ok(()) => Ok(()),
+    Err(_) if !dir.exists() => Ok(()),
+    Err(error) => {
+      if !name.is_empty() {
+        schedule_run_dir_prune_backup(daemon_client, &dir.to_string_lossy(), name, runtime_name, false);
+      }
+      Err(format!("could not remove {}: {error}", dir.display()))
+    }
+  }
+}
+
+fn abandon_attempt_scratch(
+  run: &mut SkillRun, runtime_name: &str, daemon_client: Option<&std::sync::Arc<daemon::Client>>,
+  leftover: &mut Option<String>,
+) {
+  run.release_scratch(runtime_name, daemon_client);
+  if let Some(message) = run.cleanup_pending.take() {
+    *leftover = Some(match leftover.take() {
+      Some(previous) => format!("{previous}; {message}"),
+      None => message,
+    });
+  }
+}
+
+fn attach_leftover_cleanup(run: &mut SkillRun, leftover: Option<String>) {
+  if let Some(message) = leftover {
+    run.cleanup_pending = Some(match run.cleanup_pending.take() {
+      Some(existing) => format!("{existing}; {message}"),
+      None => message,
+    });
+  }
 }
 
 /// Tell the session-browser daemon to retry run-dir cleanup later if the client did not remove it.
@@ -7628,9 +7865,6 @@ fn schedule_run_dir_prune_backup(
   daemon_client: Option<&std::sync::Arc<daemon::Client>>, run_dir: &str, container_name: &str, runtime: &str,
   outcome_ok: bool,
 ) {
-  if keep_run_dirs() {
-    return;
-  }
   if let Some(c) = daemon_client {
     c.schedule_run_dir_prune(run_dir, container_name, runtime, outcome_ok);
   }
@@ -10629,7 +10863,10 @@ the run fails only when every selected skill is skipped.",
     runtime::GIT_TRANSPORT_HOST_ENV,
     "Override git-daemon host IP inside the container (default: ip route gateway).",
   );
-  help_row("SCSH_KEEP_RUNS=1", "Keep every /tmp/scsh-*-run-* clone (also skips stale sweep).");
+  help_row(
+    "SCSH_KEEP_RUNS=1",
+    "Accepted and ignored. Run clones are removed on every outcome; recordings stay under $SCSH_HOME.",
+  );
   help_row(
     "SCSH_NO_USAGE=1",
     "Skip required native token accounting and its bounded completion wait for every harness.",
@@ -10868,10 +11105,14 @@ fn print_help_internals() {
   (Apple has no stdin build, and rejects Dockerfiles ≥ 16KB — apple/container#735).
   Your repository is modified only by the result copies (into the gitignored tmp/).
 
-  Cleanup: a skill's container is --rm, and its /tmp clone is host-side scratch. After a
-  SUCCESSFUL skill scsh removes that clone; a FAILED skill's clone is kept for inspection
-  (its path is printed). Stale clones from past runs (>24h old) are swept at the next run's
-  start. Keep every clone with SCSH_KEEP_RUNS=1 (also skips the sweep).
+  Cleanup: a skill's container is --rm, and its /tmp inside the container is an ephemeral
+  tmpfs (default 256M, override with tmpfs:). The host run clone is removed on every
+  outcome once results, logs, and commits have been copied out. A delete that cannot
+  prove the container is gone is reported as cleanup pending and retried by the daemon.
+  Durable ownership records let the daemon resume cleanup after the runner exits.
+  Inspect outstanding cleanup with `scsh prune`; retry it with `scsh prune --now`.
+  Legacy clones older than a day are swept at the next run's start.
+  SCSH_KEEP_RUNS is accepted and ignored.
 
   The live board: on a terminal the build and every skill are drawn as collapsible rows,
   inline in the normal buffer (no alternate screen, so your scrollback keeps working). Each row
@@ -11703,7 +11944,8 @@ mod tests {
     // Pin SCSH_HOME so the durable dirs land under our temp tree (not the developer's ~/.scsh).
     let prev = std::env::var_os("SCSH_HOME");
     std::env::set_var("SCSH_HOME", &home);
-    let (cast, usage) = persist_run_artifacts("sessab", &run_dir, "add", config::Harness::Cursor, 1_700_000_000, true);
+    let (cast, usage) =
+      persist_run_artifacts("sessab", &run_dir, "add", config::Harness::Cursor, 1_700_000_000, true).unwrap();
     let cast = cast.expect("cast");
     assert_eq!(usage.expect("every supported harness attempt has a usage record").tokens, None);
 
@@ -11724,7 +11966,7 @@ mod tests {
     )
     .unwrap();
     let (cast2, usage) =
-      persist_run_artifacts("sessab", &run_dir, "add", config::Harness::Cursor, 1_700_000_001, false);
+      persist_run_artifacts("sessab", &run_dir, "add", config::Harness::Cursor, 1_700_000_001, false).unwrap();
     assert!(cast2.is_some());
     let usage = usage.expect("Cursor hook stream must produce a summary");
     assert!(!usage.complete, "an interrupted run without a finalized snapshot is incomplete");
@@ -11737,7 +11979,7 @@ mod tests {
     std::fs::write(run_dir.join(format!("{}.usage-final", runtime::RUN_LOG_REL)), finalized.to_json()).unwrap();
     std::fs::write(run_dir.join(format!("{}.cursor-hooks.jsonl", runtime::RUN_LOG_REL)), "malformed teardown").unwrap();
     let (_, recovered) =
-      persist_run_artifacts("sessab", &run_dir, "add", config::Harness::Cursor, 1_700_000_002, false);
+      persist_run_artifacts("sessab", &run_dir, "add", config::Harness::Cursor, 1_700_000_002, false).unwrap();
     assert_eq!(recovered, Some(finalized), "teardown cannot overwrite the finalized counters");
     match prev {
       Some(v) => std::env::set_var("SCSH_HOME", v),
