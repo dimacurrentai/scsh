@@ -268,6 +268,7 @@ mod tests {
       procs: vec![ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         label: "claude: fix".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Fail,

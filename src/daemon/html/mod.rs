@@ -10,7 +10,7 @@ mod format;
 mod index;
 mod layout;
 mod proc;
-mod report;
+pub(crate) mod report;
 mod session;
 mod session_export;
 mod stats;

@@ -155,6 +155,7 @@ mod tests {
       procs: vec![ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         kind: ProcKind::Skill,
         label: "claude: add".into(),
         status: ProcStatus::Running,

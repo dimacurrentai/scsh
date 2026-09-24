@@ -560,6 +560,15 @@ steps, by appending to `$SCSH_RESULTS_MD` / `$SCSH_LOG_MD` / `$SCSH_ERRORS_MD`; 
 to `/api/v1/session/report`. Markdown is rendered with packdiff's safety-first subset
 (`src/daemon/html/markdown.rs`): headings, fenced code, flat lists, quotes, rules, inline
 code/bold/italic/links — every input character escaped, `javascript:` links inert.
+Contributions are ordered by the job's graph, not by which task finished first: the logically
+last task is on top, the first at the bottom. Every workflow task is stamped with a key when it
+starts (the proc's `order`, an array of integers compared element by element): `[rank,
+attempt]` for a plain step, `[loop rank, iteration, body rank, attempt]` for a loop iteration.
+A rank is the step's position once steps are ordered so that everything a step needs comes
+first, YAML order breaking ties; a do-while body counts as one step at the top level, so every
+lap stays between the steps around the loop. Each entry carries its key's dotted form as
+`data-order`. Entries from tasks without a key (flat runs, older records) follow in arrival
+order. The store keeps arrival order; the job page, the live view, and the export sort.
 `gh-gorgeous-review` uses all three: the plan step logs the fleet decision, the publish step
 reports the event, the review link, and every reviewer's grade with their mean, and the
 quota step reports each window before → after with how many more reviews it has room for.

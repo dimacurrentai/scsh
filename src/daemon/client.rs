@@ -178,7 +178,7 @@ impl Client {
   pub fn proc_add(
     &self, proc_index: usize, label: &str, kind: ProcKind, skill_name: Option<&str>, harness: Option<&str>,
     model: Option<&str>, skill_source: Option<&str>, route: Option<&str>, annotate_target: Option<&str>,
-    previous_attempt: Option<usize>,
+    previous_attempt: Option<usize>, order: &[u32],
   ) {
     let mut extras = Vec::new();
     if let Some(s) = skill_name {
@@ -203,6 +203,11 @@ impl Client {
     }
     if let Some(index) = previous_attempt {
       extras.push(format!("\"previous_attempt\": {index}"));
+    }
+    // Where this task's job-page contributions sort — a workflow step's stamped key.
+    if !order.is_empty() {
+      let parts: Vec<String> = order.iter().map(u32::to_string).collect();
+      extras.push(format!("\"order\": [{}]", parts.join(", ")));
     }
     let tail = if extras.is_empty() { String::new() } else { format!(", {}", extras.join(", ")) };
     let body = format!(

@@ -190,6 +190,7 @@ mod tests {
       procs: vec![ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         label: "s".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Ok,

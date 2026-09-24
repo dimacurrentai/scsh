@@ -26,6 +26,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
       procs: vec![ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         kind: ProcKind::Skill,
         label: "claude: add".into(),
         status,
@@ -229,6 +230,35 @@ fn job_page_puts_errors_and_results_above_the_graph_and_the_log_below_it() {
   let at = |needle: &str| export.find(needle).unwrap_or_else(|| panic!("export missing {needle}"));
   assert!(at(r#"id="job-results""#) < at(r#"id="job-log""#) && at(r#"id="job-log""#) < at(r#"<div class="procs">"#));
   assert!(export.contains("<h2>Sum</h2>"));
+}
+
+/// Every render of a section — the job page, the offline export, and the live script — shows
+/// the logically last task on top, whatever order the contributions arrived in, and marks
+/// each entry with its task's key.
+#[test]
+fn job_report_sections_put_the_logically_last_task_on_top() {
+  let mut store = store_with_cast_proc(ProcStatus::Ok);
+  let session = store.sessions.get_mut("castab").unwrap();
+  let mut publish = session.procs[0].clone();
+  publish.index = 1;
+  publish.order = vec![26, 1];
+  session.procs[0].order = vec![22, 1];
+  session.procs.push(publish);
+  let entry = |proc: usize, source: &str, markdown: &str| crate::daemon::model::ReportEntry {
+    section: ReportSection::Results,
+    proc: Some(proc),
+    source: source.into(),
+    markdown: markdown.into(),
+  };
+  session.push_report(entry(0, "prepare_claude", "PREPARED"));
+  session.push_report(entry(1, "publish", "PUBLISHED"));
+  let html = session_page(&store, "castab").expect("page");
+  let at = |needle: &str| html.find(needle).unwrap_or_else(|| panic!("missing {needle}"));
+  assert!(at("PUBLISHED") < at("PREPARED"), "the later step is on top though it arrived last");
+  assert!(html.contains(r#"<section class="report-entry" data-proc="1" data-order="26.1">"#), "{html}");
+  let export = session_export_page(store.sessions.get("castab").unwrap(), &[], None, 2);
+  assert!(export.find("PUBLISHED") < export.find("PREPARED"), "the export agrees");
+  assert!(html.contains(r#"const order = e.order ? ' data-order="' + esc(e.order) + '"' : '';"#), "the live script marks it too");
 }
 
 fn session_procs_html(html: &str) -> &str {
@@ -698,6 +728,7 @@ fn a_retried_route_is_visibly_a_retry() {
     ProcRecord {
       index,
       previous_attempt: None,
+      order: Vec::new(),
       kind: ProcKind::Skill,
       label: format!("claude: {name}"),
       status,
@@ -1052,6 +1083,7 @@ fn job_page_renders_the_loop_convergence_table() {
     ProcRecord {
       index,
       previous_attempt: None,
+      order: Vec::new(),
       kind: ProcKind::Skill,
       label: format!("codex: collect (cycle {iteration})"),
       status: ProcStatus::Ok,
@@ -1369,6 +1401,7 @@ fn session_proc_html_has_no_stray_backslashes() {
       procs: vec![ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         kind: ProcKind::Skill,
         label: "opencode: add".into(),
         status: ProcStatus::Running,
@@ -1431,6 +1464,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
         ProcRecord {
           index: 0,
           previous_attempt: None,
+          order: Vec::new(),
           kind: ProcKind::Skill,
           label: "opencode: add".into(),
           status: ProcStatus::Ok,
@@ -1459,6 +1493,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
         ProcRecord {
           index: 1,
           previous_attempt: None,
+          order: Vec::new(),
           kind: ProcKind::Skill,
           label: "claude: add".into(),
           status: ProcStatus::Ok,
@@ -1659,6 +1694,7 @@ fn the_lede_counts_image_builds_separately_from_tasks() {
   let proc = |index: usize, kind: ProcKind, label: &str| ProcRecord {
     index,
     previous_attempt: None,
+    order: Vec::new(),
     label: label.into(),
     kind,
     status: ProcStatus::Ok,
@@ -1927,6 +1963,7 @@ fn offline_export_embeds_commits_diff_when_present() {
     procs: vec![ProcRecord {
       index: 0,
       previous_attempt: None,
+      order: Vec::new(),
       kind: ProcKind::Skill,
       label: "opencode: add".into(),
       status: ProcStatus::Ok,
@@ -2020,6 +2057,7 @@ fn offline_export_renders_unrecorded_procs_as_note_rows() {
     procs: vec![ProcRecord {
       index: 0,
       previous_attempt: None,
+      order: Vec::new(),
       kind: ProcKind::Build,
       label: "build: claude".into(),
       status: ProcStatus::Ok,
@@ -2086,6 +2124,7 @@ fn offline_export_includes_workflow_graph() {
       ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         kind: ProcKind::Skill,
         label: "claude: add".into(),
         status: ProcStatus::Ok,
@@ -2114,6 +2153,7 @@ fn offline_export_includes_workflow_graph() {
       ProcRecord {
         index: 1,
         previous_attempt: None,
+        order: Vec::new(),
         kind: ProcKind::Skill,
         label: "codex: summarize".into(),
         status: ProcStatus::Ok,
@@ -2326,6 +2366,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
         ProcRecord {
           index: 0,
           previous_attempt: None,
+          order: Vec::new(),
           kind: ProcKind::Skill,
           label: "opencode: add-opencode".into(),
           status: ProcStatus::Ok,
@@ -2354,6 +2395,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
         ProcRecord {
           index: 1,
           previous_attempt: None,
+          order: Vec::new(),
           kind: ProcKind::Skill,
           label: "claude: add-claude".into(),
           status: ProcStatus::Ok,
@@ -2444,6 +2486,7 @@ fn session_page_renders_job_level_fleet_verdict_across_skills() {
   let route = |index: usize, source: &str, route_name: &str, result_path: String| ProcRecord {
     index,
     previous_attempt: None,
+    order: Vec::new(),
     kind: ProcKind::Skill,
     label: format!("{source}-{route_name}"),
     status: ProcStatus::Ok,
@@ -2537,6 +2580,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
         ProcRecord {
           index: 0,
           previous_attempt: None,
+          order: Vec::new(),
           kind: ProcKind::Skill,
           label: "claude: add-waiting".into(),
           status: ProcStatus::Waiting,
@@ -2565,6 +2609,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
         ProcRecord {
           index: 1,
           previous_attempt: None,
+          order: Vec::new(),
           kind: ProcKind::Skill,
           label: "claude: add-done".into(),
           status: ProcStatus::Ok,
@@ -2593,6 +2638,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
         ProcRecord {
           index: 2,
           previous_attempt: None,
+          order: Vec::new(),
           kind: ProcKind::Skill,
           label: "claude: add-running".into(),
           status: ProcStatus::Running,
@@ -2807,6 +2853,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
       procs: vec![ProcRecord {
         index: 2,
         previous_attempt: None,
+        order: Vec::new(),
         kind: ProcKind::Skill,
         label: "claude: add".into(),
         status: ProcStatus::Ok,
@@ -2899,6 +2946,7 @@ fn session_proc_html_has_no_autoscroll_checkbox() {
       procs: vec![ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         kind: ProcKind::Skill,
         label: "opencode: add".into(),
         status: ProcStatus::Running,
@@ -2966,6 +3014,7 @@ fn store_with_annotate_proc(status: ProcStatus) -> Store {
       procs: vec![ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         kind: ProcKind::Annotate,
         label: "annotate · add-20260711-114749-utc-ufakca".into(),
         status,
@@ -3624,6 +3673,7 @@ fn workflow_graph_renders_builtin_shapes() {
     ProcRecord {
       index,
       previous_attempt: None,
+      order: Vec::new(),
       kind: ProcKind::Skill,
       label: format!("{harness}: {id}"),
       status,
@@ -4288,6 +4338,7 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
       procs: vec![ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         kind: ProcKind::Skill,
         label: "claude: add".into(),
         status: ProcStatus::Ok,

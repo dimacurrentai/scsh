@@ -155,12 +155,17 @@ fn session_json(s: &Session, effective_workflow: bool, lifecycle: Option<Session
   let lifecycle = lifecycle.map(|state| {
     format!(", \"lifecycle\": {}, \"lifecycle_label\": {}", quote(state.css_class()), quote(state.label()))
   });
-  // The live view carries each contribution rendered, so the page can mount it as it lands
-  // without a renderer of its own; the store keeps only the markdown.
+  // The live view carries each contribution rendered and already in page order, so the page
+  // can mount it as it lands without a renderer or a sort of its own; the store keeps only the
+  // markdown, in arrival order (the page order is derived from the tasks' keys).
   let report = if s.report.is_empty() {
     String::new()
   } else {
-    let entries: Vec<String> = s.report.iter().map(|e| report_entry_json(e, effective_workflow)).collect();
+    let entries: Vec<String> = if effective_workflow {
+      s.report_in_page_order().into_iter().map(|e| report_entry_json(e, Some(s.report_order_of(e)))).collect()
+    } else {
+      s.report.iter().map(|e| report_entry_json(e, None)).collect()
+    };
     format!(", \"report\": [{}]", entries.join(", "))
   };
   format!(
@@ -181,12 +186,17 @@ fn session_json(s: &Session, effective_workflow: bool, lifecycle: Option<Session
   )
 }
 
-fn report_entry_json(e: &ReportEntry, with_html: bool) -> String {
+/// One contribution. `live` (the writing task's report-order key) adds what only the live view
+/// carries: the rendered HTML and the key's dotted form.
+fn report_entry_json(e: &ReportEntry, live: Option<&[u32]>) -> String {
   let proc = e.proc.map_or_else(|| "null".to_string(), |p| p.to_string());
-  let html = if with_html {
-    format!(", \"html\": {}", quote(&super::html::markdown_to_html(&e.markdown)))
-  } else {
-    String::new()
+  let html = match live {
+    Some(order) => format!(
+      ", \"html\": {}, \"order\": {}",
+      quote(&super::html::markdown_to_html(&e.markdown)),
+      quote(&super::html::report::order_label(order))
+    ),
+    None => String::new(),
   };
   format!(
     "{{ \"section\": {}, \"proc\": {proc}, \"source\": {}, \"markdown\": {}{html} }}",
@@ -228,8 +238,9 @@ fn proc_json(p: &ProcRecord) -> String {
   };
   let suspected_cause = p.suspected_cause.map(|cause| quote(cause.as_str())).unwrap_or_else(|| "null".into());
   let usage = p.usage.as_ref().map(crate::usage::Summary::compact_json).unwrap_or_else(|| "null".into());
+  let order = order_json(&p.order);
   format!(
-    "{{ \"index\": {}, \"previous_attempt\": {previous_attempt}, \"label\": {}, \"kind\": {}, \"status\": {}, \"skill_name\": {}, \
+    "{{ \"index\": {}, \"previous_attempt\": {previous_attempt}, \"order\": {order}, \"label\": {},\"kind\": {}, \"status\": {}, \"skill_name\": {}, \
 \"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \"suspected_cause\": {suspected_cause}, \
 \"elapsed\": {}, \"container_name\": {}, \"container_runtime\": {}, \"cast_path\": {}, \"diff_path\": {}, \
 \"skill_source\": {}, \"route\": {}, \"result_path\": {}, \"annotate_target\": {}, \"phase\": {}, \
@@ -381,6 +392,7 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
   Ok(ProcRecord {
     index,
     previous_attempt,
+    order: field_order(obj), // absent on sessions persisted by older builds
     label,
     kind,
     status,
@@ -414,6 +426,25 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
     },
     lines,
   })
+}
+
+/// A task's report-order key (`"order"`); anything but an array of non-negative integers
+/// reads as no key.
+pub(crate) fn field_order(obj: &[(String, Value)]) -> Vec<u32> {
+  let Ok(Value::Array(items)) = field_value(obj, "order") else { return Vec::new() };
+  let key: Option<Vec<u32>> = items
+    .iter()
+    .map(|item| match item {
+      Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 && *n <= f64::from(u32::MAX) => Some(*n as u32),
+      _ => None,
+    })
+    .collect();
+  key.unwrap_or_default()
+}
+
+/// A report-order key as a JSON array.
+fn order_json(order: &[u32]) -> String {
+  format!("[{}]", order.iter().map(u32::to_string).collect::<Vec<_>>().join(", "))
 }
 
 fn parse_line(v: &Value) -> Result<OutputLine, String> {
@@ -464,6 +495,31 @@ mod tests {
   use crate::daemon::model::{ReportEntry, ReportSection};
 
   #[test]
+  fn task_keys_persist_and_the_live_report_arrives_in_page_order() {
+    let stored = r#"{ "id": "ord", "started_at": 1, "procs": [
+      { "index": 0, "order": [1, 1], "label": "host: plan", "lines": [] },
+      { "index": 1, "order": [26, 1], "label": "host: publish", "lines": [] },
+      { "index": 2, "order": [1, -1], "label": "bad key", "lines": [] },
+      { "index": 3, "label": "older record", "lines": [] }
+    ], "report": [
+      { "section": "results", "proc": 0, "source": "plan", "markdown": "planned" },
+      { "section": "results", "proc": 1, "source": "publish", "markdown": "published" }
+    ] }"#;
+    let session = parse_session_json(stored).unwrap();
+    let keys: Vec<&[u32]> = session.procs.iter().map(|p| p.order.as_slice()).collect();
+    assert_eq!(keys, [&[1, 1][..], &[26, 1], &[], &[]], "a malformed or absent key reads as none");
+    let again = session_json_store(&session);
+    assert!(again.contains(r#""index": 1, "previous_attempt": null, "order": [26, 1],"#), "got: {again}");
+    assert!(again.find("planned") < again.find("published"), "the store keeps arrival order");
+    assert_eq!(parse_session_json(&again).unwrap().procs, session.procs);
+
+    let live = archived_session_json_api(&session);
+    let at = |needle: &str| live.find(needle).unwrap_or_else(|| panic!("missing {needle}: {live}"));
+    assert!(at("published") < at("planned"), "the live view is already in page order");
+    assert!(live.contains(r#""order": "26.1""#) && live.contains(r#""order": "1.1""#), "{live}");
+  }
+
+  #[test]
   fn report_entries_persist_as_markdown_and_reach_the_page_rendered() {
     let mut session = Session {
       id: "rep".into(),
@@ -509,6 +565,7 @@ mod tests {
     let proc = ProcRecord {
       index: 0,
       previous_attempt: None,
+      order: Vec::new(),
       label: "skill".into(),
       kind: ProcKind::Skill,
       status: ProcStatus::Ok,
@@ -555,6 +612,7 @@ mod tests {
       procs: vec![ProcRecord {
         index: 0,
         previous_attempt: Some(7),
+        order: Vec::new(),
         label: "build".into(),
         kind: ProcKind::Build,
         status: ProcStatus::Ok,

@@ -740,6 +740,7 @@ mod tests {
     let proc = |index: usize, skill: &str, result: Option<String>| ProcRecord {
       index,
       previous_attempt: None,
+      order: Vec::new(),
       label: format!("codex: {skill}"),
       kind: ProcKind::Skill,
       status: ProcStatus::Ok,
@@ -814,6 +815,7 @@ mod tests {
       ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         label: "opencode: add-opencode".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Ok,
@@ -842,6 +844,7 @@ mod tests {
       ProcRecord {
         index: 1,
         previous_attempt: None,
+        order: Vec::new(),
         label: "claude: add-claude".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Ok,

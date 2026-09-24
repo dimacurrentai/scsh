@@ -1729,6 +1729,117 @@ pub fn do_while_body<'a>(steps: &'a [Step], end: &Step) -> Vec<&'a str> {
     .collect()
 }
 
+/// Where every step's contributions sit on the job page, fixed by the definition alone so the
+/// errors / results / log sections read the same no matter which task finished first.
+///
+/// Each task is stamped with a key when it starts, and entries sort by it, highest on top.
+/// Keys compare element by element like strings compare letter by letter, and their components
+/// alternate between a step's rank in its scope and a loop iteration:
+///
+/// - a plain step: `[rank, attempt]`;
+/// - a step that runs as a loop iteration (a `repeat` step, or any step of a do-while body):
+///   `[loop rank, iteration, body rank, attempt]`.
+///
+/// A rank is the step's position in its scope once the steps are ordered so everything a step
+/// needs comes first, YAML order breaking ties. At the top level a do-while body counts as one
+/// step, so however many laps it runs, its entries stay between the steps before and after it.
+/// All components are 1-based.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ReportOrder {
+  /// Step id → its top-level rank, and its rank inside the loop body when it iterates.
+  slots: BTreeMap<String, (u32, Option<u32>)>,
+}
+
+impl ReportOrder {
+  pub fn new(steps: &[Step]) -> Self {
+    // The loop each step iterates with, exactly as the runner resolves it: its do-while body's
+    // final step (a later loop claims a shared step), or the step itself for a `repeat`.
+    let mut loop_of: BTreeMap<&str, &str> = BTreeMap::new();
+    for s in steps.iter().filter(|s| s.repeat.is_some()) {
+      loop_of.insert(&s.id, &s.id);
+    }
+    for end in steps.iter().filter(|s| s.do_while.is_some()) {
+      for id in do_while_body(steps, end) {
+        loop_of.insert(id, &end.id);
+      }
+    }
+    let unit = |id: &str| -> String { loop_of.get(id).copied().unwrap_or(id).to_string() };
+
+    let mut units: Vec<String> = Vec::new();
+    let mut unit_needs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for s in steps {
+      let u = unit(&s.id);
+      if !units.contains(&u) {
+        units.push(u.clone());
+      }
+      let needs = unit_needs.entry(u.clone()).or_default();
+      for n in s.needs.iter().map(|n| unit(n)).filter(|n| *n != u) {
+        if !needs.contains(&n) {
+          needs.push(n);
+        }
+      }
+    }
+    let unit_rank = rank_by_needs(&units, &unit_needs);
+
+    let mut slots = BTreeMap::new();
+    for s in steps.iter().filter(|s| !loop_of.contains_key(s.id.as_str())) {
+      slots.insert(s.id.clone(), (unit_rank[&s.id], None));
+    }
+    let mut loops: Vec<&str> = loop_of.values().copied().collect();
+    loops.sort_unstable();
+    loops.dedup();
+    for l in loops {
+      let body: Vec<String> =
+        steps.iter().filter(|s| loop_of.get(s.id.as_str()) == Some(&l)).map(|s| s.id.clone()).collect();
+      let needs: BTreeMap<String, Vec<String>> = steps
+        .iter()
+        .filter(|s| body.contains(&s.id))
+        .map(|s| (s.id.clone(), s.needs.iter().filter(|n| body.contains(n)).cloned().collect()))
+        .collect();
+      let body_rank = rank_by_needs(&body, &needs);
+      for id in &body {
+        slots.insert(id.clone(), (unit_rank[l], Some(body_rank[id])));
+      }
+    }
+    ReportOrder { slots }
+  }
+
+  /// The key for one attempt (1-based) of one step. `iteration` (1-based) is used only when
+  /// the step iterates; an unknown step gets no key and sorts below every keyed entry.
+  pub fn key(&self, step: &str, iteration: usize, attempt: u32) -> Vec<u32> {
+    match self.slots.get(step) {
+      Some((rank, None)) => vec![*rank, attempt],
+      Some((rank, Some(body))) => vec![*rank, iteration as u32, *body, attempt],
+      None => Vec::new(),
+    }
+  }
+
+  /// The same task's key for a later attempt: only the final, attempt component changes.
+  pub fn retry_key(key: &[u32], attempt: u32) -> Vec<u32> {
+    let mut next = key.to_vec();
+    if let Some(last) = next.last_mut() {
+      *last = attempt;
+    }
+    next
+  }
+}
+
+/// 1-based ranks for `nodes` (given in YAML order): repeatedly take the earliest node whose
+/// needs are all ranked. A leftover cycle, which validation rejects, falls back to YAML order.
+fn rank_by_needs(nodes: &[String], needs: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, u32> {
+  let mut ranked: BTreeMap<String, u32> = BTreeMap::new();
+  while ranked.len() < nodes.len() {
+    let ready = |n: &&String| {
+      !ranked.contains_key(*n)
+        && needs.get(*n).is_none_or(|deps| deps.iter().all(|d| ranked.contains_key(d) || !nodes.contains(d)))
+    };
+    let next = nodes.iter().find(ready).or_else(|| nodes.iter().find(|n| !ranked.contains_key(*n)));
+    let next = next.expect("an unranked node remains").clone();
+    ranked.insert(next, ranked.len() as u32 + 1);
+  }
+  ranked
+}
+
 /// Return a cycle in the `needs` graph (as a list of step ids) if one exists, via DFS.
 fn first_cycle(steps: &[Step]) -> Option<Vec<String>> {
   use std::collections::BTreeMap as Map;
@@ -2112,6 +2223,61 @@ mod tests {
       def.steps.iter().all(|s| s.agent().unwrap().effort.is_none()),
       "default effort: low skips commit instructions"
     );
+  }
+
+  #[test]
+  fn report_order_ranks_the_review_fleet_by_its_graph() {
+    let order = ReportOrder::new(&builtin("gh-gorgeous-review").steps);
+    assert_eq!(order.key("plan", 1, 1), [1, 1]);
+    assert_eq!(order.key("review_conventions_claude", 1, 1), [2, 1]);
+    assert_eq!(order.key("review_testing_grok", 1, 1), [21, 1]);
+    assert_eq!(order.key("prepare_claude", 1, 1), [22, 1]);
+    assert_eq!(order.key("publish", 1, 1), [26, 1]);
+    assert_eq!(order.key("quota_after", 1, 1), [27, 1]);
+    assert_eq!(order.key("no_such_step", 1, 1), Vec::<u32>::new(), "an unknown step gets no key");
+    // A retry sorts above the attempt it replaces and still below the next step.
+    assert!(order.key("prepare_claude", 1, 2) > order.key("prepare_claude", 1, 1));
+    assert!(order.key("prepare_claude", 1, 9) < order.key("prepare_codex", 1, 1));
+    assert_eq!(ReportOrder::retry_key(&order.key("prepare_claude", 1, 1), 3), [22, 3]);
+    assert_eq!(ReportOrder::retry_key(&[], 3), Vec::<u32>::new(), "no key stays no key");
+  }
+
+  #[test]
+  fn report_order_keeps_every_lap_of_a_do_while_inside_the_loop_slot() {
+    let order = ReportOrder::new(&builtin("gorgeous-pipeline").steps);
+    assert_eq!(order.key("prepare", 1, 1), [1, 1]);
+    assert_eq!(order.key("initial_testing_cursor", 1, 1), [16, 1]);
+    // The whole decide…collect body is one top-level slot; its steps rank inside it.
+    assert_eq!(order.key("decide", 3, 1), [17, 3, 1, 1]);
+    assert_eq!(order.key("fix", 3, 1), [17, 3, 2, 1]);
+    assert_eq!(order.key("collect", 3, 1), [17, 3, 19, 1]);
+    assert!(order.key("decide", 2, 1) > order.key("collect", 1, 1), "a later lap sorts above an earlier one");
+    assert!(order.key("decide", 1, 1) > order.key("initial_testing_cursor", 1, 1));
+    // Loop numbers are values, not digits: lap 10 stays above lap 9.
+    assert!(order.key("decide", 10, 1) > order.key("collect", 9, 1));
+
+    let repeat = ReportOrder::new(&builtin("demo-loop-repeat").steps);
+    assert_eq!(repeat.key("initialize", 1, 1), [1, 1]);
+    assert_eq!(repeat.key("increment", 2, 1), [2, 2, 1, 1], "a repeat step is a loop of one");
+  }
+
+  #[test]
+  fn report_order_puts_a_step_after_what_it_needs_even_when_written_first() {
+    let step = |id: &str, needs: &str| {
+      format!("  {id}:\n{needs}    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      x:\n        type: string\n")
+    };
+    let src = format!(
+      "description: \"x\"\nsteps:\n{}{}{}{}",
+      step("a", ""),
+      step("late", "    needs: mid\n"),
+      step("mid", "    needs: a\n"),
+      step("side", "    needs: a\n"),
+    );
+    let order = ReportOrder::new(&validate("t", &src, DefSource::Repo).unwrap().steps);
+    assert_eq!(order.key("a", 1, 1), [1, 1]);
+    assert_eq!(order.key("mid", 1, 1), [2, 1], "'late' waits for 'mid', so 'mid' takes the next slot");
+    assert_eq!(order.key("late", 1, 1), [3, 1], "then 'late' is the earliest ready step in YAML order");
+    assert_eq!(order.key("side", 1, 1), [4, 1]);
   }
 
   #[test]
