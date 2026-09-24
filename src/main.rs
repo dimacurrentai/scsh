@@ -2644,7 +2644,7 @@ enum RetryDecision {
 fn retry_decision(
   fail_reason: Option<&str>, restart_requested: bool, schema_retry_available: bool, policy: failure::RetryPolicy,
   retries_used: u32, budget_spent_secs: u64, consecutive_identical: u32, retry_enabled: bool, tui: bool,
-  first_attempt: bool, limit_resets_at: Option<u64>,
+  first_attempt: bool, limit_resets_at: Option<u64>, now: u64,
 ) -> RetryDecision {
   if restart_requested {
     return RetryDecision::Browser;
@@ -2671,6 +2671,12 @@ fn retry_decision(
   // the budget in minutes, so any route that hit a limit would otherwise be refused the one
   // retry that could ever work.
   if reason == failure::reason::HARNESS_USAGE_LIMIT {
+    // A reset past the longest wait a retry may park for (a weekly window days away) cannot
+    // reopen within this run: waiting the capped day out would only hit the same limit again.
+    // Stop now; the job supervisor holds the job for that reset instead.
+    if limit_resets_at.is_some_and(|at| at > now.saturating_add(LIMIT_RETRY_MAX_SECS)) {
+      return RetryDecision::Stop;
+    }
     return RetryDecision::LimitWait { resume_at: limit_resets_at };
   }
   if budget_spent_secs >= policy.budget_secs {
@@ -2936,6 +2942,7 @@ fn run_workflow_step_with_retries(
       invocation.harness.is_tui(),
       attempts == 1,
       run.limit_resets_at,
+      daemon::now_unix_secs(),
     );
     if decision == RetryDecision::Stop || decision == RetryDecision::StopBreaker {
       // An invalid-result attempt returns with its proc row still open (run_one_skill
@@ -5686,6 +5693,7 @@ fn build_and_run(
               skill.harness.is_tui(),
               attempts == 1,
               run.limit_resets_at,
+              daemon::now_unix_secs(),
             );
             match decision {
               RetryDecision::Stop => {
@@ -6274,11 +6282,37 @@ fn cast_tail_text(cast: &Path) -> String {
   }
 }
 
-/// Claude is the only harness whose literal TUI limit prose is understood here. Other harnesses
-/// can quote those words while reporting an unrelated failure and must retain their real verdict.
+/// Claude's and grok's literal TUI limit prose is understood here, each only on its own harness.
+/// Other harnesses can quote those words while reporting an unrelated failure and must retain
+/// their real verdict.
 fn harness_exited_on_usage_limit(harness: config::Harness, sample: &str) -> bool {
-  harness == config::Harness::Claude
-    && limitwait::detect(sample).is_some_and(|state| state != limitwait::LimitState::Resumed)
+  match harness {
+    config::Harness::Claude => limitwait::detect(sample).is_some_and(|state| state != limitwait::LimitState::Resumed),
+    config::Harness::Grok => limitwait::grok_quota_exhausted(sample),
+    _ => false,
+  }
+}
+
+/// The reset behind a limit the harness's screen reported. Claude's comes from the status line
+/// the run captured (`captured`); grok writes none, so its billing endpoint is asked live — one
+/// short request, made only once the screen has already shown the limit.
+fn usage_limit_reset(harness: config::Harness, captured: Option<u64>) -> Option<u64> {
+  match harness {
+    config::Harness::Grok => quota::exhausted_reset_epoch(&quota::fetch(harness), daemon::now_unix_secs()),
+    _ => captured,
+  }
+}
+
+/// How a limit verdict names what stopped the run, for the row's detail line.
+fn usage_limit_why(harness: config::Harness, resets_at: Option<u64>) -> String {
+  let owner = match harness {
+    config::Harness::Claude => "a claude.ai usage limit".to_string(),
+    other => format!("the {} account's usage limit", other.as_str()),
+  };
+  match resets_at {
+    Some(at) => format!("stopped by {owner}; resets {}", quota::human_epoch(at)),
+    None => format!("stopped by {owner} with no reported reset time"),
+  }
 }
 
 /// Add an uncertain screen diagnosis only after the run has already failed.
@@ -6294,17 +6328,22 @@ fn finish_harness_failure(spinner: &ui::screen::Proc, reason: &str, detail: &str
 }
 
 /// Recover a usage-limit verdict when a watchdog won the race with live screen classification.
-/// `captured_reset` already came from [`quota::live_reset_epoch`], so it proves both an exhausted
-/// window and a future provider reset. Requiring that evidence plus stopped Claude TUI prose keeps
-/// every non-Claude and ordinary-watchdog verdict unchanged.
+/// For claude, `captured_reset` already came from [`quota::live_reset_epoch`], so it proves both
+/// an exhausted window and a future provider reset; requiring that evidence plus stopped Claude
+/// TUI prose keeps ordinary-watchdog verdicts unchanged. Grok never resumes from its quota
+/// dialog, so the watchdog is what ends every such run: the dialog alone decides, and the reset
+/// is carried when its billing endpoint reported one. Other harnesses keep their verdict.
 fn reclassify_watchdog_usage_limit(
   harness: config::Harness, killed: ui::screen::Killed, sample: &str, captured_reset: Option<u64>,
 ) -> ui::screen::Killed {
-  if matches!(killed, ui::screen::Killed::StartupStalled { .. } | ui::screen::Killed::Inactive)
-    && harness == config::Harness::Claude
-    && captured_reset.is_some()
-    && limitwait::detect(sample).is_some_and(limitwait::LimitState::is_stopped)
-  {
+  let limited = match harness {
+    config::Harness::Claude => {
+      captured_reset.is_some() && limitwait::detect(sample).is_some_and(limitwait::LimitState::is_stopped)
+    }
+    config::Harness::Grok => limitwait::grok_quota_exhausted(sample),
+    _ => false,
+  };
+  if matches!(killed, ui::screen::Killed::StartupStalled { .. } | ui::screen::Killed::Inactive) && limited {
     ui::screen::Killed::LimitExhausted { resets_at: captured_reset }
   } else {
     killed
@@ -6989,15 +7028,20 @@ fn run_one_skill(
   if let Some(dir) = &github_auth {
     let _ = std::fs::remove_dir_all(dir);
   }
-  // A watchdog can fire after a live limit classification was missed. Before assigning its
-  // ordinary stall verdict, use Claude's two independent artifacts: stopped-limit prose in the
-  // cast and a future exhausted-window reset in the captured status line. Reclassification feeds
-  // the existing LimitExhausted arm below, including reset propagation and retry scheduling.
+  // A watchdog can fire after a live limit classification was missed — and for grok, whose
+  // quota dialog never resumes, it always does. Before assigning its ordinary stall verdict,
+  // check the cast for the harness's stopped-limit prose (claude additionally needs a future
+  // exhausted-window reset in the captured status line). Reclassification feeds the existing
+  // LimitExhausted arm below, including reset propagation and retry scheduling.
   let result = match result {
     Ok((false, killed @ (ui::screen::Killed::StartupStalled { .. } | ui::screen::Killed::Inactive), last))
-      if skill.harness == config::Harness::Claude && observed_reset_at.is_some() =>
+      if (skill.harness == config::Harness::Claude && observed_reset_at.is_some())
+        || skill.harness == config::Harness::Grok =>
     {
       let sample = cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL));
+      if skill.harness == config::Harness::Grok && limitwait::grok_quota_exhausted(&sample) {
+        observed_reset_at = usage_limit_reset(skill.harness, observed_reset_at);
+      }
       Ok((false, reclassify_watchdog_usage_limit(skill.harness, killed, &sample, observed_reset_at), last))
     }
     other => other,
@@ -7057,13 +7101,11 @@ fn run_one_skill(
       // The watch asks for the reset while parked; the harvest above reads the same capture one
       // last time after the container is gone. Either may be the one that got an answer.
       let resets_at = resets_at.or(observed_reset_at);
-      // The account's quota ran out and claude's own wait either never armed or gave up. Nothing
-      // about the task went wrong and nothing about it will go right until the window reopens,
-      // so this carries the reset instant out to the retry loop rather than a backoff.
-      let why = match resets_at {
-        Some(at) => format!("stopped by a claude.ai usage limit; resets {}", quota::human_epoch(at)),
-        None => "stopped by a claude.ai usage limit with no reported reset time".to_string(),
-      };
+      // The account's quota ran out: claude's own wait either never armed or gave up, or grok
+      // raised its quota dialog. Nothing about the task went wrong and nothing about it will go
+      // right until the window reopens, so this carries the reset instant out to the retry loop
+      // rather than a backoff.
+      let why = usage_limit_why(skill.harness, resets_at);
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       // Leave the reset instant on the row (with the live phase cleared): the job supervisor
       // reads it to schedule this job's restart for when the window reopens, instead of
@@ -7125,6 +7167,7 @@ fn run_one_skill(
       // otherwise claim it and hand it that useless backoff.
       let limited = harness_exited_on_usage_limit(skill.harness, &sample);
       if limited {
+        let observed_reset_at = usage_limit_reset(skill.harness, observed_reset_at);
         if let Some(c) = &daemon_client {
           c.proc_phase(spinner.index(), None, observed_reset_at, &why);
         }
@@ -11441,12 +11484,22 @@ mod tests {
     let _ = std::fs::remove_dir_all(&parent);
   }
 
+  /// Grok Build's quota dialog as a live session rendered it (job oqmkzh, 2026-09-24).
+  const GROK_QUOTA_DIALOG: &str = r#"You hit your weekly limit.
+  1 (○) Upgrade tier      Upgrade to a higher tier for more usage
+  2 (○) Buy more credits  Purchase credits to keep using Grok Build
+  3 (○) Try Again         Resubmit the last prompt once you have usage again"#;
+
   #[test]
-  fn post_exit_usage_limit_detection_is_claude_only() {
+  fn post_exit_usage_limit_detection_reads_each_harness_own_prose() {
     let sample = "The failed command printed: Usage limit reached";
     assert!(harness_exited_on_usage_limit(config::Harness::Claude, sample));
     for harness in [config::Harness::Opencode, config::Harness::Codex, config::Harness::Grok, config::Harness::Cursor] {
       assert!(!harness_exited_on_usage_limit(harness, sample), "{} retained its real failure", harness.as_str());
+    }
+    assert!(harness_exited_on_usage_limit(config::Harness::Grok, GROK_QUOTA_DIALOG));
+    for harness in [config::Harness::Opencode, config::Harness::Codex, config::Harness::Cursor] {
+      assert!(!harness_exited_on_usage_limit(harness, GROK_QUOTA_DIALOG), "only grok's own screen counts");
     }
     assert!(!harness_exited_on_usage_limit(
       config::Harness::Claude,
@@ -11490,11 +11543,50 @@ mod tests {
       ui::screen::Killed::StartupStalled { silent: false },
       "an explicit resume is not a stopped limit"
     );
+    // Grok parks on its quota dialog until a watchdog kills it: the dialog alone is the
+    // verdict, with or without a reset from its billing endpoint.
+    for captured in [Some(reset), None] {
+      assert_eq!(
+        reclassify_watchdog_usage_limit(
+          config::Harness::Grok,
+          ui::screen::Killed::StartupStalled { silent: false },
+          GROK_QUOTA_DIALOG,
+          captured
+        ),
+        ui::screen::Killed::LimitExhausted { resets_at: captured }
+      );
+    }
+    assert_eq!(
+      reclassify_watchdog_usage_limit(config::Harness::Grok, ui::screen::Killed::Inactive, stopped, Some(reset)),
+      ui::screen::Killed::Inactive,
+      "claude's banner on a grok screen is not grok's limit"
+    );
+    assert_eq!(
+      usage_limit_why(config::Harness::Grok, Some(reset)),
+      format!("stopped by the grok account's usage limit; resets {}", quota::human_epoch(reset))
+    );
+    assert_eq!(
+      usage_limit_why(config::Harness::Claude, None),
+      "stopped by a claude.ai usage limit with no reported reset time"
+    );
 
     let run = SkillRun::failed(failure::reason::HARNESS_USAGE_LIMIT, None, None, None).with_limit_reset(Some(reset));
     let policy = failure::RetryPolicy::resolve(None, None);
     assert_eq!(
-      retry_decision(run.fail_reason.as_deref(), false, false, policy, 0, 0, 1, true, true, true, run.limit_resets_at,),
+      retry_decision(
+        run.fail_reason.as_deref(),
+        false,
+        false,
+        policy,
+        0,
+        0,
+        1,
+        true,
+        true,
+        true,
+        run.limit_resets_at,
+        reset - 3600
+      ),
       RetryDecision::LimitWait { resume_at: Some(reset) }
     );
   }
@@ -11747,7 +11839,7 @@ mod tests {
       signature_cap: 5,
     };
     let decide = |reason: &'static str, retries: u32, spent: u64, identical: u32| {
-      retry_decision(Some(reason), false, false, policy, retries, spent, identical, true, true, true, None)
+      retry_decision(Some(reason), false, false, policy, retries, spent, identical, true, true, true, None, 0)
     };
 
     // A harness dying with a non-zero exit is retryable — a silent crash at container
@@ -11766,12 +11858,25 @@ mod tests {
     assert_eq!(decide(failure::reason::RESULT_INVALID, 0, 0, 1), Stop);
     // The one schema-correction retry precedes the budget logic.
     assert_eq!(
-      retry_decision(Some(failure::reason::RESULT_INVALID), false, true, policy, 0, 0, 1, true, true, true, None),
+      retry_decision(Some(failure::reason::RESULT_INVALID), false, true, policy, 0, 0, 1, true, true, true, None, 0),
       Schema
     );
     // SCSH_NO_RETRY (retry_enabled=false) stops everything except explicit browser clicks.
     assert_eq!(
-      retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, policy, 0, 0, 1, false, true, true, None),
+      retry_decision(
+        Some(failure::reason::CONTAINER_TIMEOUT),
+        false,
+        false,
+        policy,
+        0,
+        0,
+        1,
+        false,
+        true,
+        true,
+        None,
+        0
+      ),
       Stop
     );
     assert_eq!(
@@ -11787,6 +11892,7 @@ mod tests {
         true,
         true,
         None,
+        0,
       ),
       Browser,
       "a browser restart ignores budget, breaker, and SCSH_NO_RETRY"
@@ -11814,9 +11920,30 @@ mod tests {
         true,
         true,
         true,
-        Some(1_800_000_000)
+        Some(1_800_000_000),
+        1_800_000_000 - 10 * 3600,
       ),
       RetryDecision::LimitWait { resume_at: Some(1_800_000_000) }
+    );
+    // A reset past the longest wait a retry may park for (grok's weekly window, days out) cannot
+    // reopen within this run, so the route stops at once and the supervisor holds the job.
+    assert_eq!(
+      retry_decision(
+        Some(failure::reason::HARNESS_USAGE_LIMIT),
+        false,
+        false,
+        policy,
+        0,
+        0,
+        1,
+        true,
+        true,
+        true,
+        Some(1_800_000_000),
+        1_800_000_000 - 5 * 24 * 3600,
+      ),
+      Stop,
+      "a weekly reset days away is not waited out in-run"
     );
     assert_eq!(decide(failure::reason::HARNESS_USAGE_LIMIT, 0, 0, 1), RetryDecision::LimitWait { resume_at: None });
     assert_eq!(
@@ -11838,7 +11965,8 @@ mod tests {
         true,
         true,
         true,
-        None
+        None,
+        0
       ),
       Stop
     );
@@ -11854,7 +11982,8 @@ mod tests {
         true,
         true,
         false,
-        None
+        None,
+        0
       ),
       Automatic
     );
