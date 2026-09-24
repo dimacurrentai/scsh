@@ -310,6 +310,41 @@ fn normalize_iso(ts: &str) -> String {
   }
 }
 
+/// `YYYY-MM-DDTHH:MM:SSZ` (the shape [`normalize_iso`] produces) → unix seconds. Anything
+/// else — another offset, a missing field — is `None` rather than a guess.
+fn iso_to_epoch(iso: &str) -> Option<u64> {
+  let t = iso.strip_suffix('Z')?;
+  let (date, clock) = t.split_once('T')?;
+  let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
+  let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+  let mut c = clock.splitn(3, ':').map(|p| p.parse::<i64>().ok());
+  let (hh, mm, ss) = (c.next()??, c.next()??, c.next()??);
+  if !(1..=12).contains(&m) || !(1..=31).contains(&day) || hh > 23 || mm > 59 || ss > 60 {
+    return None;
+  }
+  // Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's days_from_civil).
+  let y = if m <= 2 { y - 1 } else { y };
+  let era = y.div_euclid(400);
+  let yoe = y - era * 400;
+  let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  let days = era * 146_097 + doe - 719_468;
+  u64::try_from(days * 86_400 + hh * 3600 + mm * 60 + ss).ok()
+}
+
+/// When an exhausted window of this quota reading reopens — the reset behind a harness's own
+/// "you hit your limit" screen. `None` when nothing is exhausted, the reading carries no reset,
+/// or the reset is already past.
+pub fn exhausted_reset_epoch(quota: &HarnessQuota, now: u64) -> Option<u64> {
+  quota
+    .windows
+    .iter()
+    .filter(|w| w.used_percent >= 100.0)
+    .filter_map(|w| w.resets_at.as_deref().and_then(iso_to_epoch))
+    .filter(|&at| at > now)
+    .max()
+}
+
 /// Unix seconds → `YYYY-MM-DDTHH:MM:SSZ`, reusing the run-dir stamp formatter.
 fn epoch_to_iso(epoch_secs: u64) -> String {
   let s = crate::runtime::format_utc_timestamp(epoch_secs); // YYYYMMDD-HHMMSS
@@ -1235,6 +1270,33 @@ mod tests {
     assert_eq!(windows[2].id, "weekly_grokchat");
     assert_eq!(windows[2].used_percent, 0.0);
     assert!(parse_grok_billing("{}").is_err());
+  }
+
+  #[test]
+  fn an_exhausted_window_yields_its_reset_and_iso_round_trips() {
+    for epoch in [0, 951_782_400, 1_790_272_793, 4_107_542_399] {
+      assert_eq!(iso_to_epoch(&epoch_to_iso(epoch)), Some(epoch), "{}", epoch_to_iso(epoch));
+    }
+    for bad in ["2026-09-29T14:56:06+02:00", "2026-13-01T00:00:00Z", "2026-09-29", "soon"] {
+      assert_eq!(iso_to_epoch(bad), None, "{bad}");
+    }
+    // Live 2026-09-24 reading: the overall credits are spent though one product still has room.
+    let window = |used: f64, at: &str| QuotaWindow {
+      id: "w".into(),
+      label: "w".into(),
+      used_percent: used,
+      resets_at: Some(at.into()),
+    };
+    let reset = iso_to_epoch("2026-09-29T14:56:06Z").unwrap();
+    let quota = HarnessQuota::ok(
+      Harness::Grok,
+      Some("GrokPro".into()),
+      vec![window(100.0, "2026-09-29T14:56:06Z"), window(89.0, "2026-09-30T00:00:00Z")],
+    );
+    assert_eq!(exhausted_reset_epoch(&quota, 1_790_272_793), Some(reset), "only the exhausted window counts");
+    assert_eq!(exhausted_reset_epoch(&quota, reset), None, "a reset already past is no reset");
+    let room = HarnessQuota::ok(Harness::Grok, None, vec![window(99.5, "2026-09-29T14:56:06Z")]);
+    assert_eq!(exhausted_reset_epoch(&room, 0), None, "nothing exhausted");
   }
 
   #[test]

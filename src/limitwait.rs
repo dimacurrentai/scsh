@@ -1,4 +1,5 @@
-//! Reading a claude usage limit off the harness's own screen.
+//! Reading a usage limit off the harness's own screen: claude's (most of this module), and
+//! grok's quota dialog ([`grok_quota_exhausted`]).
 //!
 //! When the account's limit stops a claude session mid-task, the TUI does not exit and does not
 //! fail — it parks. From scsh's side that looks exactly like a wedged harness: the screen stops
@@ -115,6 +116,24 @@ pub fn detect(text: &str) -> Option<LimitState> {
   best.map(|(_, _, state)| state)
 }
 
+/// The limit a Grok Build session hits and never leaves on its own.
+///
+/// Grok has no wait to arm: when the account runs out it raises a modal — "You hit your weekly
+/// limit." over *Upgrade tier*, *Buy more credits*, and *Try Again* — and sits on it. Only the
+/// limit line together with one of the dialog's own options counts, so a task that merely quotes
+/// "hit your weekly limit" (this very prose, say) is not mistaken for a spent account.
+pub fn grok_quota_exhausted(text: &str) -> bool {
+  const LIMIT: [&str; 4] =
+    ["hit your weekly limit", "hit your daily limit", "hit your monthly limit", "hit your usage limit"];
+  const DIALOG: [&str; 3] = [
+    "purchase credits to keep using grok",
+    "upgrade to a higher tier for more usage",
+    "resubmit the last prompt once you have usage again",
+  ];
+  let hay = text.to_ascii_lowercase();
+  LIMIT.iter().any(|n| hay.contains(n)) && DIALOG.iter().any(|n| hay.contains(n))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -183,6 +202,25 @@ mod tests {
     assert_eq!(detect("running tests\n  47 passed\ncompiling scsh v1.42.0\n"), None);
     // `scsh quota`'s own summary line names limits without the session being stopped by one.
     assert_eq!(detect("claude (max): 5h session 3% \u{b7} weekly 57%"), None);
+  }
+
+  /// Rendered from a live Grok Build 1.0.41 session on 2026-09-24 (job oqmkzh), box drawing
+  /// and padding trimmed.
+  const GROK_DIALOG: &str = r#"Weekly limit left: 0% · 22
+  You hit your weekly limit.
+  1 (○) Upgrade tier      Upgrade to a higher tier for more usage
+  2 (○) Buy more credits  Purchase credits to keep using Grok Build
+  3 (○) Try Again         Resubmit the last prompt once you have usage again
+  ↑/↓ navigate · y copy"#;
+
+  #[test]
+  fn grok_reads_as_exhausted_only_on_its_own_dialog() {
+    assert!(grok_quota_exhausted(GROK_DIALOG));
+    assert!(grok_quota_exhausted(&GROK_DIALOG.to_uppercase()));
+    // The limit line alone — quoted in a prompt, a log, a doc — is not the dialog.
+    assert!(!grok_quota_exhausted("grep for 'You hit your weekly limit.' in the grok transcript"));
+    assert!(!grok_quota_exhausted("Buy more credits"));
+    assert!(!grok_quota_exhausted(""));
   }
 
   #[test]
