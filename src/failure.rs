@@ -38,8 +38,9 @@ pub mod reason {
   /// The harness lost its backend connection (its output says so) and exited non-zero —
   /// e.g. cursor's "Reconnecting to …" giving up after half an hour. Always retryable.
   pub const HARNESS_DISCONNECTED: &str = "harness_disconnected";
-  /// The provider definitively rejected the credentials on the FIRST attempt. Permanent:
-  /// no overnight budget can log the user back in.
+  /// The harness came up logged out: the credentials scsh forwarded were refused (see
+  /// [`super::claude_logged_out`]). Retrying with the SAME credentials is refused the same way,
+  /// so the retry loops try again only once the host's login has changed.
   pub const HARNESS_AUTH_REJECTED: &str = "harness_auth_rejected";
   /// The route kept failing with the SAME failure signature until the circuit breaker
   /// tripped — retrying further would burn tokens on a deterministic failure.
@@ -128,14 +129,10 @@ pub enum Verdict {
 /// retryable reasons plus a TUI result-miss — because persistence beyond one run is the
 /// job supervisor's business: a job that fails terminally is restarted (resuming its
 /// completed steps) up to its retries budget, so an over-eager in-run verdict would just
-/// double-spend. `first_attempt` scopes the auth verdict: credentials rejected out of
-/// the gate are permanent (no retry budget can log the user back in), but an auth error
-/// appearing only on a LATER attempt (the first one got further) is provider flakiness
-/// and stays retryable.
-pub fn verdict(reason: &str, tui: bool, first_attempt: bool) -> Verdict {
-  if reason == reason::HARNESS_AUTH_REJECTED {
-    return if first_attempt { Verdict::Permanent } else { Verdict::Retryable };
-  }
+/// double-spend. A refused login ([`reason::HARNESS_AUTH_REJECTED`]) is permanent here: the
+/// retry loops give it another try only when the host's credentials have changed, which is
+/// theirs to check, not this reason's.
+pub fn verdict(reason: &str, tui: bool) -> Verdict {
   if is_transient(reason) || (reason == reason::RESULT_MISSING && tui) {
     return Verdict::Retryable;
   }
@@ -357,6 +354,25 @@ impl SuspectedCause {
       Self::ToolCallParseFailure => "Likely cause: tool-call parsing failure. An exhausted retry appeared in the recording; it may be incidental. Inspect the recording and partial work.",
     }
   }
+}
+
+/// Whether Claude Code's own status line says the session is logged out — the forwarded login
+/// was refused (an expired token, or a refresh token another run had already used). Only its two
+/// status-line pairs count, "Not logged in · Run /login" and "Login expired · Please run /login",
+/// never one phrase alone. Matched on letters and digits only: the TUI draws some of those
+/// spaces as cursor moves, so the rendered text reads `Notloggedin`.
+pub fn claude_logged_out(text: &str) -> bool {
+  let compact: String = text.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect();
+  (compact.contains("notloggedin") && compact.contains("runlogin"))
+    || (compact.contains("loginexpired") && compact.contains("pleaserunlogin"))
+}
+
+/// Whether Claude Code is retrying a failing API call ("API error · Retrying in 1s · attempt
+/// 1/10"). That is all a refused `CLAUDE_CODE_OAUTH_TOKEN` shows before the watchdog ends the
+/// run, and an outage looks the same: this only says the provider is worth asking.
+pub fn claude_api_error_retrying(text: &str) -> bool {
+  let compact: String = text.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect();
+  compact.contains("apierror") && compact.contains("retryingin")
 }
 
 /// Screen text can quote an error or retain an old banner, so this is only a hint.
@@ -780,24 +796,43 @@ mod tests {
   }
 
   #[test]
+  fn claude_logged_out_needs_its_own_status_line_pair() {
+    // Rendered from the oqmkzh s5_fable retries (2026-09-24): cursor moves stand in for spaces.
+    assert!(claude_logged_out("scsh   Notloggedin·\nRun/login\n●high·/effort"));
+    assert!(claude_logged_out("● Login expired · Please run /login\n✻ Brewed for 0s"));
+    assert!(claude_logged_out("NOT LOGGED IN · RUN /LOGIN"));
+    // One phrase alone is prose, not the status line.
+    for quoted in ["the docs say: Run /login first", "Login expired", "user is not logged in", ""] {
+      assert!(!claude_logged_out(quoted), "{quoted}");
+    }
+  }
+
+  #[test]
+  fn claude_api_error_retry_banner_is_recognized() {
+    // Rendered from a run handed a bogus CLAUDE_CODE_OAUTH_TOKEN (2026-09-24).
+    assert!(claude_api_error_retrying("*✶✻ API error · Retrying in 1s · attempt 1/10"));
+    assert!(!claude_api_error_retrying("API error"));
+    assert!(!claude_api_error_retrying("Retrying in 5s"));
+  }
+
+  #[test]
   fn verdict_retries_transients_and_fails_fast_on_the_rest() {
     use Verdict::{Permanent, Retryable};
     // Retryable: the transient set + TUI result-miss.
-    assert_eq!(verdict(reason::HARNESS_NONZERO, true, true), Retryable);
-    assert_eq!(verdict(reason::HARNESS_DISCONNECTED, false, true), Retryable);
-    assert_eq!(verdict(reason::RESULT_MISSING, true, true), Retryable);
+    assert_eq!(verdict(reason::HARNESS_NONZERO, true), Retryable);
+    assert_eq!(verdict(reason::HARNESS_DISCONNECTED, false), Retryable);
+    assert_eq!(verdict(reason::RESULT_MISSING, true), Retryable);
     // Everything else is permanent IN-RUN — the job supervisor's restarts (with resume)
     // are the persistence layer for these, not another container in the same run.
-    assert_eq!(verdict(reason::RESULT_MISSING, false, true), Permanent);
-    assert_eq!(verdict(reason::RESULT_INVALID, true, true), Permanent);
-    assert_eq!(verdict(reason::THREAD_PANICKED, true, true), Permanent);
-    assert_eq!(verdict(reason::ENV_UNRESOLVED, true, true), Permanent);
-    assert_eq!(verdict(reason::BUILD_FAILED, true, true), Permanent);
-    assert_eq!(verdict(reason::RETRIES_EXHAUSTED_IDENTICAL, true, true), Permanent);
-    assert_eq!(verdict(reason::FORCE_STOPPED, true, true), Permanent);
-    // Auth: first-attempt rejection is permanent; a LATER-attempt one is flakiness.
-    assert_eq!(verdict(reason::HARNESS_AUTH_REJECTED, true, true), Permanent);
-    assert_eq!(verdict(reason::HARNESS_AUTH_REJECTED, true, false), Retryable);
+    assert_eq!(verdict(reason::RESULT_MISSING, false), Permanent);
+    assert_eq!(verdict(reason::RESULT_INVALID, true), Permanent);
+    assert_eq!(verdict(reason::THREAD_PANICKED, true), Permanent);
+    assert_eq!(verdict(reason::ENV_UNRESOLVED, true), Permanent);
+    assert_eq!(verdict(reason::BUILD_FAILED, true), Permanent);
+    assert_eq!(verdict(reason::RETRIES_EXHAUSTED_IDENTICAL, true), Permanent);
+    assert_eq!(verdict(reason::FORCE_STOPPED, true), Permanent);
+    // Retried only on changed credentials, which is the retry loops' check, never on its own.
+    assert_eq!(verdict(reason::HARNESS_AUTH_REJECTED, true), Permanent);
   }
 
   #[test]

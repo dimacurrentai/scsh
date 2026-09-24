@@ -407,6 +407,30 @@ struct HttpResponse {
 
 /// One HTTPS request through `curl --config -`: the URL and every header (including the
 /// Authorization bearer) travel over stdin, never argv. 10s cap, fail-fast.
+/// Whether the provider refuses this Claude OAuth token outright: `Some(true)` on HTTP 401,
+/// `Some(false)` when it is accepted, `None` when the answer says nothing either way (403, 429,
+/// 5xx, no network). One GET to `/v1/models`, an inference-side endpoint that costs no usage,
+/// so a `claude setup-token` token (inference scope only) is judged by what it may actually do;
+/// the usage endpoint `scsh quota` reads also wants the profile scope. The token travels in
+/// curl's stdin config, never on its command line.
+pub fn claude_token_refused(token: &str) -> Option<bool> {
+  let headers = [
+    format!("Authorization: Bearer {token}"),
+    "anthropic-beta: oauth-2025-04-20".to_string(),
+    "anthropic-version: 2023-06-01".to_string(),
+  ];
+  curl("https://api.anthropic.com/v1/models", &headers, None).ok().and_then(|resp| token_verdict(resp.status))
+}
+
+/// The pure half of [`claude_token_refused`]: only a 401 is a refusal, only a 200 an acceptance.
+fn token_verdict(status: u16) -> Option<bool> {
+  match status {
+    401 => Some(true),
+    200 => Some(false),
+    _ => None,
+  }
+}
+
 fn curl(url: &str, headers: &[String], post_body: Option<&str>) -> Result<HttpResponse, String> {
   // Providers throttle bursts on these endpoints (observed live: a 429 right after a
   // sweep). One short in-run retry absorbs the transient case; a persistent 429 is
@@ -1270,6 +1294,16 @@ mod tests {
     assert_eq!(windows[2].id, "weekly_grokchat");
     assert_eq!(windows[2].used_percent, 0.0);
     assert!(parse_grok_billing("{}").is_err());
+  }
+
+  #[test]
+  fn only_a_401_refuses_a_token() {
+    assert_eq!(token_verdict(401), Some(true));
+    assert_eq!(token_verdict(200), Some(false));
+    // A scope the endpoint wants, throttling, or an outage says nothing about the token itself.
+    for status in [403, 429, 500, 529] {
+      assert_eq!(token_verdict(status), None, "{status}");
+    }
   }
 
   #[test]
