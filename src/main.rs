@@ -217,6 +217,7 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
           None,
           Some(path.as_str()),
           None,
+          &[],
         );
         c.proc_start(idx);
         c.proc_note(idx, "summarizing…");
@@ -558,6 +559,7 @@ fn annotate_run_casts(
           None,
           Some(cast.to_string_lossy().as_ref()),
           None,
+          &[],
         );
         client.proc_start(idx);
         client.proc_note(idx, "summarizing…");
@@ -2878,7 +2880,7 @@ fn backoff_sleep_interruptible(delay_secs: u64, session_id: &str, proc_index: us
 fn run_workflow_step_with_retries(
   invocation: &ResolvedInvocation, step: &harness_def::Step, rt: &Runtime, root: &Path, secs: u64,
   initial_proc: ui::screen::Proc, ui: &ui::screen::LiveUi, caller_tip: Option<&str>, base: Option<&RunBase>,
-  daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str, cache_allowed: bool,
+  daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str, cache_allowed: bool, order: &[u32],
 ) -> SkillRun {
   let contract = WorkflowResultContract {
     outputs: &step.outputs,
@@ -2995,6 +2997,7 @@ fn run_workflow_step_with_retries(
         None,
         None,
         Some(proc_index),
+        &harness_def::ReportOrder::retry_key(order, attempts as u32 + 1),
       );
     }
     proc_index = next.index();
@@ -3065,7 +3068,7 @@ fn ensure_workflow_images(
     let (label, image) = build_proc_identity(&rt.name, harness);
     let p = ui.proc(label.clone(), false);
     if let Some(c) = daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, image, None, None, None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, image, None, None, None, None, None, &[]);
     }
     p.start();
     let stem = image.unwrap_or("base");
@@ -3248,6 +3251,8 @@ fn run_workflow(
     do_while_bodies.insert(end.id.clone(), body);
   }
 
+  let report_order = harness_def::ReportOrder::new(&def.steps);
+
   // Declare EVERY step as a proc row up front, in definition order — the board and the
   // session browser show the whole job's shape (step k/n, what it needs) from the first
   // paint. A gated-off step later finishes as ⊘ skipped instead of silently never existing.
@@ -3275,6 +3280,7 @@ fn run_workflow(
         None,
         None,
         None,
+        &report_order.key(&s.id, 1, 1),
       );
     }
     p.note(&note);
@@ -3366,6 +3372,7 @@ fn run_workflow(
     let mut invs: Vec<ResolvedInvocation> = Vec::new();
     let mut procs: Vec<ui::screen::Proc> = Vec::new();
     let mut live_steps: Vec<&harness_def::Step> = Vec::new();
+    let mut live_orders: Vec<Vec<u32>> = Vec::new();
     let mut run_ids: Vec<String> = Vec::new();
     let mut restored_runs: Vec<(String, SkillRun)> = Vec::new();
     let mut host_steps: Vec<PendingHostStep> = Vec::new();
@@ -3394,6 +3401,7 @@ fn run_workflow(
             None,
             None,
             None,
+            &report_order.key(&s.id, iteration, 1),
           );
         }
         p.note(&format!(
@@ -3446,6 +3454,7 @@ fn run_workflow(
       invs.push(step_invocation(s, &run_id, &session_dir_rel, inputs, commit_identity));
       procs.push(p);
       live_steps.push(s);
+      live_orders.push(report_order.key(&s.id, iteration, 1));
       run_ids.push(run_id);
     }
 
@@ -3455,8 +3464,8 @@ fn run_workflow(
       let handles: Vec<_> = invs
         .iter()
         .zip(procs)
-        .zip(live_steps.iter())
-        .map(|((inv, p), step)| {
+        .zip(live_steps.iter().zip(&live_orders))
+        .map(|((inv, p), (step, order))| {
           let rt = rt.expect("an agent step requires a preflighted container runtime");
           let dc = daemon_client.clone();
           let caller_tip_ref = wave_caller_tip.as_deref();
@@ -3479,6 +3488,7 @@ fn run_workflow(
               dc,
               sid,
               cache_allowed,
+              order,
             );
             (id, run)
           })
@@ -3594,6 +3604,7 @@ fn run_workflow(
                     None,
                     None,
                     None,
+                    &report_order.key(&skipped.id, completed, 1),
                   );
                 }
                 p.finish_skipped(&format!("skipped — '{}' broke the loop", s.id));
@@ -4515,6 +4526,7 @@ fn quota_cmd(harness: Option<config::Harness>, json_flag: bool, session: Option<
           None,
           None,
           None,
+          &[],
         );
       }
       p
@@ -5478,7 +5490,7 @@ fn build_and_run(
     let (base_label, image) = build_proc_identity(&rt.name, None);
     let p = ui.proc(base_label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, image, None, None, None, None, None);
+      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, image, None, None, None, None, None, &[]);
     }
     base_build = Some(p);
   }
@@ -5487,7 +5499,7 @@ fn build_and_run(
     let (label, image) = build_proc_identity(&rt.name, Some(spec.harness));
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, image, None, None, None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, image, None, None, None, None, None, &[]);
     }
     harness_build_procs.push(p);
   }
@@ -5507,6 +5519,7 @@ fn build_and_run(
         fleet_route_name(skill),
         None,
         None,
+        &[],
       );
     }
     if any_image_build {
@@ -5711,6 +5724,7 @@ fn build_and_run(
                 fleet_route_name(skill),
                 None,
                 Some(proc_index),
+                &[],
               );
             }
             proc_index = next.index();
@@ -5795,6 +5809,7 @@ fn build_and_run(
       fake_procs.push(ProcRecord {
         index: o.proc_index,
         previous_attempt: None,
+        order: Vec::new(),
         label: format!("{}: {}", skill.harness.as_str(), skill.name),
         kind: ProcKind::Skill,
         status: if o.graceful_shutdown {
@@ -8997,7 +9012,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
     let (label, image) = build_proc_identity(&rt_name, None);
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, image, None, None, None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, image, None, None, None, None, None, &[]);
     }
     base_build = Some(p);
   }
@@ -9006,7 +9021,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
     let (label, image) = build_proc_identity(&rt_name, Some(spec.harness));
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, image, None, None, None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, image, None, None, None, None, None, &[]);
     }
     harness_build_procs.push(p);
   }
@@ -10462,6 +10477,8 @@ fn print_help_agent() {
   println!("{}", h_dim("  (strings; plain `error` also lands in errors) to the JSON \u{2014} even in a workflow"));
   println!("{}", h_dim("  step's typed result; they are never forwarded to other steps. From a host step's"));
   println!("{}", h_dim("  shell: append to the files in $SCSH_RESULTS_MD, $SCSH_LOG_MD, $SCSH_ERRORS_MD."));
+  println!("{}", h_dim("  In a workflow each section follows the graph: the logically last step on top, the"));
+  println!("{}", h_dim("  first at the bottom, loop laps newest first \u{2014} never the order tasks finished in."));
   println!("{}", h_dim("  Markdown is packdiff's subset: headings, lists, code, quotes, links, bold/italic."));
   println!();
   println!("{}", h_head("Bring your own work to any repo"));

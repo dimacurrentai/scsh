@@ -2311,8 +2311,10 @@ function renderSession(session, nowUnix) {
   updateWorkflowGraph(session, nowUnix);
 }
 // Mirror of report.rs — the errors / results / log cards fill in place as the job's tasks
-// contribute. Each entry arrives rendered (`html`), so the page needs no renderer; a card is
-// replaced only when its fingerprint moves, so a reader selecting its text is not disturbed.
+// contribute. Each entry arrives rendered (`html`) and already in page order (the daemon
+// sorts by the writing task's report-order key), so the page needs no renderer and no sort; a
+// card is replaced only when its fingerprint moves, so a reader selecting its text is not
+// disturbed.
 function syncJobReport(session) {
   const entries = (session && session.report) || [];
   ['errors', 'results', 'log'].forEach(section => {
@@ -2338,8 +2340,9 @@ function reportEntriesHtml(entries) {
   const attributed = sources.size > 1;
   return entries.map(e => {
     const proc = (e.proc === null || e.proc === undefined) ? '' : ' data-proc="' + esc(String(e.proc)) + '"';
+    const order = e.order ? ' data-order="' + esc(e.order) + '"' : '';
     const caption = (attributed && e.source) ? '<p class="report-source dim">' + esc(e.source) + '</p>' : '';
-    return '<section class="report-entry"' + proc + '>' + caption + (e.html || '') + '</section>';
+    return '<section class="report-entry"' + proc + order + '>' + caption + (e.html || '') + '</section>';
   }).join('');
 }
 // Mirror of session_lede_html in session.rs — the page heading ticks with the live

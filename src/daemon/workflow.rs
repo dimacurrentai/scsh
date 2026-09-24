@@ -936,6 +936,7 @@ mod tests {
       procs: vec![ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         label: "claude: add".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Running,
@@ -998,6 +999,7 @@ mod tests {
         ProcRecord {
           index: 0,
           previous_attempt: None,
+          order: Vec::new(),
           label: "build grok".into(),
           kind: ProcKind::Build,
           status: ProcStatus::Ok,
@@ -1026,6 +1028,7 @@ mod tests {
         ProcRecord {
           index: 1,
           previous_attempt: None,
+          order: Vec::new(),
           label: "grok: smoke".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Waiting,
@@ -1102,6 +1105,7 @@ mod tests {
         ProcRecord {
           index: 0,
           previous_attempt: None,
+          order: Vec::new(),
           label: "using Apple Containers · build base".into(),
           kind: ProcKind::Build,
           status: ProcStatus::Running,
@@ -1130,6 +1134,7 @@ mod tests {
         ProcRecord {
           index: 1,
           previous_attempt: None,
+          order: Vec::new(),
           label: "using Apple Containers · build claude".into(),
           kind: ProcKind::Build,
           status: ProcStatus::Waiting,
@@ -1158,6 +1163,7 @@ mod tests {
         ProcRecord {
           index: 2,
           previous_attempt: None,
+          order: Vec::new(),
           label: "using Apple Containers · build cursor".into(),
           kind: ProcKind::Build,
           status: ProcStatus::Waiting,
@@ -1186,6 +1192,7 @@ mod tests {
         ProcRecord {
           index: 3,
           previous_attempt: None,
+          order: Vec::new(),
           label: "claude: demo-pr-claude-sonnet".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Waiting,
@@ -1214,6 +1221,7 @@ mod tests {
         ProcRecord {
           index: 4,
           previous_attempt: None,
+          order: Vec::new(),
           label: "cursor: demo-pr-cursor-composer-2.5-fast".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Waiting,
@@ -1277,6 +1285,7 @@ mod tests {
     let proc = |index: usize, kind: ProcKind, label: &str, harness: Option<&str>, skill: Option<&str>| ProcRecord {
       index,
       previous_attempt: None,
+      order: Vec::new(),
       label: label.into(),
       kind,
       status: if kind == ProcKind::Build { ProcStatus::Running } else { ProcStatus::Waiting },
@@ -1354,6 +1363,7 @@ mod tests {
         ProcRecord {
           index: 0,
           previous_attempt: None,
+          order: Vec::new(),
           label: "using Apple Containers · build claude".into(),
           kind: ProcKind::Build,
           status: ProcStatus::Ok,
@@ -1382,6 +1392,7 @@ mod tests {
         ProcRecord {
           index: 1,
           previous_attempt: None,
+          order: Vec::new(),
           label: "claude: add".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1410,6 +1421,7 @@ mod tests {
         ProcRecord {
           index: 2,
           previous_attempt: None,
+          order: Vec::new(),
           label: "codex: multiply".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1438,6 +1450,7 @@ mod tests {
         ProcRecord {
           index: 3,
           previous_attempt: None,
+          order: Vec::new(),
           label: "grok: summarize".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Waiting,
@@ -1500,6 +1513,7 @@ mod tests {
         ProcRecord {
           index: 0,
           previous_attempt: None,
+          order: Vec::new(),
           label: "claude: add".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1528,6 +1542,7 @@ mod tests {
         ProcRecord {
           index: 1,
           previous_attempt: None,
+          order: Vec::new(),
           label: "codex: multiply".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1556,6 +1571,7 @@ mod tests {
         ProcRecord {
           index: 2,
           previous_attempt: None,
+          order: Vec::new(),
           label: "grok: summarize".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1641,6 +1657,7 @@ mod tests {
         ProcRecord {
           index: 0,
           previous_attempt: None,
+          order: Vec::new(),
           label: "claude: add".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1669,6 +1686,7 @@ mod tests {
         ProcRecord {
           index: 1,
           previous_attempt: None,
+          order: Vec::new(),
           label: "codex: multiply".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1697,6 +1715,7 @@ mod tests {
         ProcRecord {
           index: 2,
           previous_attempt: None,
+          order: Vec::new(),
           label: "grok: summarize".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,

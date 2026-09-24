@@ -188,6 +188,10 @@ pub struct ProcRecord {
   /// chain; `None` means the first attempt (or a record written before attempt lineage was
   /// introduced). The daemon validates this edge when the replacement proc registers.
   pub previous_attempt: Option<usize>,
+  /// Where this task's job-page contributions sort, highest on top: the key a workflow step
+  /// is stamped with when it starts (see `harness_def::ReportOrder`). Empty for tasks outside
+  /// a workflow and for records written before the key existed; those sort below keyed ones.
+  pub order: Vec<u32>,
   pub label: String,
   pub kind: ProcKind,
   pub status: ProcStatus,
@@ -928,9 +932,30 @@ impl Session {
     true
   }
 
-  /// The contributions to one section, in arrival order.
+  /// The contributions to one section, in page order (see [`Self::report_in_page_order`]).
   pub fn report_for(&self, section: ReportSection) -> Vec<&ReportEntry> {
-    self.report.iter().filter(|e| e.section == section).collect()
+    self.report_in_page_order().into_iter().filter(|e| e.section == section).collect()
+  }
+
+  /// Every contribution in the order the job page shows it, fixed by the job's graph rather
+  /// than by which task happened to finish first: by the writing task's report-order key,
+  /// highest (logically last) on top. Entries whose task has no key — a flat run, a record
+  /// from before keys existed — follow, in arrival order.
+  pub fn report_in_page_order(&self) -> Vec<&ReportEntry> {
+    let mut entries: Vec<&ReportEntry> = self.report.iter().collect();
+    // Stable: entries under equal keys keep their arrival order.
+    entries.sort_by(|a, b| match (self.report_order_of(a), self.report_order_of(b)) {
+      ([], []) => std::cmp::Ordering::Equal,
+      ([], _) => std::cmp::Ordering::Greater,
+      (_, []) => std::cmp::Ordering::Less,
+      (ka, kb) => kb.cmp(ka),
+    });
+    entries
+  }
+
+  /// The report-order key of the task that wrote `entry`; empty when there is none.
+  pub fn report_order_of(&self, entry: &ReportEntry) -> &[u32] {
+    entry.proc.and_then(|index| self.procs.iter().find(|p| p.index == index)).map_or(&[], |p| p.order.as_slice())
   }
 
   pub fn lifecycle_status(&self, now: u64) -> SessionLifecycle {
@@ -996,6 +1021,7 @@ mod tests {
     ProcRecord {
       index: 0,
       previous_attempt: None,
+      order: Vec::new(),
       label: "skill".into(),
       kind: ProcKind::Skill,
       status,
@@ -1171,6 +1197,34 @@ mod tests {
   }
 
   #[test]
+  fn a_jobs_report_follows_its_tasks_keys_not_the_order_they_finished() {
+    let procs = (0..6).map(|i| (i, ProcStatus::Ok, None)).collect();
+    let mut session = launch_test_store(procs).sessions.remove("job").unwrap();
+    // plan · prepare · publish · a loop's two laps · one task with no key (a flat skill).
+    for (index, key) in
+      [(0, vec![1, 1]), (1, vec![22, 1]), (2, vec![26, 1]), (3, vec![5, 2, 1, 1]), (4, vec![5, 10, 1, 1])]
+    {
+      session.procs[index].order = key;
+    }
+    let entry = |proc: usize, text: &str| ReportEntry {
+      section: ReportSection::Results,
+      proc: Some(proc),
+      source: format!("task-{proc}"),
+      markdown: text.into(),
+    };
+    // Arrival order is scrambled on purpose: publish lands before prepare.
+    for (proc, text) in
+      [(5, "unkeyed-a"), (2, "publish"), (3, "lap-2"), (0, "plan"), (1, "prepare"), (4, "lap-10"), (5, "unkeyed-b")]
+    {
+      session.push_report(entry(proc, text));
+    }
+    session.push_report(ReportEntry { proc: None, ..entry(0, "no-task") });
+    let texts: Vec<&str> = session.report_for(ReportSection::Results).iter().map(|e| e.markdown.as_str()).collect();
+    assert_eq!(texts, ["publish", "prepare", "lap-10", "lap-2", "plan", "unkeyed-a", "unkeyed-b", "no-task"]);
+    assert_eq!(session.report[0].markdown, "unkeyed-a", "the record itself keeps arrival order");
+  }
+
+  #[test]
   fn launch_slots_are_capped_machine_wide_and_idempotent_per_holder() {
     let mut store = launch_test_store(vec![(0, ProcStatus::Waiting, None), (1, ProcStatus::Waiting, None)]);
     let mut other = launch_test_store(vec![(0, ProcStatus::Waiting, None)]).sessions.remove("job").unwrap();
@@ -1266,6 +1320,7 @@ mod tests {
       procs: vec![ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         label: "skill".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Ok,
@@ -1451,6 +1506,7 @@ mod tests {
     let proc = |kind: ProcKind, status: ProcStatus| ProcRecord {
       index: 0,
       previous_attempt: None,
+      order: Vec::new(),
       label: "row".into(),
       kind,
       status,
@@ -1559,6 +1615,7 @@ mod tests {
       procs: vec![ProcRecord {
         index: 0,
         previous_attempt: None,
+        order: Vec::new(),
         label: "skill".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Running,
@@ -1610,6 +1667,7 @@ mod tests {
         ProcRecord {
           index: 0,
           previous_attempt: None,
+          order: Vec::new(),
           label: "done".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1638,6 +1696,7 @@ mod tests {
         ProcRecord {
           index: 1,
           previous_attempt: None,
+          order: Vec::new(),
           label: "still going".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Waiting,

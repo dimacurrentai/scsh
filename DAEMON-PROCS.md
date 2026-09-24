@@ -79,7 +79,9 @@ Rules that hold everywhere:
 - **A retry is a NEW proc**, never a reset of the old one. The fresh row carries
   `previous_attempt` pointing at the row it supersedes, which is what makes attempt
   numbering, the "superseded — see attempt N" link, and both navigation directions
-  deterministic. "Superseded" is *derived* from that edge, never stored.
+  deterministic. "Superseded" is *derived* from that edge, never stored. A workflow retry
+  also carries its first attempt's report-order key (`order`) with the attempt component
+  bumped, so its job-page contributions sort above the attempt it replaces.
 - **An ended session accepts no new procs.** `proc/add` is refused once `ended_at` is set.
   Without that rule a retry attempt queued before a stop can land after it — the run client
   posts asynchronously — leaving a `waiting` row that nothing will ever settle.

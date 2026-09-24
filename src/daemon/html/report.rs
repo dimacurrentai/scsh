@@ -27,7 +27,7 @@ pub(crate) fn report_section_html(session: &Session, section: ReportSection) -> 
     key = section.as_str(),
     title = section.title(),
     sig = report_signature(&entries),
-    body = report_entries_html(&entries),
+    body = report_entries_html(session, &entries),
   )
 }
 
@@ -38,11 +38,17 @@ pub(crate) fn report_signature(entries: &[&ReportEntry]) -> String {
   format!("{}:{bytes}", entries.len())
 }
 
-/// The contributions of one section, each under the name of the task that wrote it — the
-/// caption is shown only when more than one task contributed, so a section with a single
-/// author reads as prose, not as a list of attributions. Mirrored by `reportEntriesHtml`
-/// in the client script.
-pub(crate) fn report_entries_html(entries: &[&ReportEntry]) -> String {
+/// A report-order key in its dotted form (`22.1`, `17.3.2.1`) — the entry's `data-order`, so
+/// the page's order can be read straight off the markup. Empty for an entry without a key.
+pub(crate) fn order_label(order: &[u32]) -> String {
+  order.iter().map(u32::to_string).collect::<Vec<_>>().join(".")
+}
+
+/// The contributions of one section, already in page order, each under the name of the task
+/// that wrote it — the caption is shown only when more than one task contributed, so a
+/// section with a single author reads as prose, not as a list of attributions. Mirrored by
+/// `reportEntriesHtml` in the client script.
+pub(crate) fn report_entries_html(session: &Session, entries: &[&ReportEntry]) -> String {
   let mut sources: Vec<&str> = entries.iter().map(|e| e.source.as_str()).collect();
   sources.sort_unstable();
   sources.dedup();
@@ -51,12 +57,17 @@ pub(crate) fn report_entries_html(entries: &[&ReportEntry]) -> String {
     .iter()
     .map(|e| {
       let proc = e.proc.map(|p| format!(" data-proc=\"{p}\"")).unwrap_or_default();
+      let order = session.report_order_of(e);
+      let order = if order.is_empty() { String::new() } else { format!(" data-order=\"{}\"", order_label(order)) };
       let caption = if attributed && !e.source.is_empty() {
         format!("<p class=\"report-source dim\">{}</p>", esc(&e.source))
       } else {
         String::new()
       };
-      format!("<section class=\"report-entry\"{proc}>{caption}{}</section>", super::markdown_to_html(&e.markdown))
+      format!(
+        "<section class=\"report-entry\"{proc}{order}>{caption}{}</section>",
+        super::markdown_to_html(&e.markdown)
+      )
     })
     .collect()
 }

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use super::castprobe::{cast_probe_snapshot, probe_growth_messages, CastProbe};
 use super::db::StoreDb;
 use super::html;
-use super::jsonio::{field_bool, field_num, field_str, tick_json, tick_json_light};
+use super::jsonio::{field_bool, field_num, field_order, field_str, tick_json, tick_json_light};
 use super::model::{
   DaemonMode, OpenRepo, OutputLine, ProcKind, ProcRecord, ProcStatus, ReportEntry, ReportSection, Session,
   SessionLifecycle, SkillMeta, Store,
@@ -1541,6 +1541,8 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let route = field_str(&obj, "route");
       let annotate_target = field_str(&obj, "annotate_target");
       let previous_attempt = field_num(&obj, "previous_attempt").map(|value| value as usize);
+      // Where this task's job-page contributions sort (a workflow step's stamped key).
+      let order = field_order(&obj);
       if let Some(previous) = previous_attempt {
         let valid_predecessor = previous < proc_index
           && s
@@ -1561,6 +1563,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       }
       if let Some(p) = s.procs.iter_mut().find(|p| p.index == proc_index) {
         p.previous_attempt = previous_attempt;
+        p.order = order;
         p.label = label;
         p.kind = kind;
         p.skill_name = skill_name.clone();
@@ -1573,6 +1576,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         s.procs.push(ProcRecord {
           index: proc_index,
           previous_attempt,
+          order,
           label,
           kind,
           status: ProcStatus::Waiting,
@@ -2739,6 +2743,7 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
     s.procs.push(ProcRecord {
       index: 0,
       previous_attempt: None,
+      order: Vec::new(),
       label: label.into(),
       kind: ProcKind::Skill,
       status: ProcStatus::Fail,
@@ -3905,6 +3910,7 @@ mod tests {
     let running_proc = ProcRecord {
       index: 0,
       previous_attempt: None,
+      order: Vec::new(),
       kind: ProcKind::Skill,
       label: "skill".into(),
       status: ProcStatus::Running,
@@ -3980,6 +3986,7 @@ mod tests {
     let route_proc = |index: usize, source: &str, route: &str| ProcRecord {
       index,
       previous_attempt: None,
+      order: Vec::new(),
       kind: ProcKind::Skill,
       label: format!("{source}-{route}"),
       status: ProcStatus::Ok,
@@ -4093,6 +4100,7 @@ mod tests {
     archived.procs.push(ProcRecord {
       index: 0,
       previous_attempt: None,
+      order: Vec::new(),
       kind: ProcKind::Skill,
       label: "old-skill".into(),
       status: ProcStatus::Ok,
@@ -4248,6 +4256,7 @@ mod tests {
           procs: vec![ProcRecord {
             index: 0,
             previous_attempt: None,
+            order: Vec::new(),
             label: "skill".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Running,
@@ -4377,6 +4386,7 @@ mod tests {
           procs: vec![ProcRecord {
             index: 0,
             previous_attempt: None,
+            order: Vec::new(),
             label: "skill".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Running,
@@ -4440,6 +4450,7 @@ mod tests {
           procs: vec![ProcRecord {
             index: 0,
             previous_attempt: None,
+            order: Vec::new(),
             label: "skill".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Running,
@@ -4566,6 +4577,7 @@ mod tests {
           procs: vec![ProcRecord {
             index: 0,
             previous_attempt: None,
+            order: Vec::new(),
             label: "skill".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Running,
@@ -4635,6 +4647,7 @@ mod tests {
           procs: vec![ProcRecord {
             index: 0,
             previous_attempt: None,
+            order: Vec::new(),
             label: "opencode: doctor".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Running,
@@ -4720,6 +4733,7 @@ mod tests {
     let proc = |index: usize, name: &str| ProcRecord {
       index,
       previous_attempt: None,
+      order: Vec::new(),
       label: format!("grok: {name}"),
       kind: ProcKind::Skill,
       status: ProcStatus::Running,
@@ -4834,6 +4848,7 @@ mod tests {
           procs: vec![ProcRecord {
             index: 0,
             previous_attempt: None,
+            order: Vec::new(),
             label: "annotate · source".into(),
             kind: ProcKind::Annotate,
             status: ProcStatus::Running,
@@ -4889,6 +4904,7 @@ mod tests {
     let proc = |index: usize, kind: ProcKind| ProcRecord {
       index,
       previous_attempt: None,
+      order: Vec::new(),
       label: format!("claude: review-{index}"),
       kind,
       status: ProcStatus::Running,
@@ -4987,7 +5003,7 @@ mod tests {
     // finalizes the old attempt and makes both forward/backward navigation deterministic.
     assert!(handle_api_post(
       "/api/v1/proc/add",
-      r#"{"session":"rst01","proc":3,"label":"claude: review-1 (retry)","kind":"skill","skill_name":"review-1","harness":"claude","previous_attempt":1}"#,
+      r#"{"session":"rst01","proc":3,"label":"claude: review-1 (retry)","kind":"skill","skill_name":"review-1","harness":"claude","previous_attempt":1,"order":[4,2]}"#,
       &store,
       &prune,
     ));
@@ -4998,6 +5014,7 @@ mod tests {
       let replacement = session.procs.iter().find(|p| p.index == 3).unwrap();
       assert_eq!(old.fail_reason.as_deref(), Some(crate::failure::reason::FORCE_RESTARTED));
       assert_eq!(replacement.previous_attempt, Some(1));
+      assert_eq!(replacement.order, [4, 2], "the retry keeps the key it was stamped with");
       assert_eq!(session.proc_next_attempt(old).map(|p| p.index), Some(3));
       assert_eq!(session.proc_first_attempt(replacement).index, 1);
     }
@@ -5117,6 +5134,7 @@ mod tests {
     let proc = |index: usize, harness: &str| ProcRecord {
       index,
       previous_attempt: None,
+      order: Vec::new(),
       label: format!("{harness}: review"),
       kind: ProcKind::Skill,
       status: ProcStatus::Running,
@@ -5462,6 +5480,7 @@ mod tests {
           procs: vec![ProcRecord {
             index: 0,
             previous_attempt: None,
+            order: Vec::new(),
             label: "claude: add".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Running,
@@ -5575,6 +5594,7 @@ mod tests {
           procs: vec![ProcRecord {
             index: 0,
             previous_attempt: None,
+            order: Vec::new(),
             label: "claude: add".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Ok,
@@ -5651,6 +5671,7 @@ mod tests {
     ProcRecord {
       index,
       previous_attempt: None,
+      order: Vec::new(),
       label: label.into(),
       kind: ProcKind::Skill,
       status: ProcStatus::Ok,
@@ -6196,6 +6217,7 @@ mod tests {
             procs: vec![ProcRecord {
               index: 0,
               previous_attempt: None,
+              order: Vec::new(),
               label: "skill".into(),
               kind: ProcKind::Skill,
               status: ProcStatus::Waiting,
@@ -7027,6 +7049,7 @@ mod tests {
     let live = |index: usize, status: ProcStatus| ProcRecord {
       index,
       previous_attempt: None,
+      order: Vec::new(),
       label: format!("claude: route-{index}"),
       kind: ProcKind::Skill,
       status,
