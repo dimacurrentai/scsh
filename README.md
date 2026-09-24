@@ -288,6 +288,20 @@ nullable `suspected_cause` metadata (`expired_credentials` or
 `tool_call_parse_failure`), with an explanation in `detail`. Successful runs
 receive no diagnosis.
 
+One login screen is definitive rather than a hint: Claude Code's own status line saying the
+session is logged out ("Not logged in · Run /login", "Login expired · Please run /login"). The
+credentials `scsh` forwarded were refused, typically a keychain copy whose refresh token another
+run already used. The run ends as `harness_auth_rejected` rather than a startup stall, with a
+detail saying how to fix it: refresh the host login, or give `scsh` a long-lived
+`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, which does not rotate. A refused token
+never reaches that screen, only Claude's "API error · Retrying" banner, which an outage shows
+too. So when a run fails on that banner with a forwarded token, `scsh` asks the provider once
+(`GET /v1/models`, no usage): only an HTTP 401 makes it `harness_auth_rejected`, and any other
+answer keeps the ordinary verdict. Handing the same
+credentials over again is refused the same way, so the route is retried only when the login the
+host would forward has changed since the refused attempt, judged by a SHA-256 of the forwarded
+token and credentials, never the secret itself.
+
 An account's usage limit is handled apart from that machinery, because it is not a failure
 and no backoff can outlast it. Claude containers arm Claude Code's own limit wait
 (`autoContinueAtUsageLimit`), so a limited session waits for the reset and continues **the

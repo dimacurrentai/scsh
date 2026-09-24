@@ -2635,6 +2635,20 @@ enum RetryDecision {
   Automatic,
 }
 
+/// Whether the host would now forward a different login than the one a logged-out attempt was
+/// refused with. No fingerprint (not a refused login) or nothing to forward any more reads as
+/// unchanged: another attempt could only be refused again.
+fn credentials_changed_since(run: &SkillRun) -> bool {
+  // Only a refused login pays for the keychain read.
+  let Some(refused) = run.auth_fingerprint.as_deref() else { return false };
+  credentials_differ(Some(refused), claude_auth_fingerprint().as_deref())
+}
+
+/// The pure half of [`credentials_changed_since`].
+fn credentials_differ(refused: Option<&str>, now: Option<&str>) -> bool {
+  matches!((refused, now), (Some(refused), Some(now)) if refused != now)
+}
+
 /// One route's retry verdict for one failed attempt: browser restarts always win, the
 /// one schema-correction retry comes next, and everything else is the task retry
 /// contract — retryable per [`failure::verdict`], within both its count and wall-clock
@@ -2644,7 +2658,7 @@ enum RetryDecision {
 fn retry_decision(
   fail_reason: Option<&str>, restart_requested: bool, schema_retry_available: bool, policy: failure::RetryPolicy,
   retries_used: u32, budget_spent_secs: u64, consecutive_identical: u32, retry_enabled: bool, tui: bool,
-  first_attempt: bool, limit_resets_at: Option<u64>, now: u64,
+  limit_resets_at: Option<u64>, now: u64, credentials_changed: bool,
 ) -> RetryDecision {
   if restart_requested {
     return RetryDecision::Browser;
@@ -2661,7 +2675,13 @@ fn retry_decision(
   let Some(reason) = fail_reason else {
     return RetryDecision::Stop;
   };
-  if failure::verdict(reason, tui, first_attempt) != failure::Verdict::Retryable {
+  // A refused login is refused again when the same credentials are handed over, whichever attempt
+  // it is; only a host login that has changed since earns another try.
+  if reason == failure::reason::HARNESS_AUTH_REJECTED {
+    if !credentials_changed {
+      return RetryDecision::Stop;
+    }
+  } else if failure::verdict(reason, tui) != failure::Verdict::Retryable {
     return RetryDecision::Stop;
   }
   if consecutive_identical > policy.signature_cap {
@@ -2940,9 +2960,9 @@ fn run_workflow_step_with_retries(
       retry.consecutive_identical,
       failure::retry_enabled(),
       invocation.harness.is_tui(),
-      attempts == 1,
       run.limit_resets_at,
       daemon::now_unix_secs(),
+      credentials_changed_since(&run),
     );
     if decision == RetryDecision::Stop || decision == RetryDecision::StopBreaker {
       // An invalid-result attempt returns with its proc row still open (run_one_skill
@@ -5691,9 +5711,9 @@ fn build_and_run(
               retry.consecutive_identical,
               failure::retry_enabled(),
               skill.harness.is_tui(),
-              attempts == 1,
               run.limit_resets_at,
               daemon::now_unix_secs(),
+              credentials_changed_since(&run),
             );
             match decision {
               RetryDecision::Stop => {
@@ -6071,6 +6091,10 @@ struct SkillRun {
   /// seconds), if the provider said. The retry loops wait for it instead of spending a backoff
   /// that could never reach it — see [`RetryDecision::LimitWait`].
   limit_resets_at: Option<u64>,
+  /// When the harness came up logged out: a fingerprint of the credentials this attempt was
+  /// given (see [`claude_auth_fingerprint`]). The retry loops compare it with what the host would
+  /// forward now and try again only when the login has changed.
+  auth_fingerprint: Option<String>,
   /// Normalized per-attempt spend for a supported harness, including unavailable accounting.
   usage: Option<usage::Summary>,
   /// Scratch for this attempt could not be removed. The task outcome is unchanged; the
@@ -6099,6 +6123,7 @@ impl SkillRun {
       workflow_outputs: None,
       graceful_shutdown: false,
       limit_resets_at: None,
+      auth_fingerprint: None,
       usage: None,
       cleanup_pending: None,
       preserve_error: None,
@@ -6137,6 +6162,11 @@ impl SkillRun {
   /// scheduled for when the quota actually returns.
   fn with_limit_reset(mut self, resets_at: Option<u64>) -> SkillRun {
     self.limit_resets_at = resets_at;
+    self
+  }
+  /// Carry the fingerprint of the refused credentials out of a logged-out failure.
+  fn with_auth_fingerprint(mut self, fingerprint: Option<String>) -> SkillRun {
+    self.auth_fingerprint = fingerprint;
     self
   }
   fn with_usage(mut self, usage: Option<usage::Summary>) -> SkillRun {
@@ -6312,6 +6342,30 @@ fn usage_limit_why(harness: config::Harness, resets_at: Option<u64>) -> String {
   match resets_at {
     Some(at) => format!("stopped by {owner}; resets {}", quota::human_epoch(at)),
     None => format!("stopped by {owner} with no reported reset time"),
+  }
+}
+
+/// Whether a failed run's screen shows the harness logged out. Claude only: its status line is
+/// the one whose wording is pinned (see [`failure::claude_logged_out`]); other harnesses keep
+/// their real verdict and the uncertain [`failure::suspected_cause`] hint. A usage limit is
+/// never read as a logout.
+fn harness_came_up_logged_out(harness: config::Harness, sample: &str) -> bool {
+  harness == config::Harness::Claude
+    && failure::claude_logged_out(sample)
+    && !harness_exited_on_usage_limit(harness, sample)
+}
+
+/// The row's detail for a refused Claude login, naming the fix for the credential that was refused.
+fn auth_rejected_why(token_refused: bool) -> String {
+  if token_refused {
+    "claude in the container is not logged in: the CLAUDE_CODE_OAUTH_TOKEN scsh forwarded was refused \
+— create a new one with `claude setup-token`; scsh retries only once the token changes"
+      .to_string()
+  } else {
+    "claude in the container is not logged in: the forwarded login was refused (expired, or its refresh \
+token already used by another run) — refresh the login on the host by running `claude`, or give scsh \
+CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`); scsh retries only once the host login changes"
+      .to_string()
   }
 }
 
@@ -6716,6 +6770,9 @@ fn run_one_skill(
   } else {
     None
   };
+  // Taken as the login is handed over, not after the run: a host that refreshes its login while
+  // this attempt is being refused must read as changed, and so earn the retry.
+  let forwarded_auth = claude_auth.as_ref().and_then(|_| claude_auth_fingerprint());
   let codex_auth =
     if skill.harness == config::Harness::Codex && codex_auth_enabled() { forward_codex(&run_dir) } else { None };
   let grok_auth =
@@ -7046,6 +7103,35 @@ fn run_one_skill(
     }
     other => other,
   };
+  // A harness whose login was refused is neither a stall nor a crash: the credentials scsh
+  // forwarded were refused, and a retry handed the same ones is refused the same way. Name it,
+  // say how to fix it, and carry the refused login's fingerprint to the retry loop. Checked after
+  // the usage-limit verdicts, which keep precedence.
+  if let Ok((
+    false,
+    ui::screen::Killed::StartupStalled { .. } | ui::screen::Killed::Inactive | ui::screen::Killed::No,
+    _,
+  )) = &result
+  {
+    let sample = cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL));
+    let logged_out = harness_came_up_logged_out(skill.harness, &sample);
+    // A refused CLAUDE_CODE_OAUTH_TOKEN never reaches a logged-out screen, only Claude's API
+    // retry banner, which an outage shows too: ask the provider about the token itself.
+    let token_refused = !logged_out
+      && skill.harness == config::Harness::Claude
+      && failure::claude_api_error_retrying(&sample)
+      && runtime::claude_oauth_token().and_then(|token| quota::claude_token_refused(&token)) == Some(true);
+    if logged_out || token_refused {
+      let why = auth_rejected_why(token_refused);
+      let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
+      finish_harness_failure(&spinner, failure::reason::HARNESS_AUTH_REJECTED, &detail, &run_dir);
+      return SkillRun::failed(failure::reason::HARNESS_AUTH_REJECTED, Some(run_dir_str), Some(log), clone_dir)
+        .with_fail_detail(&why)
+        .with_auth_fingerprint(forwarded_auth)
+        .with_usage(usage)
+        .preserve(preserve_error.as_deref());
+    }
+  }
   let usage_failure = if usage_accounting_required()
     && matches!(&result, Ok((true, _, _)))
     && (run_dir.join(format!("{}.usage-error", runtime::RUN_LOG_REL)).is_file()
@@ -8030,6 +8116,26 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
     }
   }
   Some(root)
+}
+
+/// A fingerprint of the Claude login [`forward_claude_auth`] would hand a container right now: the
+/// `CLAUDE_CODE_OAUTH_TOKEN` it passes through the environment and the credentials blob it
+/// copies, in that function's own precedence. A SHA-256, never the secret. `None` when there is
+/// nothing to forward. A refused login is worth retrying only once this has changed.
+fn claude_auth_fingerprint() -> Option<String> {
+  let token = runtime::claude_oauth_token();
+  let home = std::env::var_os("HOME").map(PathBuf::from);
+  let blob = home
+    .map(|h| h.join(".claude").join(".credentials.json"))
+    .and_then(|p| std::fs::read(p).ok())
+    .or_else(|| runtime::claude_keychain_credentials_json().map(String::into_bytes));
+  if token.is_none() && blob.is_none() {
+    return None;
+  }
+  let mut material = token.unwrap_or_default().into_bytes();
+  material.push(0);
+  material.extend(blob.unwrap_or_default());
+  Some(sha256::sha256_hex(&material))
 }
 
 /// Write the container's Claude Code `settings.json` (and the status-line script it names).
@@ -11490,6 +11596,58 @@ mod tests {
   2 (○) Buy more credits  Purchase credits to keep using Grok Build
   3 (○) Try Again         Resubmit the last prompt once you have usage again"#;
 
+  /// Two frames of a claude retry container from job oqmkzh (2026-09-24), escape sequences
+  /// verbatim: the status line draws its spaces as cursor moves.
+  const CLAUDE_LOGGED_OUT_CAST: &str = r#"[1.0, "o", "\u001b[2C\u001b[38;5;211m⏵⏵\u001b[Cbypass\u001b[Cpermissions\u001b[Con\u001b[38;5;246m (shift+tab\u001b[Cto\u001b[Ccycle)\u001b[C·\u001b[C←\u001b[Cfor\u001b[Cagents\u001b[110C\u001b[38;5;211mNot\u001b[Clogged\u001b[Cin\u001b[C·\u001b[39m\r\n\u001b[49;189H\u001b[38;5;211mRun\u001b[C/login\u001b[39m"]
+[2.0, "o", "\u001b[43;1H\u001b[38;5;231m●\u001b[C\u001b[39mLogin expired ·\u001b[CPlease\u001b[Crun\u001b[C/login\u001b[45;1H\u001b[38;5;246m✻\u001b[39m \u001b[38;5;246mBrewed for 0s\u001b[39m"]"#;
+
+  #[test]
+  fn a_claude_container_that_came_up_logged_out_is_an_auth_rejection() {
+    let screen = ptyrec::cast_output_text(CLAUDE_LOGGED_OUT_CAST);
+    assert!(harness_came_up_logged_out(config::Harness::Claude, &screen), "{screen}");
+    for harness in [config::Harness::Codex, config::Harness::Grok, config::Harness::Cursor, config::Harness::Opencode] {
+      assert!(!harness_came_up_logged_out(harness, &screen), "{} keeps its real verdict", harness.as_str());
+    }
+    assert!(!harness_came_up_logged_out(config::Harness::Claude, "fixing the login page: Run /login redirects"));
+    // A usage limit keeps its own verdict even when the screen also mentions logging in.
+    let limited = format!("{screen}\nYou've hit your session limit \u{b7} resets 8:50am");
+    assert!(!harness_came_up_logged_out(config::Harness::Claude, &limited));
+    assert!(auth_rejected_why(false).contains("refresh the login on the host"));
+    assert!(auth_rejected_why(true).contains("claude setup-token"));
+  }
+
+  #[test]
+  fn a_refused_login_is_retried_only_once_the_host_login_changed() {
+    use RetryDecision::{Automatic, Stop};
+    let policy = failure::RetryPolicy::resolve(None, None);
+    let decide = |retries_used: u32, changed: bool| {
+      retry_decision(
+        Some(failure::reason::HARNESS_AUTH_REJECTED),
+        false,
+        false,
+        policy,
+        retries_used,
+        0,
+        1,
+        true,
+        true,
+        None,
+        0,
+        changed,
+      )
+    };
+    // oqmkzh: every s5_fable retry was handed the same dead keychain copy and refused again.
+    assert_eq!(decide(0, false), Stop, "refused on the first attempt");
+    assert_eq!(decide(1, false), Stop, "refused on a retry");
+    assert_eq!(decide(1, true), Automatic, "a refreshed host login earns the retry");
+    assert_eq!(decide(0, true), Automatic);
+    assert_eq!(decide(5, true), Stop, "the retry count still bounds it");
+    assert!(credentials_differ(Some("a"), Some("b")));
+    assert!(!credentials_differ(Some("a"), Some("a")), "the same login is refused the same way");
+    assert!(!credentials_differ(Some("a"), None), "nothing left to forward");
+    assert!(!credentials_differ(None, Some("b")), "not a refused login");
+  }
+
   #[test]
   fn post_exit_usage_limit_detection_reads_each_harness_own_prose() {
     let sample = "The failed command printed: Usage limit reached";
@@ -11583,9 +11741,9 @@ mod tests {
         1,
         true,
         true,
-        true,
         run.limit_resets_at,
-        reset - 3600
+        reset - 3600,
+        false
       ),
       RetryDecision::LimitWait { resume_at: Some(reset) }
     );
@@ -11839,7 +11997,7 @@ mod tests {
       signature_cap: 5,
     };
     let decide = |reason: &'static str, retries: u32, spent: u64, identical: u32| {
-      retry_decision(Some(reason), false, false, policy, retries, spent, identical, true, true, true, None, 0)
+      retry_decision(Some(reason), false, false, policy, retries, spent, identical, true, true, None, 0, false)
     };
 
     // A harness dying with a non-zero exit is retryable — a silent crash at container
@@ -11858,7 +12016,7 @@ mod tests {
     assert_eq!(decide(failure::reason::RESULT_INVALID, 0, 0, 1), Stop);
     // The one schema-correction retry precedes the budget logic.
     assert_eq!(
-      retry_decision(Some(failure::reason::RESULT_INVALID), false, true, policy, 0, 0, 1, true, true, true, None, 0),
+      retry_decision(Some(failure::reason::RESULT_INVALID), false, true, policy, 0, 0, 1, true, true, None, 0, false),
       Schema
     );
     // SCSH_NO_RETRY (retry_enabled=false) stops everything except explicit browser clicks.
@@ -11873,9 +12031,9 @@ mod tests {
         1,
         false,
         true,
-        true,
         None,
-        0
+        0,
+        false
       ),
       Stop
     );
@@ -11890,9 +12048,9 @@ mod tests {
         99,
         false,
         true,
-        true,
         None,
         0,
+        false,
       ),
       Browser,
       "a browser restart ignores budget, breaker, and SCSH_NO_RETRY"
@@ -11919,9 +12077,9 @@ mod tests {
         1,
         true,
         true,
-        true,
         Some(1_800_000_000),
         1_800_000_000 - 10 * 3600,
+        false,
       ),
       RetryDecision::LimitWait { resume_at: Some(1_800_000_000) }
     );
@@ -11938,9 +12096,9 @@ mod tests {
         1,
         true,
         true,
-        true,
         Some(1_800_000_000),
         1_800_000_000 - 5 * 24 * 3600,
+        false,
       ),
       Stop,
       "a weekly reset days away is not waited out in-run"
@@ -11952,7 +12110,8 @@ mod tests {
     );
     assert_eq!(decide(failure::reason::HARNESS_USAGE_LIMIT, 5, 0, 1), Stop, "the retry count still bounds it");
     assert_eq!(decide(failure::reason::HARNESS_USAGE_LIMIT, 0, 0, 6), StopBreaker);
-    // First-attempt auth rejection is permanent; on a later attempt it is flakiness.
+    // A refused login follows the credentials, not the attempt number: the same login is refused
+    // again, a changed one earns a retry (see a_refused_login_is_retried_only_once_the_host_login_changed).
     assert_eq!(
       retry_decision(
         Some(failure::reason::HARNESS_AUTH_REJECTED),
@@ -11964,28 +12123,11 @@ mod tests {
         1,
         true,
         true,
-        true,
         None,
-        0
+        0,
+        false
       ),
       Stop
-    );
-    assert_eq!(
-      retry_decision(
-        Some(failure::reason::HARNESS_AUTH_REJECTED),
-        false,
-        false,
-        policy,
-        0,
-        0,
-        1,
-        true,
-        true,
-        false,
-        None,
-        0
-      ),
-      Automatic
     );
   }
   use std::ffi::OsString;
