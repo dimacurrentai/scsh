@@ -501,6 +501,10 @@ pub(crate) const PAGE_CSS: &str = r#"
      stage while leaving a small graph visibly above the viewport's vertical midpoint. */
   .workflow-extent { position: relative; flex: 0 0 auto; margin: auto; overflow: hidden; }
   .workflow-stage { position: relative; flex: 0 0 auto; margin: auto; transform-origin: top left; }
+  /* Inside the scaled extent the stage must sit at its origin: the extent is zoom times wider,
+     so an auto margin would center the UNSCALED stage and the top-left scale would then push
+     its right edge past the extent's clip. Fitting above 100% cropped the last column. */
+  .workflow-extent > .workflow-stage { margin: 0; }
   .workflow-zoom { margin-left: auto; display: inline-flex; flex-wrap: wrap; max-width: 100%; gap: 0.25rem; }
   .workflow-zoom button {
     --cut: 4px; --bw: 1px;
@@ -584,11 +588,13 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node:hover { --node-border: #3a4558; }
   .wf-node:hover::before { background: var(--surface); }
   .wf-node:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
-  .wf-state { display: flex; align-items: center; gap: 0.35rem; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .wf-state { display: flex; align-items: center; gap: 0.35rem; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; min-width: 0; }
   .wf-state-elapsed { color: var(--text-muted); font-weight: 500; letter-spacing: 0; text-transform: none; }
   .wf-state-elapsed:empty { display: none; }
-  /* Retry marker on the state line — the node is bound to the route's newest attempt. */
-  .wf-attempt { color: var(--text-muted); font-weight: 500; letter-spacing: 0; text-transform: none; white-space: nowrap; }
+  /* Retry marker on the state line — the node is bound to the route's newest attempt. The line
+     (label · elapsed · attempt N) can outgrow the node: it stays one row, and only this suffix
+     gives way, with an ellipsis (the node tooltip carries the full attempt count). */
+  .wf-attempt { color: var(--text-muted); font-weight: 500; letter-spacing: 0; text-transform: none; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .wf-id { font-weight: 600; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wf-meta { font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wf-gate {

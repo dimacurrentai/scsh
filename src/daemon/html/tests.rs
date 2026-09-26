@@ -4245,6 +4245,14 @@ fn workflow_graph_renders_builtin_shapes() {
     !flat_html.contains(".workflow-stage { position: relative; flex: 0 0 auto; min-height:"),
     "the stage height follows the actual graph so a small graph is vertically centered"
   );
+  assert!(
+    flat_html.contains(".workflow-extent > .workflow-stage { margin: 0; }"),
+    "inside the zoom-sized extent the stage sits at its origin, so Fit above 100% never crops the last column"
+  );
+  assert!(
+    flat_html.contains("letter-spacing: 0.04em; white-space: nowrap; min-width: 0; }"),
+    "a node's state line stays one row even with a retry suffix"
+  );
   assert!(js.contains("data-wf-expand"), "graph has a large-view control");
   assert!(js.contains("let workflowExpanded = false"), "large view survives dynamic graph remounts");
   assert!(js.contains("aria-modal"), "large graph view exposes modal semantics");
