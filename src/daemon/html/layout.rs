@@ -1146,9 +1146,11 @@ pub(crate) const LIVE_ONLY_CSS: &str = r#"
   .proc-actions .proc-restart { grid-column: 2; grid-row: 2; }
   .proc-actions .proc-kill { grid-column: 2; grid-row: 2; }
   .proc-actions:has(.proc-restart) .proc-kill { grid-column: 2; grid-row: 3; }
-  /* Keep the summary text clear of the absolute top-right action stack. */
-  details.proc:has(.proc-actions > :not([hidden])) > summary { padding-right: 11.5rem; }
-  details.proc:has(.proc-actions .proc-diff) > summary { padding-right: 22.35rem; }
+  /* Keep the summary text clear of the absolute top-right action stack. The stack is
+     outside <summary>, so a collapsed row never renders it — reserve the room only when
+     open, or every collapsed row carries an empty right-hand gutter. */
+  details.proc[open]:has(.proc-actions > :not([hidden])) > summary { padding-right: 11.5rem; }
+  details.proc[open]:has(.proc-actions .proc-diff) > summary { padding-right: 22.35rem; }
   button.proc-kill,
   button.proc-restart {
     flex-shrink: 0;
