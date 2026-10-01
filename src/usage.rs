@@ -105,6 +105,17 @@ pub struct Summary {
 }
 
 impl Summary {
+  /// Partial accounting can still prove that a turn started. No final result or complete
+  /// token total is needed to stop treating an active agent as a failed startup.
+  pub fn has_started_work(&self) -> bool {
+    self.tool_calls.is_some_and(|n| n > 0)
+      || self.llm_round_trips.is_some_and(|n| n > 0)
+      || self
+        .tokens
+        .as_ref()
+        .is_some_and(|t| t.input > 0 || t.output > 0 || t.cache_read > 0 || t.cache_write.is_some_and(|n| n > 0))
+  }
+
   pub fn to_json(&self) -> String {
     json::write_pretty(&summary_value(self))
   }
@@ -821,6 +832,56 @@ fn number(n: usize) -> Value {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn native_work_requires_positive_evidence_but_not_complete_accounting() {
+    let mut summary = unavailable(Harness::Codex);
+    assert!(!summary.has_started_work());
+    summary.complete = true;
+    summary.tool_calls = Some(0);
+    summary.llm_round_trips = Some(0);
+    summary.tokens = Some(Tokens { input: 0, output: 0, cache_read: 0, cache_write: Some(0) });
+    assert!(!summary.has_started_work(), "a metadata-only or empty session is not work");
+    summary.complete = false;
+    summary.tokens.as_mut().unwrap().output = 1;
+    assert!(summary.has_started_work(), "partial model spend proves startup finished");
+    summary.tokens = None;
+    summary.tool_calls = Some(1);
+    assert!(summary.has_started_work(), "a tool call needs no token counters");
+  }
+
+  #[test]
+  fn native_work_is_detected_in_unfinished_cursor_and_codex_sessions() {
+    let cursor = cursor_hook_summary(
+      r#"{"hook_event_name":"postToolUse","conversation_id":"c","generation_id":"g","tool_use_id":"read-proposal"}"#,
+    );
+    assert!(!cursor.complete);
+    assert!(cursor.has_started_work());
+    let codex = codex_session_summary(&[Some(
+      r#"{"type":"session_meta","payload":{"id":"review"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":3}}}}
+"#.into(),
+    )]).unwrap();
+    assert!(codex.has_started_work(), "no task-complete event is needed");
+    assert!(!cursor_hook_summary("").has_started_work());
+    assert!(!cursor_hook_summary("incomplete json").has_started_work());
+  }
+
+  #[test]
+  fn native_work_is_detected_in_unfinished_claude_and_grok_sessions() {
+    // A transcript mid-write: one finished assistant response, then a half-flushed line.
+    let claude = claude_session_summary(&[Some(
+      r#"{"type":"assistant","requestId":"r1","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"tool_use","id":"t1"}]}}
+{"type":"assistant","message":{"id":"m2""#
+        .into(),
+    )])
+    .unwrap();
+    assert!(!claude.complete);
+    assert!(claude.has_started_work(), "a torn trailing line must not hide the finished response");
+    assert!(claude_session_summary(&[Some(r#"{"type":"user","message":{"content":"go"}}"#.into())]).is_none());
+    assert!(grok_session_summary(GROK).has_started_work());
+    assert!(!grok_session_summary("").has_started_work());
+  }
 
   pub(crate) const GROK: &str = include_str!("../tests/fixtures/grok-usage/updates.jsonl");
 
