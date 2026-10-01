@@ -6912,11 +6912,11 @@ fn run_one_skill(
   // killed rather than waiting out the full wall-clock timeout.
   let inactivity_secs = config::effective_inactivity_timeout(skill.harness, skill.inactivity_timeout);
   // The launch phase gets its own, much tighter budgets: a run whose cast shows nothing at
-  // all in the first seconds, or that stops dead while the startup window is still open, has
-  // burned nothing yet — it is killed and force-restarted immediately (no backoff) instead
-  // of waiting out `inactivity_secs`. The thresholds are jittered ±20% per spawn so a fleet
-  // launched together against one slow provider does not trip startup-silence in lockstep and
-  // force-restart as a thundering herd. Seed: wall-clock nanos mixed with the container name.
+  // all in the first seconds, or that stops dead while the startup window is still open, is
+  // checked for native evidence of work before being force-restarted (no backoff). Once a model
+  // turn or tool call is confirmed, only `inactivity_secs` applies. The thresholds are jittered
+  // ±20% per spawn so a fleet launched together against one slow provider does not trip
+  // startup-silence in lockstep and force-restart as a thundering herd. Seed: wall-clock nanos mixed with the container name.
   let startup_seed = {
     use std::hash::{Hash, Hasher};
     let nanos =
@@ -6958,6 +6958,11 @@ fn run_one_skill(
     file: run_dir.join(runtime::RUN_CAST_REL),
     limit: Duration::from_secs(inactivity_secs),
     startup: Some(ui::screen::StartupStall::jittered(startup_seed)),
+    // Independent of SCSH_NO_USAGE: partial counters and hooks prove liveness even when
+    // exact final accounting is disabled. Fresh per-attempt trees exclude prior sessions.
+    startup_complete: Some(Box::new(|| {
+      daemon::usage::from_run_dir(skill.harness, &run_dir).is_some_and(|usage| usage.has_started_work())
+    })),
     limit_wait,
   };
   // Completion watch: stop as soon as the task crosses its declared finish line, rather than

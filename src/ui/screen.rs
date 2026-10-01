@@ -189,9 +189,11 @@ pub struct ActivityWatch<'a> {
   pub file: std::path::PathBuf,
   /// Silence budget: kill the child when `file` has shown nothing novel for this long.
   pub limit: Duration,
-  /// Tighter silence budgets for the launch phase, when a wedged run has burned nothing yet
-  /// and an immediate relaunch is cheaper than waiting out the full inactivity budget.
+  /// Tighter silence budgets until native evidence confirms that agent work has started.
   pub startup: Option<StartupStall>,
+  /// Consulted before a startup kill. Native model usage or tool execution permanently
+  /// disarms startup checks; it does not reset the ordinary screen-inactivity clock.
+  pub startup_complete: Option<Box<dyn Fn() -> bool + 'a>>,
   /// Read the screen for a usage-limit banner and hold the clocks while one is up. `None`
   /// leaves every watchdog exactly as it was.
   pub limit_wait: Option<LimitWait<'a>>,
@@ -236,7 +238,7 @@ pub struct LimitWait<'a> {
 /// a healthy harness shows SOMETHING within seconds, and keeps showing new frames while it
 /// boots. So during startup the silence budgets shrink, and a kill here is reported as
 /// [`Killed::StartupStalled`] so the caller can force an immediate restart instead of a
-/// backed-off retry — nothing of value was lost.
+/// backed-off retry. Confirmed agent work disarms this policy before it can discard a turn.
 pub struct StartupStall {
   /// Kill when the watched file has shown nothing novel AT ALL this long after spawn.
   pub silence: Duration,
@@ -905,6 +907,7 @@ impl Proc {
       let watch_started = std::time::Instant::now();
       let mut last_activity = watch_started;
       let mut saw_novelty = false;
+      let mut startup_complete = false;
       let mut settling_started = false;
       loop {
         if let Some(s) = child.try_wait()? {
@@ -1032,10 +1035,17 @@ impl Proc {
             let stall_began_in_window = last_activity.duration_since(watch_started) < su.window;
             // A confirmed limit screen still has to pass the quiet gate before clocks freeze,
             // but a shorter jittered startup threshold must not kill it during that guard.
-            if !limit_stopped && stall_began_in_window && silent_for >= limit {
-              kill_child_tree(&mut child);
-              killed = Killed::StartupStalled { silent: !saw_novelty };
-              break child.wait()?;
+            if !startup_complete && !limit_stopped && stall_began_in_window && silent_for >= limit {
+              // Quiet thinking after a tool call is not a failed boot. Check native evidence
+              // only at the deadline, not on every 100ms screen poll, and latch success even
+              // if later transcript reads are temporarily incomplete. Ordinary inactivity
+              // below remains armed and retains its original deadline.
+              startup_complete = w.startup_complete.as_ref().is_some_and(|complete| complete());
+              if !startup_complete {
+                kill_child_tree(&mut child);
+                killed = Killed::StartupStalled { silent: !saw_novelty };
+                break child.wait()?;
+              }
             }
           }
           if silent_for >= w.limit {
@@ -1714,6 +1724,7 @@ mod tests {
       file: std::env::temp_dir().join(format!("scsh-watch-never-{}", std::process::id())),
       limit: Duration::from_millis(200),
       startup: None,
+      startup_complete: None,
       limit_wait: None,
     };
     let (ok, killed, _) = p.run_watched("sleep", &["5".to_string()], None, Some(&watch), None).unwrap();
@@ -1785,6 +1796,7 @@ mod tests {
       // a passing test proves the clock really is frozen rather than merely generous.
       limit: Duration::from_millis(200),
       startup: None,
+      startup_complete: None,
       limit_wait: Some(LimitWait {
         max,
         keys: keys.to_path_buf(),
@@ -2060,8 +2072,13 @@ mod tests {
         proc.start();
         let file = std::env::temp_dir().join(format!("scsh-diagnosis-{}.cast", crate::runtime::random_nonce_6()));
         write_cast(&file, &[banner]);
-        let watch =
-          ActivityWatch { file: file.clone(), limit: Duration::from_secs(1), startup: None, limit_wait: None };
+        let watch = ActivityWatch {
+          file: file.clone(),
+          limit: Duration::from_secs(1),
+          startup: None,
+          startup_complete: None,
+          limit_wait: None,
+        };
         let started = Instant::now();
         let (ok, killed, _) = proc.run_watched("sleep", &[sleep.into()], None, Some(&watch), None).unwrap();
         let _ = std::fs::remove_file(&file);
@@ -2138,8 +2155,13 @@ mod tests {
     // (Letters, not a counter: digits are normalized away, so `line 1`/`line 2` would count
     // as the same frame — that is the spinner-thrash case the watchdog now kills.)
     let script = format!("for w in a b c d e f g h; do echo tok-$w >> {}; sleep 0.1; done", file.display());
-    let watch =
-      ActivityWatch { file: file.clone(), limit: Duration::from_millis(600), startup: None, limit_wait: None };
+    let watch = ActivityWatch {
+      file: file.clone(),
+      limit: Duration::from_millis(600),
+      startup: None,
+      startup_complete: None,
+      limit_wait: None,
+    };
     let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
     let _ = std::fs::remove_file(&file);
     assert_eq!(killed, Killed::No);
@@ -2160,8 +2182,13 @@ mod tests {
       r#"i=0; while true; do echo "[$i.5, \"o\", \"thinking ${{i}}s\"]" >> {}; i=$((i+1)); sleep 0.05; done"#,
       file.display()
     );
-    let watch =
-      ActivityWatch { file: file.clone(), limit: Duration::from_millis(500), startup: None, limit_wait: None };
+    let watch = ActivityWatch {
+      file: file.clone(),
+      limit: Duration::from_millis(500),
+      startup: None,
+      startup_complete: None,
+      limit_wait: None,
+    };
     let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
     let _ = std::fs::remove_file(&file);
     assert_eq!(killed, Killed::Inactive, "repeating frames are not activity");
@@ -2183,6 +2210,7 @@ mod tests {
         stall: Duration::from_millis(400),
         window: Duration::from_millis(900),
       }),
+      startup_complete: None,
       limit_wait: None,
     };
     let started = Instant::now();
@@ -2212,6 +2240,7 @@ mod tests {
         stall: Duration::from_millis(400),
         window: Duration::from_millis(5000),
       }),
+      startup_complete: None,
       limit_wait: None,
     };
     let started = Instant::now();
@@ -2220,6 +2249,64 @@ mod tests {
     assert_eq!(killed, Killed::StartupStalled { silent: false }, "a stall inside the window is a startup stall");
     assert!(!ok);
     assert!(started.elapsed() < Duration::from_secs(5), "killed on the stall budget, not the 20s watchdog");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn startup_watch_latches_native_work_and_allows_quiet_thinking() {
+    let ui = LiveUi::new(false, None);
+    let proc = ui.proc("thinking", false);
+    proc.start();
+    let file = std::env::temp_dir().join(format!("scsh-started-{}.cast", crate::runtime::random_nonce_6()));
+    write_cast(&file, &["Read proposal.md", "I am consolidating the review."]);
+    let calls = std::cell::Cell::new(0);
+    let watch = ActivityWatch {
+      file: file.clone(),
+      limit: Duration::from_secs(5),
+      startup: Some(StartupStall {
+        silence: Duration::from_millis(200),
+        stall: Duration::from_millis(200),
+        window: Duration::from_secs(5),
+      }),
+      startup_complete: Some(Box::new(|| {
+        calls.set(calls.get() + 1);
+        calls.get() == 1 // A later incomplete read must not rearm the startup watchdog.
+      })),
+      limit_wait: None,
+    };
+    let (ok, killed, _) = proc.run_watched("sleep", &["1".into()], None, Some(&watch), None).unwrap();
+    let _ = std::fs::remove_file(file);
+    assert!(ok, "quiet thinking must survive the startup budget");
+    assert_eq!(killed, Killed::No);
+    assert_eq!(calls.get(), 1, "confirmation is latched, not polled forever");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn startup_watch_native_work_does_not_disable_normal_inactivity() {
+    let ui = LiveUi::new(false, None);
+    let proc = ui.proc("started-but-wedged", false);
+    proc.start();
+    let file = std::env::temp_dir().join(format!("scsh-started-wedge-{}.cast", crate::runtime::random_nonce_6()));
+    write_cast(&file, &["Read proposal.md"]);
+    let watch = ActivityWatch {
+      file: file.clone(),
+      limit: Duration::from_millis(700),
+      startup: Some(StartupStall {
+        silence: Duration::from_millis(200),
+        stall: Duration::from_millis(200),
+        window: Duration::from_secs(5),
+      }),
+      startup_complete: Some(Box::new(|| true)),
+      limit_wait: None,
+    };
+    let started = Instant::now();
+    let (ok, killed, _) = proc.run_watched("sleep", &["30".into()], None, Some(&watch), None).unwrap();
+    let _ = std::fs::remove_file(file);
+    assert!(!ok);
+    assert_eq!(killed, Killed::Inactive);
+    assert!(started.elapsed() >= watch.limit, "the full inactivity budget must be honored");
+    assert!(started.elapsed() < Duration::from_secs(5), "confirmed work cannot exempt a wedged agent");
   }
 
   #[cfg(unix)]
@@ -2243,6 +2330,7 @@ mod tests {
         stall: Duration::from_millis(500),
         window: Duration::from_millis(300),
       }),
+      startup_complete: None,
       limit_wait: None,
     };
     let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
@@ -2273,7 +2361,13 @@ mod tests {
       confirm: Box::new(|| true),
     };
     // An inactivity limit far too long to be what stops this run.
-    let watch = ActivityWatch { file: result.clone(), limit: Duration::from_secs(20), startup: None, limit_wait: None };
+    let watch = ActivityWatch {
+      file: result.clone(),
+      limit: Duration::from_secs(20),
+      startup: None,
+      startup_complete: None,
+      limit_wait: None,
+    };
     let started = Instant::now();
     let (_ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), Some(&done)).unwrap();
     let _ = std::fs::remove_file(&result);
@@ -2304,6 +2398,7 @@ mod tests {
         stall: Duration::from_millis(10),
         window: Duration::from_secs(5),
       }),
+      startup_complete: None,
       limit_wait: None,
     };
     let (ok, killed, _) = p
