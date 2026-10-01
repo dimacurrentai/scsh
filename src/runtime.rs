@@ -813,10 +813,11 @@ fn wrap_tui_shell(
   // that merely wrote no result. A trap is used rather than a bare `; echo $?` so a catchable
   // signal still records — an ABSENT .exit then uniquely means an uncatchable SIGKILL.
   format!(
-    "{{ mkdir -p \"$(dirname \"${{{log_var}}}\")\"; \
-echo \"scsh: harness={} skill={skill_source} model={model_label} tui=tmux \
-log=${{{log_var}}} cast=${{{log_var}}}.cast\" >&2; \
-scsh-tui-record {cols} {rows} {quit} {submit} {result_q} {tui_q}; }} 2>&1 | tee \"${{{log_var}}}\"",
+    r#"{{ mkdir -p "$(dirname "${{{log_var}}}")";
+echo "scsh: harness={} skill={skill_source} model={model_label} tui=tmux log=${{{log_var}}} cast=${{{log_var}}}.cast" >&2;
+scsh-tui-record {cols} {rows} {quit} {submit} {result_q} {tui_q}; rc=$?;
+printf '%s\n' "$rc" > "${{{log_var}}}.recorder-exit"; }} 2>&1 | tee "${{{log_var}}}";
+exit "$(cat "${{{log_var}}}.recorder-exit")""#,
     harness.as_str(),
     log_var = RUN_LOG_VAR,
     cols = term.cols,
@@ -3106,7 +3107,7 @@ TAG
     assert!(!cmd.contains(" run "), "no headless run subcommand: {cmd}");
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains("SCSH_RESULT"));
-    assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+    assert!(cmd.contains(".recorder-exit"));
     // Model-less: no -m flag, still the TUI.
     let bare = harness_command(
       Harness::Opencode,
@@ -3119,6 +3120,38 @@ TAG
     );
     assert!(bare.contains("opencode --prompt "), "got: {bare}");
     assert!(!bare.contains(" -m "), "got: {bare}");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn recorded_launcher_preserves_failure_status_through_tee() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("scsh-recorder-status-{}", random_nonce_6()));
+    std::fs::create_dir(&dir).unwrap();
+    let script = dir.join("scsh-tui-record");
+    let command = wrap_tui_shell(
+      Harness::Claude,
+      "test",
+      None,
+      "unused",
+      TuiQuit::SlashExit,
+      TuiSubmit::Auto,
+      "tmp/result.json",
+      crate::config::Terminal::default(),
+    );
+    for status in [0, 71, 72] {
+      std::fs::write(&script, format!("#!/bin/sh\necho recorder-diagnostic >&2\nexit {status}\n")).unwrap();
+      std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+      let output = Command::new("sh")
+        .args(["-c", &command])
+        .env("PATH", format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default()))
+        .env(RUN_LOG_VAR, dir.join("run with spaces.log"))
+        .output()
+        .unwrap();
+      assert_eq!(output.status.code(), Some(status), "tee must not turn recorder failure into success");
+      assert!(String::from_utf8_lossy(&output.stdout).contains("recorder-diagnostic"));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
   }
 
   #[test]
@@ -3145,7 +3178,7 @@ TAG
     assert!(!cmd.contains("claude -p"), "got: {cmd}");
     assert!(!cmd.contains("capture-pane"), "got: {cmd}");
     assert!(!cmd.contains("send-keys"), "got: {cmd}");
-    assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""), "got: {cmd}");
+    assert!(cmd.contains(".recorder-exit"), "recorder failures must survive tee: {cmd}");
 
     let frontmatter = harness_command(
       Harness::Claude,
@@ -3185,7 +3218,7 @@ TAG
     assert!(!cmd.contains("capture-pane"), "got: {cmd}");
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains("SCSH_RESULT"));
-    assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+    assert!(cmd.contains(".recorder-exit"));
     let bare = harness_command(
       Harness::Codex,
       None,
@@ -3197,7 +3230,7 @@ TAG
     );
     assert!(bare.contains("codex --dangerously-bypass-approvals-and-sandbox"));
     assert!(!bare.contains(" -m "));
-    assert!(bare.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+    assert!(bare.contains(".recorder-exit"));
 
     let frontmatter = harness_command(
       Harness::Codex,
@@ -3235,7 +3268,7 @@ TAG
     assert!(cmd.contains(" --effort high"));
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains("SCSH_RESULT"));
-    assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+    assert!(cmd.contains(".recorder-exit"));
     let bare = harness_command(
       Harness::Grok,
       None,
@@ -3306,7 +3339,7 @@ TAG
       cmd.contains("$HOME/.cursor/hooks.json"),
       "user-level hook copy keeps the TUI and avoids a project hooks.json: {cmd}"
     );
-    assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+    assert!(cmd.contains(".recorder-exit"));
     let bare = harness_command(
       Harness::Cursor,
       None,

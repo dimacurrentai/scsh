@@ -147,6 +147,8 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
 
   Native token counters are required by default for every harness. After the result appears and the turn has gone quiet, ordinary watchdogs yield to a dedicated accounting wait (30 seconds, or 90 seconds for Cursor; override with `SCSH_USAGE_ACCOUNTING_TIMEOUT`); only then does `scsh` request a graceful exit, never automatic Ctrl-C. A still-running generation does not start that wait. Missing counters fail with `usage_accounting_timeout` or `usage_accounting_unavailable`. Set `SCSH_NO_USAGE=1` to explicitly skip this requirement and wait. Grok records native per-turn usage, including folded subagent spend. OpenCode currently has no native accounting adapter and requires that opt-out.
 
+  The terminal launcher writes its pane command to a private temporary script and passes only the script path to tmux. Long prompts therefore avoid tmux's command-message limit. The script is removed after recording, and tmux/recorder failures propagate through log capture instead of appearing as missing usage counters.
+
   Startup watchdogs check native model-usage records and completed tool calls before killing a quiet agent. Once those confirm work has started, the short startup timeout is permanently disabled for that attempt; the configured `inactivity_timeout` still applies. This also works with `SCSH_NO_USAGE=1`: proving that work started does not require complete token accounting. Without native evidence (including OpenCode, which has no adapter), the existing startup watchdog remains in effect.
 
 - **`result`** *(required)* — a **repo-relative** path the skill must create (keep it

@@ -162,8 +162,13 @@ RUN printf '%s\n' \
   'if [ -f \"$result\" ] || [ \$n -ge 2 ]; then exit \$ec; fi; \' \
   'n=\$((n+1)); echo pane_relaunch=\$n after_ec=\$ec >> \"$dbg\"; sleep 1; done"' \
   '' \
-  'tmux -f /dev/null new-session -d -x "$cols" -y "$rows" -s scsh "$pane_cmd"' \
-  'log "tmux new-session rc=$?"' \
+  '# Keep the prompt out of tmux IPC: its command message has a small size limit.' \
+  'pane_script=$(mktemp /tmp/scsh-pane-XXXXXX) || exit 1' \
+  'trap '"'"'rm -f "$pane_script"'"'"' EXIT' \
+  'printf "%s\n" "$pane_cmd" > "$pane_script" || exit 1' \
+  'tmux -f /dev/null new-session -d -x "$cols" -y "$rows" -s scsh "sh $pane_script"' \
+  'rc=$?; log "tmux new-session rc=$rc"' \
+  '[ "$rc" -eq 0 ] || exit "$rc"' \
   'tmux set -t scsh status off >/dev/null 2>&1 || true' \
   '' \
   'if [ "$submit" = enter ]; then' \
@@ -215,9 +220,11 @@ RUN printf '%s\n' \
   '' \
   'asciinema rec -q --overwrite -f asciicast-v3 --window-size "${cols}x${rows}" \' \
   '  -c '"'"'tmux attach -r -t scsh'"'"' "$SCSH_RUN_LOG.cast"' \
-  'log "asciinema exited rc=$?"' \
+  'rc=$?; log "asciinema exited rc=$rc"' \
+  '[ "$rc" -eq 0 ] || tmux kill-session -t scsh 2>/dev/null || true' \
   'wait' \
   'log "done"' \
+  'exit "$rc"' \
   > /usr/local/bin/scsh-tui-record && \
   chmod 0755 /usr/local/bin/scsh-tui-record
 
