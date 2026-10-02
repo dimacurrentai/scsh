@@ -306,6 +306,8 @@ credentials over again is refused the same way, so the route is retried only whe
 host would forward has changed since the refused attempt, judged by a SHA-256 of the forwarded
 token and credentials, never the secret itself.
 
+The Claude image pins Claude Code `2.1.287` with Node.js 22 and supports `claude-opus-5-5`. The updated Dockerfile changes the build fingerprint, so existing images rebuild automatically on the next use.
+
 An account's usage limit is handled apart from that machinery, because it is not a failure
 and no backoff can outlast it. Claude containers arm Claude Code's own limit wait
 (`autoContinueAtUsageLimit`), so a limited session waits for the reset and continues **the

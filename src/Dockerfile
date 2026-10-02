@@ -254,9 +254,10 @@ FROM scsh-base AS scsh-claude
 # how the claude CLI moves — the changed text flips the fingerprint and forces the rebuild.
 # 2.1.239 is the floor for the usage-limit wait: `autoContinueAtUsageLimit` (see
 # `quota::container_settings_json`) is ignored by CLIs older than that.
-ARG CLAUDE_CODE_VERSION=2.1.239
+# Opus 5.5 support starts at 2.1.280; 2.1.287 requires Node >=22.
+ARG CLAUDE_CODE_VERSION=2.1.287
 RUN set -eux; \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; \
     apt-get install -y --no-install-recommends nodejs; \
     rm -rf /var/lib/apt/lists/*; \
     npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \

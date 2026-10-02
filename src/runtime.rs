@@ -2807,7 +2807,9 @@ TAG
     // latest the day the image was first built and never move again. Bumping the ARG is the
     // only thing that makes a machine pick up a newer claude — and `autoContinueAtUsageLimit`
     // (the usage-limit wait) needs one no older than this.
-    assert!(df.contains("ARG CLAUDE_CODE_VERSION=2.1.239"));
+    assert!(df.contains("ARG CLAUDE_CODE_VERSION=2.1.287"));
+    let claude_stage = df.split("FROM scsh-base AS scsh-claude").nth(1).unwrap().split("\nFROM ").next().unwrap();
+    assert!(claude_stage.contains("https://deb.nodesource.com/setup_22.x"));
     assert!(df.contains("downloads.cursor.com/lab/"));
     assert!(df.contains("ENV CURSOR_AGENT_HOME=/usr/local/share/cursor-agent"));
     assert!(df.contains("mv \"$tmp/dist-package\" \"$CURSOR_AGENT_HOME\""));
