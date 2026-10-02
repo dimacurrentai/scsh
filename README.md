@@ -145,7 +145,7 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
   one strict schema, shown below the finished recording and stored beside the result.
   See [harness usage accounting](HARNESS-USAGE.md).
 
-  Native token counters are required by default for every harness. After the result appears and the turn has gone quiet, ordinary watchdogs yield to a dedicated accounting wait (30 seconds, or 90 seconds for Cursor; override with `SCSH_USAGE_ACCOUNTING_TIMEOUT`); only then does `scsh` request a graceful exit, never automatic Ctrl-C. A still-running generation does not start that wait. Missing counters fail with `usage_accounting_timeout` or `usage_accounting_unavailable`. Set `SCSH_NO_USAGE=1` to explicitly skip this requirement and wait. Grok records native per-turn usage, including folded subagent spend. OpenCode currently has no native accounting adapter and requires that opt-out.
+  Native token counters are required by default for every harness. After the result appears and the turn has gone quiet, ordinary watchdogs yield to a dedicated accounting wait (up to 600 seconds for every harness; override with `SCSH_USAGE_ACCOUNTING_TIMEOUT`); only then does `scsh` request a graceful exit, never automatic Ctrl-C. A still-running generation does not start that wait. Missing counters fail with `usage_accounting_timeout` or `usage_accounting_unavailable`. Set `SCSH_NO_USAGE=1` to explicitly skip this requirement and wait. Grok records native per-turn usage, including folded subagent spend. OpenCode currently has no native accounting adapter and requires that opt-out.
 
   The terminal launcher writes its pane command to a private temporary script and passes only the script path to tmux. Long prompts therefore avoid tmux's command-message limit. The script is removed after recording, and tmux/recorder failures propagate through log capture instead of appearing as missing usage counters.
 
@@ -612,7 +612,7 @@ The one place they are all listed. Host-side knobs, all optional:
 | `SCSH_GIT_PORT` | ephemeral | Git-daemon port on the host. |
 | `SCSH_KEEP_RUNS` | ignored | Accepted so older commands still run. Run clones are removed on every outcome; recordings stay under `SCSH_HOME`. |
 | `SCSH_NO_USAGE` | off | `1` skips required native token accounting and its bounded completion wait. |
-| `SCSH_USAGE_ACCOUNTING_TIMEOUT` | `30` (`90` for Cursor) | Seconds to wait for native counters after the turn goes quiet. |
+| `SCSH_USAGE_ACCOUNTING_TIMEOUT` | `600` | Maximum seconds to wait for native counters after the turn goes quiet; proceeds as soon as accounting completes. |
 | `SCSH_REPAIR_RESULT_JSON` | on | `0` requires strict result JSON. Default (or `1`) repairs undefined escapes before schema validation — the same rescue used for agent-authored writes. |
 | `SCSH_REAP_CONTAINERS` | on | `0` disables the daemon's zombie-container reaper: it destroys `scsh-*-run-*` containers that stay unclaimed by any live job for ~30 consecutive minutes of once-a-minute sweeps — orphans left by a killed `scsh run`. |
 | `SCSH_NO_RETRY` | off | `1` disables the single automatic retry of transient failures. |

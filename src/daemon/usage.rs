@@ -4,23 +4,20 @@ use crate::usage::{cursor_hook_summary, unavailable, Harness, Summary};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Default accounting wait after a result appears, for every harness except Cursor.
-pub const DEFAULT_ACCOUNTING_TIMEOUT_SECS: u64 = 30;
-/// Cursor hooks trail the result; give them a longer default than the other harnesses.
-pub const CURSOR_ACCOUNTING_TIMEOUT_SECS: u64 = 90;
+/// Default quiet-turn accounting wait, allowing time for a delayed API retry to finish.
+pub const DEFAULT_ACCOUNTING_TIMEOUT_SECS: u64 = 600;
 /// Extra seconds after the accounting wait before a wedged container is abandoned.
 const ACCOUNTING_LEAK_GRACE_SECS: u64 = 15;
 
 /// How long to wait for native counters after the turn has gone quiet.
 ///
 /// `SCSH_USAGE_ACCOUNTING_TIMEOUT` (seconds, > 0) overrides every harness. Otherwise
-/// Cursor gets [`CURSOR_ACCOUNTING_TIMEOUT_SECS`] and every other harness gets
-/// [`DEFAULT_ACCOUNTING_TIMEOUT_SECS`].
-pub fn accounting_timeout_secs(harness: crate::config::Harness) -> u64 {
-  accounting_timeout_from_env(harness, std::env::var("SCSH_USAGE_ACCOUNTING_TIMEOUT").ok().as_deref())
+/// every harness gets [`DEFAULT_ACCOUNTING_TIMEOUT_SECS`].
+pub fn accounting_timeout_secs() -> u64 {
+  accounting_timeout_from_env(std::env::var("SCSH_USAGE_ACCOUNTING_TIMEOUT").ok().as_deref())
 }
 
-fn accounting_timeout_from_env(harness: crate::config::Harness, raw: Option<&str>) -> u64 {
+fn accounting_timeout_from_env(raw: Option<&str>) -> u64 {
   if let Some(raw) = raw {
     if let Ok(n) = raw.parse::<u64>() {
       if n > 0 {
@@ -28,10 +25,7 @@ fn accounting_timeout_from_env(harness: crate::config::Harness, raw: Option<&str
       }
     }
   }
-  match harness {
-    crate::config::Harness::Cursor => CURSOR_ACCOUNTING_TIMEOUT_SECS,
-    _ => DEFAULT_ACCOUNTING_TIMEOUT_SECS,
-  }
+  DEFAULT_ACCOUNTING_TIMEOUT_SECS
 }
 
 /// One host-owned deadline for every harness. The container only exits after this
@@ -63,7 +57,7 @@ impl Completion {
     if !result.is_file() {
       return false;
     }
-    let wait = accounting_timeout_secs(harness);
+    let wait = accounting_timeout_secs();
     if let Some(started) = self.started {
       if now.duration_since(started) >= Duration::from_secs(wait.saturating_add(ACCOUNTING_LEAK_GRACE_SECS)) {
         // Even a full disk preventing the shutdown instruction must not leak a container.
@@ -388,7 +382,7 @@ mod completion_tests {
       let mut state = Completion::new();
       assert!(run.poll(&mut state, harness, true));
       assert!(!run.artifact("shutdown").exists());
-      state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs(harness).saturating_sub(1)));
+      state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs().saturating_sub(1)));
       assert!(run.poll(&mut state, harness, true));
       assert!(!run.artifact("shutdown").exists(), "the full accounting budget remains available");
       let transcript = run.0.join(path);
@@ -407,7 +401,7 @@ mod completion_tests {
     for harness in [Agent::Cursor, Agent::Claude, Agent::Codex, Agent::Grok, Agent::Opencode] {
       let run = Run::new();
       let mut state = Completion::new();
-      state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs(harness) + 1));
+      state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs() + 1));
       assert!(run.poll(&mut state, harness, true));
       assert!(run.artifact("usage-error").exists());
       if harness != Agent::Opencode {
@@ -415,7 +409,7 @@ mod completion_tests {
           std::fs::read_to_string(run.artifact("usage-error")).unwrap(),
           format!(
             "timeout: native accounting did not complete within {}s of the turn going quiet",
-            accounting_timeout_secs(harness)
+            accounting_timeout_secs()
           )
         );
       }
@@ -445,14 +439,11 @@ mod completion_tests {
   }
 
   #[test]
-  fn cursor_waits_longer_than_other_harnesses_unless_overridden() {
-    for harness in [Agent::Claude, Agent::Codex, Agent::Grok, Agent::Opencode, Agent::Cursor] {
-      let expected = if harness == Agent::Cursor { 90 } else { 30 };
-      assert_eq!(accounting_timeout_from_env(harness, None), expected);
-      assert_eq!(accounting_timeout_from_env(harness, Some("12")), 12);
-      for invalid in ["0", "-1", "bad", ""] {
-        assert_eq!(accounting_timeout_from_env(harness, Some(invalid)), expected);
-      }
+  fn accounting_wait_defaults_to_ten_minutes_unless_overridden() {
+    assert_eq!(accounting_timeout_from_env(None), 600);
+    assert_eq!(accounting_timeout_from_env(Some("12")), 12);
+    for invalid in ["0", "-1", "bad", ""] {
+      assert_eq!(accounting_timeout_from_env(Some(invalid)), 600);
     }
   }
 
@@ -502,7 +493,7 @@ mod completion_tests {
     assert!(run.poll_live(&mut state, Agent::Cursor, true, true));
     assert!(!run.artifact("shutdown").exists());
     assert!(state.started.is_none(), "screen activity means the generation is still running");
-    state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs(Agent::Cursor) + 1));
+    state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs() + 1));
     assert!(run.poll_live(&mut state, Agent::Cursor, true, true));
     assert!(!run.artifact("usage-error").exists(), "a live turn must not expire the quiet-turn budget");
     assert!(!run.artifact("shutdown").exists());
@@ -521,7 +512,7 @@ mod completion_tests {
     .unwrap();
     let mut state = Completion::new();
     assert!(run.poll(&mut state, Agent::Cursor, true));
-    state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs(Agent::Cursor) + 1));
+    state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs() + 1));
     std::fs::write(
       &hooks,
       r#"{"hook_event_name":"postToolUse","conversation_id":"c","generation_id":"g","tool_use_id":"t1"}
