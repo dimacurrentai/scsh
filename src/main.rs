@@ -11249,7 +11249,7 @@ fn print_help_internals() {
   Cursor uses cursor-grok-4.6-high-fast; its interactive TUI is recorded with asciinema.
   Token usage is required for every successful agent attempt and displayed
   below its completed recording. Every harness gets a bounded accounting phase before
-  teardown; ordinary watchdogs yield while counters finish (30s, or 90s for Cursor,
+  teardown; ordinary watchdogs yield while counters finish (up to 600s for every harness,
   after the turn goes quiet; override with SCSH_USAGE_ACCOUNTING_TIMEOUT). Missing or
   timed-out counters fail with a dedicated accounting reason. Grok reads native per-turn
   usage from its primary session, including folded subagent spend. OpenCode currently
