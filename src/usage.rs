@@ -8,6 +8,8 @@
 //! Hook `input_tokens` includes cache. This summary stores the four buckets the
 //! same way print-mode did: `input` is uncached only.
 
+pub(crate) mod claude;
+
 use crate::json::{self, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -479,73 +481,7 @@ pub(crate) fn turn_finished(harness: crate::config::Harness, stream: &str) -> bo
 /// including subagents. A model response can appear under several transcript UUIDs, so
 /// account by the provider message ID and request ID, retaining the largest streamed counters.
 pub fn claude_session_summary(transcripts: &[Option<String>]) -> Option<Summary> {
-  let mut tokens = Tokens { input: 0, output: 0, cache_read: 0, cache_write: Some(0) };
-  let mut responses: BTreeMap<(String, String), Tokens> = BTreeMap::new();
-  let mut tools = BTreeSet::new();
-  let mut invalid = false;
-  for text in transcripts {
-    let Some(text) = text else {
-      invalid = true;
-      continue;
-    };
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-      let Ok(event) = json::parse(line) else {
-        invalid = true;
-        continue;
-      };
-      if string(&event, "type") != Some("assistant") {
-        continue;
-      }
-      let Some(message) = field(&event, "message") else {
-        continue;
-      };
-      if string(message, "model") == Some("<synthetic>") {
-        continue;
-      }
-      let Some(id) = string(message, "id").or_else(|| string(&event, "uuid")) else {
-        invalid = true;
-        continue;
-      };
-      let Some(t) = field(message, "usage").and_then(claude_tokens) else {
-        invalid = true;
-        continue;
-      };
-      let key = (id.to_string(), string(&event, "requestId").unwrap_or("").to_string());
-      responses
-        .entry(key)
-        .and_modify(|previous| {
-          previous.input = previous.input.max(t.input);
-          previous.output = previous.output.max(t.output);
-          previous.cache_read = previous.cache_read.max(t.cache_read);
-          previous.cache_write = previous.cache_write.max(t.cache_write);
-        })
-        .or_insert(t);
-      if let Some(Value::Array(content)) = field(message, "content") {
-        for block in content {
-          if string(block, "type") == Some("tool_use") {
-            if let Some(id) = string(block, "id") {
-              tools.insert(id.to_string());
-            }
-          }
-        }
-      }
-    }
-  }
-  if responses.is_empty() {
-    return None;
-  }
-  for t in responses.values() {
-    if !add_tokens(&mut tokens, t) {
-      return Some(unavailable(Harness::ClaudeCode));
-    }
-  }
-  Some(Summary {
-    harness: Harness::ClaudeCode,
-    complete: !invalid,
-    tokens: (!invalid).then_some(tokens),
-    llm_round_trips: Some(responses.len() as u64),
-    tool_calls: Some(tools.len() as u64),
-  })
+  claude::Ledger::parse(transcripts).summary()
 }
 
 /// Codex emits cumulative `total_token_usage` snapshots. Keep the last valid snapshot in

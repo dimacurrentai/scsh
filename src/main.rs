@@ -86,6 +86,33 @@ fn run(args: &[String]) -> i32 {
         preflight_then(Action::List, profile, cli.verbose, cli.override_dot_scsh_yml.as_deref(), None, None)
       }
     }
+    Mode::InspectClaudeUsage { root } => {
+      let paths = daemon::usage::jsonl_files(&root);
+      match paths {
+        Ok(paths) => {
+          let names: Vec<_> =
+            paths.iter().map(|p| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().into_owned()).collect();
+          let transcripts: Vec<_> = paths.iter().map(|p| std::fs::read_to_string(p).ok()).collect();
+          let ledger = usage::claude::Ledger::parse(&transcripts);
+          println!("{}", ledger.to_json("inspection", &names));
+          if ledger.summary().is_some_and(|summary| summary.complete) {
+            0
+          } else {
+            1
+          }
+        }
+        Err(error) => {
+          println!(
+            "{}",
+            json::write_pretty(&json::Value::Object(vec![(
+              "Error".into(),
+              json::Value::Object(vec![("message".into(), json::Value::String(error.to_string()))])
+            )]))
+          );
+          1
+        }
+      }
+    }
     Mode::CheckProfile => check_profile_cmd(profile, cli.override_dot_scsh_yml.as_deref()),
     Mode::Probe => probe_cmd(profile, cli.override_dot_scsh_yml.as_deref(), cli.json),
     Mode::Run => match cli.def.as_deref() {
@@ -734,6 +761,10 @@ fn parent_session_from_cast_path(path: &str) -> Option<String> {
 
 #[derive(Clone)]
 enum Mode {
+  /// Normalize native Claude transcripts without contacting a model.
+  InspectClaudeUsage {
+    root: PathBuf,
+  },
   Help(HelpTopic),
   Version,
   InitDemo,
@@ -851,6 +882,7 @@ const COMMAND_NAMES: &[&str] = &[
   "run",
   "list",
   "build-images",
+  "inspect-claude-usage",
   "check-profile",
   "probe",
   "init-demo-project",
@@ -878,6 +910,7 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
     "list" | "ls" => "list",
     "build-images" | "build-image" | "buildimages" => "build-images",
     "check-profile" | "checkprofile" => "check-profile",
+    "inspect-claude-usage" => "inspect-claude-usage",
     "probe" => "probe",
     "init-demo-project" | "init" | "init-demo" => "init-demo-project",
     "demo" | "demos" => "demo",
@@ -1070,6 +1103,12 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       }
       "version" | "-V" | "--version" => Some(Mode::Version),
       "run" => Some(Mode::Run),
+      "inspect-claude-usage" => {
+        i += 1;
+        let path =
+          args.get(i).filter(|p| !p.starts_with('-')).ok_or("inspect-claude-usage requires a transcript directory")?;
+        Some(Mode::InspectClaudeUsage { root: PathBuf::from(path) })
+      }
       "list" | "ls" => Some(Mode::List),
       // `check-profile <name>`: a runtime-free existence check for scripts — the next token is
       // the profile name to test (exit 0 iff it exists with >=1 skill).
@@ -1484,6 +1523,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     && !matches!(
       mode,
       Mode::List
+        | Mode::InspectClaudeUsage { .. }
         | Mode::Probe
         | Mode::Quota { .. }
         | Mode::Daemon { .. }
@@ -7520,6 +7560,24 @@ fn persist_run_artifacts(
   }
 
   let usage = run_usage(run_dir, harness, accounting_complete);
+  if harness == config::Harness::Claude {
+    let root = run_dir.join(runtime::CLAUDE_AUTH_REL).join(".claude/projects");
+    let paths = daemon::usage::jsonl_files(&root);
+    let (names, transcripts) = match paths {
+      Ok(paths) => (
+        paths.iter().map(|p| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().into_owned()).collect::<Vec<_>>(),
+        paths.iter().map(|p| std::fs::read_to_string(p).ok()).collect::<Vec<_>>(),
+      ),
+      Err(_) => (vec!["unavailable".into()], vec![None]),
+    };
+    let ledger = usage::claude::Ledger::parse(&transcripts)
+      .with_accounting_complete(usage.as_ref().is_some_and(|summary| summary.complete));
+    if let Err(error) = std::fs::create_dir_all(&logs_dir).and_then(|_| {
+      atomic_write(&logs_dir.join(format!("{stem}.usage-ledger.json")), ledger.to_json(&stem, &names).as_bytes())
+    }) {
+      note(format!("could not persist Claude usage ledger: {error}"));
+    }
+  }
   if let Some(summary) = &usage {
     if let Err(error) = persist_usage(session_id, skill_name, &stem, &logs_dir, summary) {
       note(error);
@@ -10744,6 +10802,12 @@ fn print_help_command(name: &str) {
         ("--json", "Machine-readable listing; on by default when stdout is not a TTY."),
       ],
     ),
+    "inspect-claude-usage" => (
+      "normalize native Claude response evidence",
+      "scsh inspect-claude-usage <transcript-directory> [--json]",
+      &[("Read-only", "Emits the same ledger and aggregate as a run; no model calls."),
+        ("Exit status", "0 for complete native accounting; 1 for unavailable or malformed evidence.")],
+    ),
     "check-profile" => (
       "test whether a profile exists",
       "scsh check-profile <name> [--override-dot-scsh-yml <path>]",
@@ -10974,6 +11038,7 @@ fn print_help_overview() {
   println!("{}", h_head("Commands:"));
   help_row("run [profile…]", "Build the image; run skills in parallel.");
   help_cont("See `scsh help run` for profiles, preflight, and exit codes.");
+  help_row("inspect-claude-usage", "Reconcile native Claude transcripts with the shared accounting parser.");
   help_row("list (ls)", "List skills by profile (--verbose, --json).");
   help_row("gc-images [--apply]", "Preview or delete unused scsh-owned images; preserves tagged and in-use images.");
   help_row("build-images [harness…]", "Build the base + harness images outside a run (--force, --rebuild-base).");
