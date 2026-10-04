@@ -144,13 +144,15 @@ fn size_bytes(value: &str) -> Option<u64> {
 /// run time and on install (same schema in source and consumer repos).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
+  /// Explicit execution mode and generated prompt policy.
+  pub options: crate::invocation::Options,
   /// The `.scsh.yml` key — must match `.skills/<name>/`.
   pub name: String,
   /// Direct-run harness. Required when `invocations` is empty; must be omitted when
   /// `invocations` is set.
   pub harness: Option<Harness>,
   pub model: Option<String>,
-  /// Reasoning effort for harnesses with an effort knob (codex, grok, cursor). With
+  /// Reasoning effort for harnesses with an effort knob (claude, codex, grok, cursor). With
   /// `invocations:` it is the default each route may override; routes whose harness
   /// has no effort knob simply ignore an inherited value.
   pub effort: Option<String>,
@@ -183,6 +185,8 @@ pub struct Skill {
 /// One row under a skill's `invocations:` block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvocationRoute {
+  /// Explicit execution mode and generated prompt policy.
+  pub options: crate::invocation::Options,
   pub name: String,
   pub harness: Harness,
   pub model: Option<String>,
@@ -205,6 +209,8 @@ pub struct InvocationRoute {
 /// A concrete run invocation after expanding matrix skills — what `scsh run` executes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedInvocation {
+  /// Explicit execution mode and generated prompt policy.
+  pub options: crate::invocation::Options,
   pub name: String,
   pub skill_source: String,
   pub harness: Harness,
@@ -263,6 +269,13 @@ pub enum SkillDelivery {
   /// **custom prompt** (harnesses already accept free-form prompts). A workflow step naming a
   /// `skill:` is pasted the same way, with its directory carried in `installed_files`.
   DirectPrompt(String),
+  /// Workflow renderer owns the complete output contract; preserve authored text separately.
+  WorkflowPrompt {
+    /// Caller-owned task text, before contract rendering.
+    authored: String,
+    /// Task plus the generated workflow contract.
+    rendered: String,
+  },
   /// A carried body (an `--override-dot-scsh-yml` run), installed into the harness's GLOBAL
   /// skills location inside the container ([`Harness::global_skills_rel`]) — the repo
   /// checkout never contains the skill, yet the agent can use it, natively by name where the
@@ -275,6 +288,7 @@ impl SkillDelivery {
   pub fn body(&self) -> Option<&str> {
     match self {
       SkillDelivery::Repo => None,
+      SkillDelivery::WorkflowPrompt { rendered, .. } => Some(rendered),
       SkillDelivery::DirectPrompt(b) | SkillDelivery::GlobalInstall(b) => Some(b),
     }
   }
@@ -294,7 +308,7 @@ pub fn expand_invocations(cfg: &Config) -> Vec<ResolvedInvocation> {
 
 fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
   // An inherited skill-level effort applies only where the harness has an effort knob,
-  // so one `effort:` can sit atop a mixed matrix (codex + claude) without erroring.
+  // so one `effort:` can sit atop a mixed matrix without erroring.
   let effort_for = |harness: Harness, route_effort: Option<&String>| -> Option<String> {
     let effort = route_effort.or(skill.effort.as_ref())?;
     harness.supports_effort().then(|| effort.clone())
@@ -302,6 +316,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
   if skill.invocations.is_empty() {
     let harness = skill.harness.expect("validated skills always have harness or invocations");
     return vec![ResolvedInvocation {
+      options: skill.options,
       name: skill.name.clone(),
       skill_source: skill.name.clone(),
       harness,
@@ -328,6 +343,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
     .invocations
     .iter()
     .map(|route| ResolvedInvocation {
+      options: route.options,
       name: format!("{}-{}", skill.name, route.name),
       skill_source: skill.name.clone(),
       harness: route.harness,
@@ -440,9 +456,9 @@ impl Harness {
   /// external interruption (a stray signal / teardown killing the pane) worth one retry, not only
   /// a deterministic skill bug.
   pub fn is_tui(self) -> bool {
-    // Every harness runs as a real interactive TUI recorded via tmux + asciinema: claude/codex/
+    // Every harness supports a real interactive TUI recorded via tmux + asciinema: claude/codex/
     // cursor, plus opencode (`opencode --prompt`) and grok (`grok "<prompt>"`, its default Build
-    // TUI). Headless single-shot modes are not used — the recording must show a genuine terminal.
+    // TUI). Callers additionally check the invocation mode for Claude headless routes.
     matches!(self, Harness::Claude | Harness::Codex | Harness::Cursor | Harness::Opencode | Harness::Grok)
   }
 
@@ -484,7 +500,8 @@ impl Harness {
       Harness::Codex => &["minimal", "low", "medium", "high", "xhigh"],
       Harness::Grok => &["low", "medium", "high", "xhigh", "max"],
       Harness::Cursor => &["low", "medium", "high"],
-      Harness::Opencode | Harness::Claude => &[],
+      Harness::Claude => &["low", "medium", "high", "xhigh", "max"],
+      Harness::Opencode => &[],
     }
   }
 }
@@ -817,6 +834,8 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
     "harness",
     "model",
     "effort",
+    "claude_mode",
+    "prompt_contract",
     "timeout",
     "inactivity_timeout",
     "retry_for",
@@ -832,7 +851,7 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
   for (k, _) in fields {
     if !SK.contains(&k.as_str()) {
       errors.push(format!(
-        "unknown key 'skills.{name}.{k}' (allowed: harness, model, effort, timeout, inactivity_timeout, retry_for, retry_signature_cap, tmpfs, env, profile, commits, autoinstall, invocations, result)"
+        "unknown key 'skills.{name}.{k}' (allowed: harness, model, effort, claude_mode, prompt_contract, timeout, inactivity_timeout, retry_for, retry_signature_cap, tmpfs, env, profile, commits, autoinstall, invocations, result)"
       ));
     }
   }
@@ -1035,7 +1054,16 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
           "'skills.{name}.result' must contain '{{name}}' when 'invocations:' is set (each route substitutes its name)"
         ));
       }
+      if !invocations.is_empty() && (fm.contains_key("claude_mode") || fm.contains_key("prompt_contract")) {
+        errors.push(format!("'skills.{name}': put claude_mode and prompt_contract on individual invocation routes"));
+      }
+      if fm.get("prompt_contract").is_some_and(|n| matches!(n, Node::Scalar(v) if v == "verbatim"))
+        || invocations.iter().any(|r| r.options.prompt_contract == crate::invocation::PromptContract::Verbatim)
+      {
+        errors.push(format!("'skills.{name}': verbatim requires an inline task/prompt in a harness definition"));
+      }
       Some(Skill {
+        options: crate::invocation::Options::parse(&fm, harness, &format!("skills.{name}"), errors),
         name: name.to_string(),
         harness,
         model,
@@ -1210,6 +1238,8 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
       "harness",
       "model",
       "effort",
+      "claude_mode",
+      "prompt_contract",
       "profile",
       "commits",
       "inactivity_timeout",
@@ -1220,7 +1250,7 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
     for (k, _) in fields {
       if !IK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, effort, profile, commits, inactivity_timeout, retry_for, retry_signature_cap, tmpfs)"
+          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, effort, claude_mode, prompt_contract, profile, commits, inactivity_timeout, retry_for, retry_signature_cap, tmpfs)"
         ));
       }
     }
@@ -1319,6 +1349,12 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
     }
     if let Some(harness) = harness {
       out.push(InvocationRoute {
+        options: crate::invocation::Options::parse(
+          &fm,
+          Some(harness),
+          &format!("skills.{skill}.invocations.{default_name}"),
+          errors,
+        ),
         name: route_name,
         harness,
         model,
@@ -1341,11 +1377,11 @@ fn known_effort_level(level: &str) -> bool {
 }
 
 /// An EXPLICIT effort on a specific harness must be a level that harness's CLI accepts.
-fn check_effort_for_harness(field: &str, harness: Harness, effort: &str, errors: &mut Vec<String>) {
+pub(crate) fn check_effort_for_harness(field: &str, harness: Harness, effort: &str, errors: &mut Vec<String>) {
   let levels = harness.effort_levels();
   if levels.is_empty() {
     errors.push(format!(
-      "'{field}' is set, but harness '{}' has no effort knob (effort works with: codex, grok, cursor)",
+      "'{field}' is set, but harness '{}' has no effort knob (effort works with: claude, codex, grok, cursor)",
       harness.as_str()
     ));
   } else if !levels.contains(&effort) {
@@ -1819,7 +1855,7 @@ mod tests {
     // Effort on a harness without an effort knob is an error.
     let yaml = r#"skills:
   x:
-    harness: claude
+    harness: opencode
     effort: high
     result: tmp/x.json
 "#;
@@ -1834,7 +1870,7 @@ mod tests {
 "#;
     assert!(validate(yaml).unwrap_err().iter().any(|e| e.contains("not a level codex accepts")));
 
-    // Skill-level default over a mixed matrix: applied to codex/grok, ignored for claude.
+    // Skill-level default over a mixed matrix, including Claude.
     let yaml = r#"skills:
   review:
     effort: high
@@ -1854,7 +1890,7 @@ mod tests {
     let inv = expand_invocations(&validate(yaml).unwrap());
     assert_eq!(inv[0].effort.as_deref(), Some("high"), "codex inherits the skill default");
     assert_eq!(inv[1].effort.as_deref(), Some("xhigh"), "grok route override wins");
-    assert_eq!(inv[2].effort, None, "claude has no effort knob — inherited value ignored");
+    assert_eq!(inv[2].effort.as_deref(), Some("high"), "Claude inherits and forwards effort");
   }
 
   #[test]

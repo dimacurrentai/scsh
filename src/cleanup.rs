@@ -46,6 +46,8 @@ pub fn log_sources() -> Vec<(String, &'static str)> {
     (".cursor-hooks.jsonl", "cursor-hooks.jsonl"),
     (".usage-error", "usage-error"),
     (".usage-final", "usage-final"),
+    (".invocation.json", "invocation.json"),
+    (".cli-version", "cli-version"),
   ]
   .into_iter()
   .map(|(suffix, ext)| (format!("{}{suffix}", runtime::RUN_LOG_REL), ext))

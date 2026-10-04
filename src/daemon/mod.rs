@@ -9,6 +9,7 @@ mod db;
 pub mod github;
 pub mod github_publish;
 mod html;
+pub(crate) mod invocation;
 mod jsonio;
 mod model;
 mod paths;

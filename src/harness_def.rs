@@ -312,6 +312,8 @@ pub struct OutputField {
 /// The agent (CLI + model) that runs a single step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepAgent {
+  /// Explicit execution mode and generated prompt policy.
+  pub options: crate::invocation::Options,
   pub harness: crate::config::Harness,
   pub model: Option<String>,
   pub effort: Option<String>,
@@ -526,6 +528,7 @@ impl HarnessDef {
   /// (Workflows do not use this; the orchestrator builds a per-step invocation instead.)
   pub fn to_skill(&self) -> Skill {
     Skill {
+      options: crate::invocation::Options::default(),
       name: self.name.clone(),
       harness: None,
       model: None,
@@ -635,6 +638,12 @@ impl Step {
   /// Delivered as a harness custom prompt ([`crate::config::SkillDelivery::DirectPrompt`]); a
   /// named skill's directory travels beside it ([`Self::installed_files`]).
   pub fn render_skill_body(&self) -> String {
+    match self.agent().map(|agent| agent.options.prompt_contract).unwrap_or_default() {
+      crate::invocation::PromptContract::Verbatim => {
+        return self.task().map(StepTask::body).unwrap_or_default().to_string()
+      }
+      crate::invocation::PromptContract::Standard => {}
+    }
     let mut s = self.task().map(StepTask::body).unwrap_or_default().trim_end().to_string();
     if let Some(StepTask::Skill { name, .. }) = self.task() {
       // The body is pasted, so the agent loads no file whose path it could take. State the
@@ -1358,8 +1367,10 @@ fn validate_step_agent(id: &str, node: Option<&Node>, errors: &mut Vec<String>) 
     fm.insert(k.as_str(), v);
   }
   for (k, _) in fields {
-    if !["harness", "model", "effort"].contains(&k.as_str()) {
-      errors.push(format!("unknown key 'steps.{id}.agent.{k}' (allowed: harness, model, effort)"));
+    if !["harness", "model", "effort", "claude_mode", "prompt_contract"].contains(&k.as_str()) {
+      errors.push(format!(
+        "unknown key 'steps.{id}.agent.{k}' (allowed: harness, model, effort, claude_mode, prompt_contract)"
+      ));
     }
   }
   let harness = match fm.get("harness").copied() {
@@ -1377,7 +1388,15 @@ fn validate_step_agent(id: &str, node: Option<&Node>, errors: &mut Vec<String>) 
   };
   let model = step_opt_scalar(&fm, id, "model", errors);
   let effort = step_opt_scalar(&fm, id, "effort", errors);
-  harness.map(|harness| StepAgent { harness, model, effort })
+  if let (Some(harness), Some(effort)) = (harness, &effort) {
+    config::check_effort_for_harness(&format!("steps.{id}.agent.effort"), harness, effort, errors);
+  }
+  harness.map(|harness| StepAgent {
+    options: crate::invocation::Options::parse(&fm, Some(harness), &format!("steps.{id}.agent"), errors),
+    harness,
+    model,
+    effort,
+  })
 }
 
 /// Validate a step's `inputs:` block into bindings (env var name → source reference).
