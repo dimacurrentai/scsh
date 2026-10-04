@@ -76,3 +76,5 @@ verification. Every harness's normalized summary is retained as `logs/<stem>.usa
 Offline parser and schema fixtures run with `cargo test --bin scsh usage::`; UI placement
 is covered by `usage_appears_only_after_a_finished_player`. `HARNESS-SMOKE.md` describes the
 live, human-followable check across all configured routes.
+
+Claude invocation policies, per-response ledgers, direct-control accounting, and the remote comparison procedure are documented in [CLAUDE-PROMPTS.md](CLAUDE-PROMPTS.md).
