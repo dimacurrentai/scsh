@@ -1579,11 +1579,13 @@ fn missing_container_message(runtime: &str, stdout: &str, stderr: &str) -> bool 
   let blob = format!("{stdout}\n{stderr}").to_ascii_lowercase();
   blob.lines().any(|line| match runtime {
     "docker" => {
-      line.starts_with("error: no such container:")
+      line.starts_with("error: no such object:")
+        || line.starts_with("error: no such container:")
         || line.starts_with("error response from daemon: no such container:")
     }
     "podman" => {
-      line.starts_with("error: no such container:")
+      line.starts_with("error: no such object:")
+        || line.starts_with("error: no such container:")
         || (line.starts_with("error: no container with name or id ") && line.ends_with(": no such container"))
     }
     "container" => line.starts_with("error: container not found:"),
@@ -3852,6 +3854,15 @@ TAG
     assert_eq!(classify_inspect("docker", false, false, "", ""), ContainerProbe::Unknown);
     assert_eq!(classify_inspect("docker", true, false, "", "Error: No such object: x"), ContainerProbe::Absent);
     assert_eq!(classify_inspect("docker", true, false, "", "Error: No such container: x"), ContainerProbe::Absent);
+    assert_eq!(
+      classify_inspect("podman", true, false, "", "Error: no such object: scsh-absent"),
+      ContainerProbe::Absent
+    );
+    for message in
+      ["Error: permission denied", "Error: cannot connect to Podman", "cannot open /tmp/no such object: socket"]
+    {
+      assert_eq!(classify_inspect("podman", true, false, "", message), ContainerProbe::Unknown);
+    }
     assert_eq!(
       classify_inspect(
         "docker",
