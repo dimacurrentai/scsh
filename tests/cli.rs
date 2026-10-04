@@ -1791,11 +1791,11 @@ fn override_yml_rejects_def() {
 }
 
 #[test]
-fn override_yml_only_on_run_list_check_probe() {
+fn override_yml_only_on_commands_that_load_config() {
   let d = unique_dir("ovrybad");
   let r = scsh(&d, &["version", "--override-dot-scsh-yml", "/tmp/x.scsh.yml"]);
   assert_eq!(r.code, 2, "got: {}", r.out);
-  assert!(r.out.contains("only applies to 'run', 'list', 'check-profile', and 'probe'"), "got: {}", r.out);
+  assert!(r.out.contains("only applies to run, list, check-profile, probe, and inspect-prompt"), "got: {}", r.out);
 }
 
 #[test]

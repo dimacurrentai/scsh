@@ -16,6 +16,7 @@ mod gc;
 mod gh_review;
 mod harness_def;
 mod image_gc;
+mod invocation;
 mod json;
 #[cfg(test)]
 mod licenses;
@@ -113,6 +114,7 @@ fn run(args: &[String]) -> i32 {
         }
       }
     }
+    Mode::InspectPrompt => inspect_prompt_cmd(cli.def.as_deref(), cli.override_dot_scsh_yml.as_deref(), profile),
     Mode::CheckProfile => check_profile_cmd(profile, cli.override_dot_scsh_yml.as_deref()),
     Mode::Probe => probe_cmd(profile, cli.override_dot_scsh_yml.as_deref(), cli.json),
     Mode::Run => match cli.def.as_deref() {
@@ -761,6 +763,8 @@ fn parent_session_from_cast_path(path: &str) -> Option<String> {
 
 #[derive(Clone)]
 enum Mode {
+  /// Render prompts and launch commands without a container or model call.
+  InspectPrompt,
   /// Normalize native Claude transcripts without contacting a model.
   InspectClaudeUsage {
     root: PathBuf,
@@ -883,6 +887,7 @@ const COMMAND_NAMES: &[&str] = &[
   "list",
   "build-images",
   "inspect-claude-usage",
+  "inspect-prompt",
   "check-profile",
   "probe",
   "init-demo-project",
@@ -910,6 +915,7 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
     "list" | "ls" => "list",
     "build-images" | "build-image" | "buildimages" => "build-images",
     "check-profile" | "checkprofile" => "check-profile",
+    "inspect-prompt" => "inspect-prompt",
     "inspect-claude-usage" => "inspect-claude-usage",
     "probe" => "probe",
     "init-demo-project" | "init" | "init-demo" => "init-demo-project",
@@ -1103,6 +1109,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       }
       "version" | "-V" | "--version" => Some(Mode::Version),
       "run" => Some(Mode::Run),
+      "inspect-prompt" => Some(Mode::InspectPrompt),
       "inspect-claude-usage" => {
         i += 1;
         let path =
@@ -1452,7 +1459,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       // After `run` (or `probe`), a bare token is a profile name: `scsh run a b` ==
       // `scsh run --profile a,b`. (A `-`-prefixed token is still an unknown flag, and bare
       // tokens before a command — or after any other command — remain errors.)
-      other if matches!(mode, Some(Mode::Run | Mode::Probe)) && !other.starts_with('-') => {
+      other if matches!(mode, Some(Mode::Run | Mode::Probe | Mode::InspectPrompt)) && !other.starts_with('-') => {
         profiles.push(other.to_string());
         None
       }
@@ -1504,7 +1511,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   // `run --profile a b` are all equivalent.
   let profile = if profiles.is_empty() { None } else { Some(profiles.join(",")) };
   // `check-profile` carries its single profile name in the same field; `stats` filters by it.
-  if profile.is_some() && !matches!(mode, Mode::Run | Mode::Probe | Mode::CheckProfile | Mode::Stats) {
+  if profile.is_some()
+    && !matches!(mode, Mode::Run | Mode::Probe | Mode::CheckProfile | Mode::Stats | Mode::InspectPrompt)
+  {
     return Err(
       "profiles only apply to 'run', 'probe', and 'stats' (e.g. `scsh run code-review` or `scsh stats --profile code-review`)"
         .into(),
@@ -1523,6 +1532,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     && !matches!(
       mode,
       Mode::List
+        | Mode::InspectPrompt
         | Mode::InspectClaudeUsage { .. }
         | Mode::Probe
         | Mode::Quota { .. }
@@ -1579,7 +1589,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if export_nowait && !matches!(mode, Mode::ExportJob) {
     return Err("--nowait only applies to 'export-job' (e.g. `scsh export-job abcdef --nowait`)".into());
   }
-  if def.is_some() && !matches!(mode, Mode::Run) {
+  if def.is_some() && !matches!(mode, Mode::Run | Mode::InspectPrompt) {
     return Err("--def only applies to 'run' (e.g. `scsh run --def add`)".into());
   }
   if def.is_some() && profile.is_some() {
@@ -1593,8 +1603,10 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if retries.is_some() && !matches!(mode, Mode::Run) {
     return Err("--retries only applies to 'run' (e.g. `scsh run --def greet --retries 3`)".into());
   }
-  if override_dot_scsh_yml.is_some() && !matches!(mode, Mode::Run | Mode::List | Mode::CheckProfile | Mode::Probe) {
-    return Err("--override-dot-scsh-yml only applies to 'run', 'list', 'check-profile', and 'probe'".into());
+  if override_dot_scsh_yml.is_some()
+    && !matches!(mode, Mode::Run | Mode::List | Mode::CheckProfile | Mode::Probe | Mode::InspectPrompt)
+  {
+    return Err("--override-dot-scsh-yml only applies to run, list, check-profile, probe, and inspect-prompt".into());
   }
   if override_dot_scsh_yml.is_some() && def.is_some() {
     return Err("--override-dot-scsh-yml and --def are mutually exclusive".into());
@@ -2277,6 +2289,7 @@ fn step_invocation(
 ) -> ResolvedInvocation {
   let agent = step.agent().expect("only agent steps become invocations");
   ResolvedInvocation {
+    options: agent.options,
     name: run_id.to_string(),
     skill_source: step.id.clone(),
     harness: agent.harness,
@@ -2297,7 +2310,10 @@ fn step_invocation(
     commit_identity,
     result: format!("{session_dir_rel}/{run_id}.json"),
     terminal: config::Terminal::default(),
-    delivery: config::SkillDelivery::DirectPrompt(step.render_skill_body()),
+    delivery: config::SkillDelivery::WorkflowPrompt {
+      authored: step.task().map(harness_def::StepTask::body).unwrap_or_default().to_string(),
+      rendered: step.render_skill_body(),
+    },
     installed_files: step.installed_files(),
     artifacts: step.artifacts.iter().map(|a| format!("{session_dir_rel}/{a}")).collect(),
   }
@@ -2652,7 +2668,9 @@ fn run_host_steps(pending: Vec<PendingHostStep>, root: &Path, sink: &ResultSink)
 /// and an explicit instruction to satisfy the already-rendered machine contract.
 fn schema_repair_invocation(invocation: &ResolvedInvocation, error: &str) -> ResolvedInvocation {
   let mut repaired = invocation.clone();
-  if let config::SkillDelivery::DirectPrompt(prompt) = &mut repaired.delivery {
+  if let config::SkillDelivery::DirectPrompt(prompt) | config::SkillDelivery::WorkflowPrompt { rendered: prompt, .. } =
+    &mut repaired.delivery
+  {
     prompt.push_str(&format!(
       "\n\n## Result correction retry\n\nThe previous attempt completed its work but wrote an invalid result: {error}. Run the task once more from this clean source revision and write a complete result matching the Output contract exactly. This is the only correction retry.\n"
     ));
@@ -3004,13 +3022,13 @@ fn run_workflow_step_with_retries(
     let decision = retry_decision(
       run.fail_reason.as_deref(),
       restart_requested,
-      !schema_retry_used,
+      !schema_retry_used && invocation.options.prompt_contract != invocation::PromptContract::Verbatim,
       retry.policy,
       retry.retries_used,
       retry.budget_spent_secs(),
       retry.consecutive_identical,
       failure::retry_enabled(),
-      invocation.harness.is_tui(),
+      invocation.harness.is_tui() && invocation.options.claude_mode != invocation::ClaudeMode::Headless,
       run.limit_resets_at,
       daemon::now_unix_secs(),
       credentials_changed_since(&run),
@@ -4276,7 +4294,7 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
       let name = runtime::run_dir_name(now_secs(), &skill.name, &rt.name);
       let run_dir = format!("/tmp/{name}");
       let tag = runtime::image_tag(skill.harness);
-      let cmd = runtime::harness_command(
+      let cmd = runtime::harness_command_with_options(
         skill.harness,
         skill.model.as_deref(),
         skill.effort.as_deref(),
@@ -4284,6 +4302,7 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
         &skill.result,
         skill.terminal,
         &skill.delivery,
+        skill.options,
       );
       let model = skill.model.as_deref().unwrap_or("(harness default)");
       let timeout = skill.timeout.map(|t| format!("{t}s")).unwrap_or_else(|| "none".into());
@@ -4388,6 +4407,63 @@ fn profile_groups(cfg: &config::Config) -> Vec<(String, Vec<String>)> {
     groups.push((p, members));
   }
   groups
+}
+
+/// Read-only definition/profile inspection, using the very same resolved invocation as execution.
+fn inspect_prompt_cmd(def_name: Option<&str>, override_yml: Option<&Path>, profile: Option<&str>) -> i32 {
+  let inspect = || -> Result<Vec<ResolvedInvocation>, String> {
+    let root = git_root().map_err(|_| "inspect-prompt requires a git repository".to_string())?;
+    if let Some(name) = def_name {
+      let discovery = harness_def::discover(&root);
+      let def = discovery
+        .find(name)
+        .ok_or_else(|| format!("no valid definition named '{name}': {}", discovery.warnings.join("; ")))?;
+      if def.is_workflow() {
+        Ok(
+          def
+            .steps
+            .iter()
+            .filter(|s| s.agent().is_some())
+            .map(|step| step_invocation(step, &step.id, "tmp/inspection", Vec::new(), None))
+            .collect(),
+        )
+      } else {
+        let cfg = config::Config { skills: vec![def.to_skill()], terminal: config::Terminal::default() };
+        let mut invocations = config::expand_invocations(&cfg);
+        for inv in &mut invocations {
+          if let Some(task) = &def.task {
+            inv.delivery = config::SkillDelivery::DirectPrompt(task.clone());
+          }
+          inv.result = format!("{}/{}.json", scratch_root(&root).unwrap_or("tmp"), inv.name);
+        }
+        Ok(invocations)
+      }
+    } else {
+      let (cfg, _) = resolve_config_for_run(&root, override_yml, profile)
+        .map_err(|_| "could not resolve invocation configuration".to_string())?;
+      Ok(select_invocations(&cfg, profile))
+    }
+  };
+  match inspect() {
+    Ok(invocations) => {
+      let value = json::Value::Object(vec![(
+        "InvocationInspection".into(),
+        json::Value::Array(invocations.iter().map(invocation::manifest).collect()),
+      )]);
+      println!("{}", json::write_pretty(&value));
+      0
+    }
+    Err(error) => {
+      println!(
+        "{}",
+        json::write_pretty(&json::Value::Object(vec![(
+          "Error".into(),
+          json::Value::Object(vec![("message".into(), json::Value::String(error))])
+        )]))
+      );
+      1
+    }
+  }
 }
 
 /// `scsh list --json` — every profile and its skills as machine-readable JSON on stdout, so
@@ -5817,7 +5893,7 @@ fn build_and_run(
               retry.budget_spent_secs(),
               retry.consecutive_identical,
               failure::retry_enabled(),
-              skill.harness.is_tui(),
+              skill.harness.is_tui() && skill.options.claude_mode != invocation::ClaudeMode::Headless,
               run.limit_resets_at,
               daemon::now_unix_secs(),
               credentials_changed_since(&run),
@@ -6857,7 +6933,7 @@ fn run_one_skill(
 
   // Run the harness command in a named container with the clone mounted at /home/agent/repo,
   // under the skill's optional wall-clock timeout.
-  spinner.note(&format!("{} run…", skill.harness.as_str()));
+  spinner.note(&format!("{} {} run…", skill.harness.as_str(), skill.options.mode_name()));
   let name = run_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| skill.name.clone());
   // The harness tees its output to this log under the mount's gitignored tmp/ (= on the host).
   // Create its parent so `tee` can write even before the skill touches tmp/.
@@ -6961,7 +7037,12 @@ fn run_one_skill(
   if let Some(d) = &git_daemon {
     container_env.extend(d.env());
   }
-  let harness = runtime::harness_command(
+  if let Err(error) = daemon::invocation::save_manifest(&run_dir, skill, &rt.name, &tag) {
+    spinner.finish_fail(failure::reason::RUN_DIR, Some(&error));
+    return SkillRun::failed(failure::reason::RUN_DIR, Some(run_dir_str), Some(log), clone_dir)
+      .with_fail_detail(&error);
+  }
+  let harness = runtime::harness_command_with_options(
     skill.harness,
     skill.model.as_deref(),
     skill.effort.as_deref(),
@@ -6969,6 +7050,7 @@ fn run_one_skill(
     &skill.result,
     skill.terminal,
     &skill.delivery,
+    skill.options,
   );
   let cmd = if git_transport {
     let (ci_name, ci_email) = skill
@@ -7037,7 +7119,8 @@ fn run_one_skill(
   // starts a fresh clone, container, and conversation — so the watchdogs above are frozen while
   // a limit banner is on screen instead of killing a run that is about to continue.
   // claude-only: the needles are its literal TUI prose, and no other harness parks like this.
-  let limit_wait = (skill.harness == config::Harness::Claude).then(|| ui::screen::LimitWait {
+  let headless = skill.options.claude_mode == invocation::ClaudeMode::Headless;
+  let limit_wait = (skill.harness == config::Harness::Claude && !headless).then(|| ui::screen::LimitWait {
     max: Duration::from_secs(LIMIT_WAIT_MAX_SECS),
     keys: key_channel.as_ref().expect("claude key channel").file.clone(),
     resets_at: {
@@ -7062,9 +7145,9 @@ fn run_one_skill(
     },
   });
   let watch = ui::screen::ActivityWatch {
-    file: run_dir.join(runtime::RUN_CAST_REL),
+    file: run_dir.join(if headless { runtime::RUN_LOG_REL } else { runtime::RUN_CAST_REL }),
     limit: Duration::from_secs(inactivity_secs),
-    startup: Some(ui::screen::StartupStall::jittered(startup_seed)),
+    startup: (!headless).then(|| ui::screen::StartupStall::jittered(startup_seed)),
     // Independent of SCSH_NO_USAGE: partial counters and hooks prove liveness even when
     // exact final accounting is disabled. Fresh per-attempt trees exclude prior sessions.
     startup_complete: Some(Box::new(|| {
@@ -7099,9 +7182,19 @@ fn run_one_skill(
     c.container_event(spinner.index(), "start", &name, &rt.name);
     // The bind-mounted cast grows on the host while the harness runs; registering it now
     // lets the session browser download/replay the recording mid-run.
-    c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
+    if !headless {
+      c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
+    }
   }
   let result = spinner.run_watched(&run[0], &run[1..], timeout, Some(&watch), Some(&done));
+  let headless_error = headless
+    .then(|| std::fs::read_to_string(run_dir.join(runtime::RUN_LOG_REL)).ok())
+    .flatten()
+    .and_then(|stream| invocation::headless_error(&stream));
+  let result = match (result, headless_error.as_ref()) {
+    (Ok((_, ui::screen::Killed::No, _)), Some(error)) => Ok((false, ui::screen::Killed::No, Some(error.clone()))),
+    (result, _) => result,
+  };
   let accounting_complete = matches!(&result, Ok((true, ui::screen::Killed::No, _)));
   // A terminal harness process and a completed task are related, but they are not identical.
   // The declared result file is the durable task boundary. Some interactive CLIs finish the
@@ -7125,7 +7218,7 @@ fn run_one_skill(
         Ok((false, ui::screen::Killed::No, last))
       }
     }
-    Ok((false, killed, last)) if interrupted_harness_result_is_recoverable(&run_dir, &skill.result) => {
+    Ok((false, killed, last)) if !headless && interrupted_harness_result_is_recoverable(&run_dir, &skill.result) => {
       // The durable result is the task boundary. A timeout, inactivity kill, or later non-zero
       // TUI exit does not erase work already written there; collection and schema validation below
       // remain authoritative, and only a result that survives them becomes graceful success.
@@ -7357,7 +7450,8 @@ fn run_one_skill(
       // Classify from the excerpt AND the rendered cast tail: the proc lines carry only the
       // wrapper's own output for a TUI harness, while the screen that matters — cursor's
       // "Reconnecting to …", a provider's 529 page, a login demand — lives in the recording.
-      let sample = format!("{why}\n{}", cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL)));
+      let sample =
+        format!("{why}\n{}", headless_error.unwrap_or_else(|| cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL))));
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       // A limit that made the harness EXIT rather than park never reaches the wait above, but
       // it is the same event and needs the same answer: retry when the window reopens, not on a
@@ -7539,6 +7633,10 @@ fn persist_run_artifacts(
     }
   };
 
+  if let Err(error) = daemon::invocation::finish_manifest(run_dir) {
+    note(error);
+  }
+
   // Logs: kept for every run (including failures, when they matter most). RUN_LOG_REL is the
   // teed harness output; `.debug` (claude/grok) and `.last` (codex) appear only in verbose runs.
   // A file that exists and does not copy is the only copy — report it instead of ignoring it.
@@ -7578,6 +7676,7 @@ fn persist_run_artifacts(
       note(format!("could not persist Claude usage ledger: {error}"));
     }
   }
+
   if let Some(summary) = &usage {
     if let Err(error) = persist_usage(session_id, skill_name, &stem, &logs_dir, summary) {
       note(error);
@@ -7800,7 +7899,9 @@ fn materialize_skill_body(run_dir: &Path, _git_transport: bool, skill: &Resolved
     write(rel, contents)?;
   }
   match &skill.delivery {
-    config::SkillDelivery::Repo | config::SkillDelivery::DirectPrompt(_) => Ok(()),
+    config::SkillDelivery::Repo
+    | config::SkillDelivery::DirectPrompt(_)
+    | config::SkillDelivery::WorkflowPrompt { .. } => Ok(()),
     config::SkillDelivery::GlobalInstall(body) => {
       write(&format!("{}/{}/SKILL.md", skill.harness.global_skills_rel(), skill.skill_source), body.as_bytes())
     }
@@ -8809,6 +8910,14 @@ fn cache_key_at(
   blob.push_str(&format!("harness={}\n", skill.harness.as_str()));
   blob.push_str(&format!("model={}\n", skill.model.as_deref().unwrap_or("")));
   blob.push_str(&format!("effort={}\n", skill.effort.as_deref().unwrap_or("")));
+  blob.push_str(&format!(
+    "claude-mode={}\nprompt-contract={}\nsubmitted={}\n",
+    skill.options.mode_name(),
+    skill.options.contract_name(),
+    sha256::sha256_hex(
+      runtime::agent_task_prompt(skill.harness, &skill.skill_source, &skill.delivery, skill.options).as_bytes()
+    )
+  ));
   blob.push_str("skill-files:\n");
   for (rel, hash) in skill_file_hashes(root, &skill.skill_source) {
     blob.push_str(&format!("{rel} {hash}\n"));
@@ -10808,6 +10917,12 @@ fn print_help_command(name: &str) {
       &[("Read-only", "Emits the same ledger and aggregate as a run; no model calls."),
         ("Exit status", "0 for complete native accounting; 1 for unavailable or malformed evidence.")],
     ),
+    "inspect-prompt" => (
+      "inspect resolved model input without running it",
+      "scsh inspect-prompt [profile] [--def <name>] [--json]",
+      &[("No model calls", "Renders the resolved prompt and execution policy without starting a container."),
+        ("Workflows", "Result paths use tmp/inspection; input bindings are supplied at execution.")],
+    ),
     "check-profile" => (
       "test whether a profile exists",
       "scsh check-profile <name> [--override-dot-scsh-yml <path>]",
@@ -11039,6 +11154,7 @@ fn print_help_overview() {
   help_row("run [profile…]", "Build the image; run skills in parallel.");
   help_cont("See `scsh help run` for profiles, preflight, and exit codes.");
   help_row("inspect-claude-usage", "Reconcile native Claude transcripts with the shared accounting parser.");
+  help_row("inspect-prompt", "Render exact prompts and launch commands without running a model.");
   help_row("list (ls)", "List skills by profile (--verbose, --json).");
   help_row("gc-images [--apply]", "Preview or delete unused scsh-owned images; preserves tagged and in-use images.");
   help_row("build-images [harness…]", "Build the base + harness images outside a run (--force, --rebuild-base).");
@@ -11239,10 +11355,13 @@ fn print_help_config() {
       harness: opencode     #     direct run — OR use invocations: for a matrix (below)
                             #     harnesses: opencode | claude | codex | grok | cursor
       model: openai/...     #     optional; the model the harness passes to the tool
-      effort: high        #     optional; reasoning effort (codex: minimal..xhigh, grok:
-                          #       low..max, cursor: low..high as --model slug suffixes). With
+      effort: high        #     optional; reasoning effort (claude/grok: low..max, codex:
+                          #       minimal..xhigh, cursor: low..high as --model slug suffixes). With
                           #       invocations: a default routes may override; harnesses
                           #       without an effort knob ignore it
+      # Claude routes: claude_mode: interactive|headless (default interactive).
+      # Definitions: prompt_contract: standard|verbatim (default standard).
+      # Inspect without a model: scsh inspect-prompt --def <name>
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded
       inactivity_timeout: 1800 # optional; seconds the recorded screen may show nothing new
                           #       before the run is killed as stuck. Default 1800 (30 minutes).
@@ -12110,7 +12229,7 @@ mod tests {
     assert_eq!(repaired.name, invocation.name);
     assert_eq!(repaired.result, invocation.result);
     match repaired.delivery {
-      config::SkillDelivery::DirectPrompt(prompt) => {
+      config::SkillDelivery::WorkflowPrompt { rendered: prompt, .. } => {
         assert!(prompt.contains("Result correction retry"));
         assert!(prompt.contains("missing the 'value' field"));
         assert!(prompt.contains("only correction retry"));
@@ -13275,6 +13394,7 @@ steps:
 
   fn mk_inv(name: &str) -> config::ResolvedInvocation {
     config::ResolvedInvocation {
+      options: crate::invocation::Options::default(),
       name: name.into(),
       skill_source: name.into(),
       harness: config::Harness::Opencode,
@@ -14007,7 +14127,12 @@ Subject: [PATCH] add: 2 + 3 = 5
     let step = harness_def::Step {
       id: "summarize".into(),
       work: harness_def::StepWork::Agent {
-        agent: harness_def::StepAgent { harness: config::Harness::Grok, model: Some("grok-4.5".into()), effort: None },
+        agent: harness_def::StepAgent {
+          options: crate::invocation::Options::default(),
+          harness: config::Harness::Grok,
+          model: Some("grok-4.5".into()),
+          effort: None,
+        },
         task: harness_def::StepTask::Prompt("p".into()),
       },
       inputs: Vec::new(),
@@ -14046,6 +14171,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       id: "prepare".into(),
       work: harness_def::StepWork::Agent {
         agent: harness_def::StepAgent {
+          options: crate::invocation::Options::default(),
           harness: config::Harness::Claude,
           model: Some("claude-opus-4-8".into()),
           effort: None,
@@ -14229,6 +14355,7 @@ Subject: [PATCH] add: 2 + 3 = 5
   fn global_install_lands_in_the_harness_skills_dir_on_both_transports() {
     let base = std::env::temp_dir().join(format!("scsh-global-skill-{}", runtime::random_nonce_6()));
     let inv = |harness: config::Harness| config::ResolvedInvocation {
+      options: crate::invocation::Options::default(),
       name: "greet".into(),
       skill_source: "greet".into(),
       harness,
@@ -14278,7 +14405,9 @@ Subject: [PATCH] add: 2 + 3 = 5
     let definition = harness_def::validate(name, source, harness_def::DefSource::Builtin).expect("validates");
     let step = definition.steps.iter().find(|step| step.id.starts_with("review_sanity_")).expect("a sanity reviewer");
     let invocation = step_invocation(step, "review", "tmp/scsh/session", Vec::new(), None);
-    let config::SkillDelivery::DirectPrompt(prompt) = &invocation.delivery else { panic!("steps are prompts") };
+    let config::SkillDelivery::WorkflowPrompt { rendered: prompt, .. } = &invocation.delivery else {
+      panic!("steps are prompts")
+    };
     let skill_dir = "tmp/.scsh-skills/sanity-reviewer";
     assert!(prompt.contains(&format!("installed at `{}/{skill_dir}`", runtime::AGENT_REPO)), "got: {prompt}");
 

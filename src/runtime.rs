@@ -596,12 +596,18 @@ fn strip_yaml_frontmatter(body: &str) -> &str {
   }
 }
 
-fn agent_task_prompt(harness: Harness, skill_source: &str, delivery: &crate::config::SkillDelivery) -> String {
+pub fn agent_task_prompt(
+  harness: Harness, skill_source: &str, delivery: &crate::config::SkillDelivery, options: crate::invocation::Options,
+) -> String {
   const GIT_GUARD: &str =
     "Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present.";
   const RESULT: &str = "Write the required result file to the path in the SCSH_RESULT environment variable.";
+  if options.prompt_contract == crate::invocation::PromptContract::Verbatim {
+    return delivery.body().unwrap_or_default().to_string();
+  }
   match delivery {
-    crate::config::SkillDelivery::DirectPrompt(body) => {
+    crate::config::SkillDelivery::DirectPrompt(body)
+    | crate::config::SkillDelivery::WorkflowPrompt { rendered: body, .. } => {
       // opencode seeds the TUI with `--prompt <value>`, and opencode's arg parser prints its
       // help and exits when that value BEGINS with `--` — which a bundled skill body does, since
       // it opens with a `---` YAML frontmatter block. The frontmatter is skill metadata (name,
@@ -622,11 +628,30 @@ fn agent_task_prompt(harness: Harness, skill_source: &str, delivery: &crate::con
   }
 }
 
+#[cfg(test)]
 pub fn harness_command(
   harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, result: &str,
   term: crate::config::Terminal, delivery: &crate::config::SkillDelivery,
 ) -> String {
-  let prompt = agent_task_prompt(harness, skill_source, delivery);
+  harness_command_with_options(
+    harness,
+    model,
+    effort,
+    skill_source,
+    result,
+    term,
+    delivery,
+    crate::invocation::Options::default(),
+  )
+}
+
+// This is the common renderer for legacy harness arguments plus typed launch policies.
+#[allow(clippy::too_many_arguments)]
+pub fn harness_command_with_options(
+  harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, result: &str,
+  term: crate::config::Terminal, delivery: &crate::config::SkillDelivery, options: crate::invocation::Options,
+) -> String {
+  let prompt = agent_task_prompt(harness, skill_source, delivery, options);
   match harness {
     Harness::Opencode => {
       // Full interactive TUI: opencode's default command IS the TUI, and `--prompt` seeds the
@@ -649,16 +674,26 @@ pub fn harness_command(
       // consent screen is suppressed by forwarding a MINIMAL `.claude.json` (see main's
       // forward_claude_auth): the full ~49 KB host config re-triggered the consent, a tiny one
       // (login identity + onboarding/trust/bypass-accepted) does not. All config, no scraping.
-      let mut tui = String::from("claude --permission-mode bypassPermissions");
-      if let Some(m) = model {
-        tui.push_str(" --model ");
-        tui.push_str(&shell_quote(m));
+      let tui = shell_join(&claude_argv(model, effort, &prompt, options));
+      if options.claude_mode == crate::invocation::ClaudeMode::Headless {
+        // Preserve the Claude exit status across tee. No PTY, synthetic cast, or /exit.
+        format!(
+          r#"{{
+mkdir -p "$(dirname "${{SCSH_RUN_LOG}}")"
+claude --version > "${{SCSH_RUN_LOG}}.cli-version"
+echo 'scsh: Claude headless JSON stream' >&2
+{tui}
+rc=$?
+printf '%s\n' "$rc" > "${{SCSH_RUN_LOG}}.recorder-exit"
+}} 2>&1 | tee "${{SCSH_RUN_LOG}}"
+exit "$(cat "${{SCSH_RUN_LOG}}.recorder-exit")"
+"#
+        )
+      } else {
+        let wrapped =
+          wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, TuiSubmit::Auto, result, term);
+        format!(r#"claude --version > "${{SCSH_RUN_LOG}}.cli-version"; {wrapped}"#)
       }
-      // Prompt after `--`, like Cursor's: a DirectPrompt body opening with Markdown
-      // frontmatter (`---`) would otherwise be parsed as an unknown option and exit the CLI.
-      tui.push_str(" -- ");
-      tui.push_str(&shell_quote(&prompt));
-      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, TuiSubmit::Auto, result, term)
     }
     Harness::Codex => {
       // Full interactive TUI (no `exec`): the recording shows the real Codex screen. The
@@ -745,6 +780,26 @@ pub fn harness_command(
       wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashQuit, TuiSubmit::Auto, result, term)
     }
   }
+}
+
+/// The actual Claude argument vector, also exported by invocation inspection.
+pub fn claude_argv(
+  model: Option<&str>, effort: Option<&str>, prompt: &str, options: crate::invocation::Options,
+) -> Vec<String> {
+  let mut args = vec!["claude".into(), "--permission-mode".into(), "bypassPermissions".into()];
+  if let Some(model) = model {
+    args.extend(["--model".into(), model.into()]);
+  }
+  if let Some(effort) = effort {
+    args.extend(["--effort".into(), effort.into()]);
+  }
+  if options.claude_mode == crate::invocation::ClaudeMode::Headless {
+    args.extend(
+      ["--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages"].map(str::to_string),
+    );
+  }
+  args.extend(["--".into(), prompt.into()]);
+  args
 }
 
 /// How to politely close a harness TUI once the skill's result file exists. The value is
@@ -1518,8 +1573,7 @@ fn missing_container_message(runtime: &str, stdout: &str, stderr: &str) -> bool 
   let blob = format!("{stdout}\n{stderr}").to_ascii_lowercase();
   blob.lines().any(|line| match runtime {
     "docker" => {
-      line.starts_with("error: no such object:")
-        || line.starts_with("error: no such container:")
+      line.starts_with("error: no such container:")
         || line.starts_with("error response from daemon: no such container:")
     }
     "podman" => {
@@ -4036,6 +4090,7 @@ TAG
   fn requested_opencode_models_collects_explicit_models_from_selection() {
     let skills = vec![
       crate::config::ResolvedInvocation {
+        options: crate::invocation::Options::default(),
         name: "a".into(),
         skill_source: "add".into(),
         harness: Harness::Opencode,
@@ -4058,6 +4113,7 @@ TAG
         artifacts: Vec::new(),
       },
       crate::config::ResolvedInvocation {
+        options: crate::invocation::Options::default(),
         name: "b".into(),
         skill_source: "add".into(),
         harness: Harness::Claude,
@@ -4080,6 +4136,7 @@ TAG
         artifacts: Vec::new(),
       },
       crate::config::ResolvedInvocation {
+        options: crate::invocation::Options::default(),
         name: "c".into(),
         skill_source: "add".into(),
         harness: Harness::Opencode,
@@ -4139,6 +4196,7 @@ TAG
   #[test]
   fn opencode_model_probe_for_selected_skips_without_explicit_models() {
     let skills = vec![crate::config::ResolvedInvocation {
+      options: crate::invocation::Options::default(),
       name: "add".into(),
       skill_source: "add".into(),
       harness: Harness::Opencode,
