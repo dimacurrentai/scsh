@@ -135,7 +135,7 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
 
 - **`harness`** *(required for direct run)* — **`opencode`** or **`claude`**. Omit at the skill level when using `invocations:`; each route supplies its own.
 - **`invocations:`** *(optional matrix)* — named routes, each with `harness`, optional `model`, optional `profile` (overrides the skill-level default), optional `commits` (overrides the skill-level default). Mutually exclusive with top-level `harness` / `model`.
-  Every harness runs as a real interactive TUI recorded via tmux + asciinema (see
+  By default every harness runs as a real interactive TUI recorded via tmux + asciinema (see
   [`DAEMON.md`](DAEMON.md)), pointed at the skill's `SKILL.md` — e.g. claude with
   `--permission-mode bypassPermissions` (host `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or
   `~/.claude/.credentials.json`), opencode via `opencode --prompt`, grok via its default Build TUI.
@@ -144,6 +144,8 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
   Every Claude Code, Codex, and Cursor attempt normalizes its native token counters into
   one strict schema, shown below the finished recording and stored beside the result.
   See [harness usage accounting](HARNESS-USAGE.md).
+
+Claude routes also accept `claude_mode: headless` and `prompt_contract: standard|compact|verbatim`. `effort` is forwarded to Claude in either mode. Use `scsh inspect-prompt --def <name>` to inspect the exact prompt without a model call; use `scsh inspect-claude-usage <directory>` to reconcile direct-Claude transcripts with the same accounting parser. See [Claude prompts and controlled comparisons](CLAUDE-PROMPTS.md).
 
   Native token counters are required by default for every harness. After the result appears and the turn has gone quiet, ordinary watchdogs yield to a dedicated accounting wait (up to 600 seconds for every harness; override with `SCSH_USAGE_ACCOUNTING_TIMEOUT`); only then does `scsh` request a graceful exit, never automatic Ctrl-C. A still-running generation does not start that wait. Missing counters fail with `usage_accounting_timeout` or `usage_accounting_unavailable`. Set `SCSH_NO_USAGE=1` to explicitly skip this requirement and wait. Grok records native per-turn usage, including folded subagent spend. OpenCode currently has no native accounting adapter and requires that opt-out.
 
