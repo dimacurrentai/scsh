@@ -16,6 +16,7 @@ pub enum ClaudeMode {
 pub enum PromptContract {
   #[default]
   Standard,
+  Compact,
   /// The caller owns every instruction, including result paths and local Git restrictions.
   Verbatim,
 }
@@ -42,10 +43,11 @@ impl Options {
         ("claude_mode", "interactive") => options.claude_mode = ClaudeMode::Interactive,
         ("claude_mode", "headless") => options.claude_mode = ClaudeMode::Headless,
         ("prompt_contract", "standard") => options.prompt_contract = PromptContract::Standard,
+        ("prompt_contract", "compact") => options.prompt_contract = PromptContract::Compact,
         ("prompt_contract", "verbatim") => options.prompt_contract = PromptContract::Verbatim,
         _ => errors.push(format!(
           "'{at}.{key}' must be {}",
-          if key == "claude_mode" { "interactive or headless" } else { "standard or verbatim" }
+          if key == "claude_mode" { "interactive or headless" } else { "standard, compact, or verbatim" }
         )),
       }
     }
@@ -65,6 +67,7 @@ impl Options {
   pub fn contract_name(self) -> &'static str {
     match self.prompt_contract {
       PromptContract::Standard => "standard",
+      PromptContract::Compact => "compact",
       PromptContract::Verbatim => "verbatim",
     }
   }
@@ -202,7 +205,7 @@ steps:
 
   #[test]
   fn policies_preserve_contracts_or_exact_authored_bytes() {
-    for policy in ["standard", "verbatim"] {
+    for policy in ["standard", "compact", "verbatim"] {
       let def = workflow(policy);
       let step = &def.steps[0];
       let inv = crate::step_invocation(step, "solve", "tmp/results", Vec::new(), None);
@@ -217,11 +220,52 @@ steps:
         assert!(prompt.contains("$SCSH_RESULT"));
         assert!(prompt.contains("answer.json"));
         assert!(prompt.contains("Do not git fetch"));
+        if policy == "compact" {
+          assert_eq!(prompt.matches("Write one JSON object").count(), 1);
+          assert!(!prompt.contains("This step takes no inputs"));
+          assert!(!prompt.contains("results_markdown"));
+          assert!(!prompt.contains("Write the required result file"));
+        }
       }
       let document = crate::json::write_pretty(&manifest(&inv));
       assert!(crate::json::parse(&document).is_ok());
       assert!(document.contains(&crate::sha256::sha256_hex(prompt.as_bytes())));
     }
+  }
+
+  #[test]
+  fn compact_keeps_script_enum_commit_and_loop_obligations() {
+    let mut def = workflow("compact");
+    let step = &mut def.steps[0];
+    let harness_def::StepWork::Agent { task, .. } = &mut step.work else { unreachable!() };
+    *task = harness_def::StepTask::Skill {
+      name: "writer".into(),
+      body: "Run scripts/result.py.".into(),
+      files: vec![("scripts/result.py".into(), b"print('result')".to_vec())],
+    };
+    step.outputs.push(harness_def::OutputField {
+      name: "decision".into(),
+      ty: harness_def::OutputType::Enum,
+      choices: vec!["repeat".into(), "finish".into()],
+    });
+    step.commits = true;
+    step.do_while = Some("solve".into());
+    step.break_loop = true;
+    let prompt = step.render_skill_body();
+    for obligation in [
+      "/home/agent/repo/tmp/.scsh-skills/writer",
+      "If the skill ships a result writer",
+      "answer: int",
+      "decision: one of [\"repeat\", \"finish\"]",
+      "SCSH_DO_WHILE_REPEAT: boolean",
+      "SCSH_LOOP_BREAK: true",
+      "Commit the intended changes",
+      "Never commit tmp/",
+      "Required artifact beside $SCSH_RESULT: answer.json",
+    ] {
+      assert!(prompt.contains(obligation), "missing {obligation}: {prompt}");
+    }
+    assert_eq!(step.installed_files().len(), 2, "the skill and script still travel with the prompt");
   }
 
   #[test]

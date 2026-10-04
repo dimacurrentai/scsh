@@ -615,7 +615,13 @@ pub fn agent_task_prompt(
       // body unchanged. Without this every opencode reviewer fails with an empty result.
       let body = body.trim_end();
       let body = if harness == Harness::Opencode { strip_yaml_frontmatter(body) } else { body };
-      format!("{body}\n\n{RESULT} {GIT_GUARD}")
+      if options.prompt_contract == crate::invocation::PromptContract::Compact
+        && matches!(delivery, crate::config::SkillDelivery::WorkflowPrompt { .. })
+      {
+        format!("{body}\n{GIT_GUARD}")
+      } else {
+        format!("{body}\n\n{RESULT} {GIT_GUARD}")
+      }
     }
     crate::config::SkillDelivery::Repo => {
       let clause = skill_prompt_clause(harness, skill_source, false);
