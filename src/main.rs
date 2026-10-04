@@ -11360,7 +11360,7 @@ fn print_help_config() {
                           #       invocations: a default routes may override; harnesses
                           #       without an effort knob ignore it
       # Claude routes: claude_mode: interactive|headless (default interactive).
-      # Definitions: prompt_contract: standard|verbatim (default standard).
+      # Definitions: prompt_contract: standard|compact|verbatim (default standard).
       # Inspect without a model: scsh inspect-prompt --def <name>
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded
       inactivity_timeout: 1800 # optional; seconds the recorded screen may show nothing new

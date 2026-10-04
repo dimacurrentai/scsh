@@ -642,6 +642,7 @@ impl Step {
       crate::invocation::PromptContract::Verbatim => {
         return self.task().map(StepTask::body).unwrap_or_default().to_string()
       }
+      crate::invocation::PromptContract::Compact => return self.render_compact_body(),
       crate::invocation::PromptContract::Standard => {}
     }
     let mut s = self.task().map(StepTask::body).unwrap_or_default().trim_end().to_string();
@@ -714,6 +715,56 @@ or an error worth a human's eye; leave them out when there is nothing to say.\n"
          is brought back onto the caller's branch after the step finishes. Commit only the \
          files this step is meant to change — never anything under `tmp/`.\n",
       );
+    }
+    s
+  }
+
+  /// The same validated contract with optional dashboard advertising omitted.
+  fn render_compact_body(&self) -> String {
+    let mut s = self.task().map(StepTask::body).unwrap_or_default().trim_end().to_string();
+    if let Some(StepTask::Skill { name, files, .. }) = self.task() {
+      s.push_str(&format!(
+        "\nSkill directory: {}/{}/{name}. Run shipped scripts by absolute path from the current directory.",
+        crate::runtime::AGENT_REPO,
+        config::RUN_SKILLS_REL
+      ));
+      if files.iter().any(|(path, _)| path.starts_with("scripts/")) {
+        s.push_str(" If the skill ships a result writer, use its documented mode; never write its JSON by hand.");
+      }
+    }
+    if !self.inputs.is_empty() {
+      s.push_str("\nInput environment variables: ");
+      s.push_str(&self.inputs.iter().map(|input| input.name.as_str()).collect::<Vec<_>>().join(", "));
+      s.push('.');
+    }
+    s.push_str("\nWrite one JSON object to $SCSH_RESULT with exactly these fields: ");
+    s.push_str(
+      &self
+        .outputs
+        .iter()
+        .map(|output| {
+          let ty = if output.ty == OutputType::Enum {
+            format!("one of [{}]", output.choices.iter().map(|v| crate::json::quote(v)).collect::<Vec<_>>().join(", "))
+          } else {
+            output.ty.as_str().to_string()
+          };
+          format!("{}: {ty}", output.name)
+        })
+        .collect::<Vec<_>>()
+        .join("; "),
+    );
+    s.push('.');
+    if self.do_while.is_some() && !self.outputs.iter().any(|o| o.name == "SCSH_DO_WHILE_REPEAT") {
+      s.push_str("\nAlso write SCSH_DO_WHILE_REPEAT: boolean (true repeats, false ends the loop).");
+    }
+    if self.break_loop {
+      s.push_str("\nSCSH_LOOP_BREAK: true exits the do-while immediately; false continues its body.");
+    }
+    for artifact in &self.artifacts {
+      s.push_str(&format!("\nRequired artifact beside $SCSH_RESULT: {artifact}."));
+    }
+    if self.commits {
+      s.push_str("\nCommit the intended changes; commits return to the caller's branch. Never commit tmp/.");
     }
     s
   }
