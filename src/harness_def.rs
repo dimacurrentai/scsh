@@ -1418,10 +1418,8 @@ fn validate_step_agent(id: &str, node: Option<&Node>, errors: &mut Vec<String>) 
     fm.insert(k.as_str(), v);
   }
   for (k, _) in fields {
-    if !["harness", "model", "effort", "claude_mode", "prompt_contract"].contains(&k.as_str()) {
-      errors.push(format!(
-        "unknown key 'steps.{id}.agent.{k}' (allowed: harness, model, effort, claude_mode, prompt_contract)"
-      ));
+    if !["harness", "model", "effort", "prompt_contract"].contains(&k.as_str()) {
+      errors.push(format!("unknown key 'steps.{id}.agent.{k}' (allowed: harness, model, effort, prompt_contract)"));
     }
   }
   let harness = match fm.get("harness").copied() {
@@ -1443,7 +1441,7 @@ fn validate_step_agent(id: &str, node: Option<&Node>, errors: &mut Vec<String>) 
     config::check_effort_for_harness(&format!("steps.{id}.agent.effort"), harness, effort, errors);
   }
   harness.map(|harness| StepAgent {
-    options: crate::invocation::Options::parse(&fm, Some(harness), &format!("steps.{id}.agent"), errors),
+    options: crate::invocation::Options::parse(&fm, &format!("steps.{id}.agent"), errors),
     harness,
     model,
     effort,

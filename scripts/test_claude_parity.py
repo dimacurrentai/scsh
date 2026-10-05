@@ -21,15 +21,29 @@ class ClaudeParityTests(unittest.TestCase):
             self.skipTest("Build the debug binary to verify CLI inspection of every fixture.")
         with tempfile.TemporaryDirectory(prefix="scsh-parity-fixture-") as tmp:
             source, plan = PARITY.prepare(Path(tmp) / "campaign", binary, 1)
-            self.assertEqual(len(plan), 12)
+            self.assertEqual(len(plan), 10)
             self.assertEqual(PARITY.checked(["git", "status", "--porcelain"], cwd=source), "")
             self.assertEqual(PARITY.checked(["git", "branch", "--show-current"], cwd=source).strip(), PARITY.WORKFLOW_BRANCH)
             for definition in sorted((source / ".harness").glob("*.yml")):
                 value = json.loads(PARITY.checked([str(binary), "inspect-prompt", "--def", definition.stem], cwd=source))
                 manifest = value["InvocationInspection"][0]["InvocationManifest"]
+                self.assertEqual(manifest["execution_mode"], "interactive")
+                self.assertNotIn("--print", manifest["argument_vector"])
+                self.assertIn("scsh-tui-record", manifest["command"])
                 self.assertEqual(manifest["requested_model"], PARITY.MODEL)
                 self.assertEqual(manifest["effort"], "medium")
                 self.assertEqual(manifest["argument_vector"][-1], manifest["submitted_prompt"]["text"])
+
+    def test_recording_requires_terminal_output(self):
+        with tempfile.TemporaryDirectory(prefix="scsh-parity-cast-") as tmp:
+            path = Path(tmp) / "run.cast"
+            self.assertFalse(PARITY.recording_evidence(path)["valid"])
+            for invalid in ('{"version":2}\n', '[]\n', '{"version":3}\n{"invalid":"event"}\n'):
+                path.write_text(invalid)
+                self.assertFalse(PARITY.recording_evidence(path)["valid"])
+            for version in (2, 3):
+                path.write_text(json.dumps({"version": version}) + '\n[0.1,"o","Claude terminal output"]\n')
+                self.assertTrue(PARITY.recording_evidence(path)["valid"])
 
     def test_stop_hook_serializes_only_the_final_answer(self):
         with tempfile.TemporaryDirectory(prefix="scsh-parity-hook-") as tmp:
@@ -62,15 +76,15 @@ class ClaudeParityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="scsh-parity-report-") as tmp:
             rows = [dict(workload="one-turn", repeat=0, arm="container-print", eligible=True,
                          total_tokens=100, prompt_sha256="same"),
-                    dict(workload="one-turn", repeat=0, arm="scsh-headless", eligible=True,
+                    dict(workload="one-turn", repeat=0, arm="scsh-interactive", eligible=True,
                          total_tokens=103, prompt_sha256="same"),
-                    dict(workload="one-turn", repeat=1, arm="scsh-headless", eligible=False,
+                    dict(workload="one-turn", repeat=1, arm="scsh-interactive", eligible=False,
                          total_tokens=None, prompt_sha256="failed")]
             PARITY.report(Path(tmp), rows)
             report = json.loads((Path(tmp) / "comparison.json").read_text())
             self.assertEqual(len(report["samples"]), 3)
             comparison = next(c for c in report["comparisons"] if c["workload"] == "one-turn"
-                              and c["left"] == "container-print" and c["right"] == "scsh-headless")
+                              and c["left"] == "container-print" and c["right"] == "scsh-interactive")
             self.assertEqual(comparison["paired_differences"], [3])
             rows[1]["prompt_sha256"] = "different"
             PARITY.report(Path(tmp), rows)

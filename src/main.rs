@@ -3028,7 +3028,7 @@ fn run_workflow_step_with_retries(
       retry.budget_spent_secs(),
       retry.consecutive_identical,
       failure::retry_enabled(),
-      invocation.harness.is_tui() && invocation.options.claude_mode != invocation::ClaudeMode::Headless,
+      invocation.harness.is_tui(),
       run.limit_resets_at,
       daemon::now_unix_secs(),
       credentials_changed_since(&run),
@@ -5893,7 +5893,7 @@ fn build_and_run(
               retry.budget_spent_secs(),
               retry.consecutive_identical,
               failure::retry_enabled(),
-              skill.harness.is_tui() && skill.options.claude_mode != invocation::ClaudeMode::Headless,
+              skill.harness.is_tui(),
               run.limit_resets_at,
               daemon::now_unix_secs(),
               credentials_changed_since(&run),
@@ -6933,7 +6933,7 @@ fn run_one_skill(
 
   // Run the harness command in a named container with the clone mounted at /home/agent/repo,
   // under the skill's optional wall-clock timeout.
-  spinner.note(&format!("{} {} run…", skill.harness.as_str(), skill.options.mode_name()));
+  spinner.note(&format!("{} interactive run…", skill.harness.as_str()));
   let name = run_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| skill.name.clone());
   // The harness tees its output to this log under the mount's gitignored tmp/ (= on the host).
   // Create its parent so `tee` can write even before the skill touches tmp/.
@@ -7119,8 +7119,7 @@ fn run_one_skill(
   // starts a fresh clone, container, and conversation — so the watchdogs above are frozen while
   // a limit banner is on screen instead of killing a run that is about to continue.
   // claude-only: the needles are its literal TUI prose, and no other harness parks like this.
-  let headless = skill.options.claude_mode == invocation::ClaudeMode::Headless;
-  let limit_wait = (skill.harness == config::Harness::Claude && !headless).then(|| ui::screen::LimitWait {
+  let limit_wait = (skill.harness == config::Harness::Claude).then(|| ui::screen::LimitWait {
     max: Duration::from_secs(LIMIT_WAIT_MAX_SECS),
     keys: key_channel.as_ref().expect("claude key channel").file.clone(),
     resets_at: {
@@ -7145,9 +7144,9 @@ fn run_one_skill(
     },
   });
   let watch = ui::screen::ActivityWatch {
-    file: run_dir.join(if headless { runtime::RUN_LOG_REL } else { runtime::RUN_CAST_REL }),
+    file: run_dir.join(runtime::RUN_CAST_REL),
     limit: Duration::from_secs(inactivity_secs),
-    startup: (!headless).then(|| ui::screen::StartupStall::jittered(startup_seed)),
+    startup: Some(ui::screen::StartupStall::jittered(startup_seed)),
     // Independent of SCSH_NO_USAGE: partial counters and hooks prove liveness even when
     // exact final accounting is disabled. Fresh per-attempt trees exclude prior sessions.
     startup_complete: Some(Box::new(|| {
@@ -7182,19 +7181,9 @@ fn run_one_skill(
     c.container_event(spinner.index(), "start", &name, &rt.name);
     // The bind-mounted cast grows on the host while the harness runs; registering it now
     // lets the session browser download/replay the recording mid-run.
-    if !headless {
-      c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
-    }
+    c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
   }
   let result = spinner.run_watched(&run[0], &run[1..], timeout, Some(&watch), Some(&done));
-  let headless_error = headless
-    .then(|| std::fs::read_to_string(run_dir.join(runtime::RUN_LOG_REL)).ok())
-    .flatten()
-    .and_then(|stream| invocation::headless_error(&stream));
-  let result = match (result, headless_error.as_ref()) {
-    (Ok((_, ui::screen::Killed::No, _)), Some(error)) => Ok((false, ui::screen::Killed::No, Some(error.clone()))),
-    (result, _) => result,
-  };
   let accounting_complete = matches!(&result, Ok((true, ui::screen::Killed::No, _)));
   // A terminal harness process and a completed task are related, but they are not identical.
   // The declared result file is the durable task boundary. Some interactive CLIs finish the
@@ -7218,7 +7207,7 @@ fn run_one_skill(
         Ok((false, ui::screen::Killed::No, last))
       }
     }
-    Ok((false, killed, last)) if !headless && interrupted_harness_result_is_recoverable(&run_dir, &skill.result) => {
+    Ok((false, killed, last)) if interrupted_harness_result_is_recoverable(&run_dir, &skill.result) => {
       // The durable result is the task boundary. A timeout, inactivity kill, or later non-zero
       // TUI exit does not erase work already written there; collection and schema validation below
       // remain authoritative, and only a result that survives them becomes graceful success.
@@ -7450,8 +7439,7 @@ fn run_one_skill(
       // Classify from the excerpt AND the rendered cast tail: the proc lines carry only the
       // wrapper's own output for a TUI harness, while the screen that matters — cursor's
       // "Reconnecting to …", a provider's 529 page, a login demand — lives in the recording.
-      let sample =
-        format!("{why}\n{}", headless_error.unwrap_or_else(|| cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL))));
+      let sample = format!("{why}\n{}", cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL)));
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       // A limit that made the harness EXIT rather than park never reaches the wait above, but
       // it is the same event and needs the same answer: retry when the window reopens, not on a
@@ -8911,8 +8899,7 @@ fn cache_key_at(
   blob.push_str(&format!("model={}\n", skill.model.as_deref().unwrap_or("")));
   blob.push_str(&format!("effort={}\n", skill.effort.as_deref().unwrap_or("")));
   blob.push_str(&format!(
-    "claude-mode={}\nprompt-contract={}\nsubmitted={}\n",
-    skill.options.mode_name(),
+    "prompt-contract={}\nsubmitted={}\n",
     skill.options.contract_name(),
     sha256::sha256_hex(
       runtime::agent_task_prompt(skill.harness, &skill.skill_source, &skill.delivery, skill.options).as_bytes()
@@ -11359,7 +11346,6 @@ fn print_help_config() {
                           #       minimal..xhigh, cursor: low..high as --model slug suffixes). With
                           #       invocations: a default routes may override; harnesses
                           #       without an effort knob ignore it
-      # Claude routes: claude_mode: interactive|headless (default interactive).
       # Definitions: prompt_contract: standard|compact|verbatim (default standard).
       # Inspect without a model: scsh inspect-prompt --def <name>
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded

@@ -680,26 +680,10 @@ pub fn harness_command_with_options(
       // consent screen is suppressed by forwarding a MINIMAL `.claude.json` (see main's
       // forward_claude_auth): the full ~49 KB host config re-triggered the consent, a tiny one
       // (login identity + onboarding/trust/bypass-accepted) does not. All config, no scraping.
-      let tui = shell_join(&claude_argv(model, effort, &prompt, options));
-      if options.claude_mode == crate::invocation::ClaudeMode::Headless {
-        // Preserve the Claude exit status across tee. No PTY, synthetic cast, or /exit.
-        format!(
-          r#"{{
-mkdir -p "$(dirname "${{SCSH_RUN_LOG}}")"
-claude --version > "${{SCSH_RUN_LOG}}.cli-version"
-echo 'scsh: Claude headless JSON stream' >&2
-{tui}
-rc=$?
-printf '%s\n' "$rc" > "${{SCSH_RUN_LOG}}.recorder-exit"
-}} 2>&1 | tee "${{SCSH_RUN_LOG}}"
-exit "$(cat "${{SCSH_RUN_LOG}}.recorder-exit")"
-"#
-        )
-      } else {
-        let wrapped =
-          wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, TuiSubmit::Auto, result, term);
-        format!(r#"claude --version > "${{SCSH_RUN_LOG}}.cli-version"; {wrapped}"#)
-      }
+      let tui = shell_join(&claude_argv(model, effort, &prompt));
+      let wrapped =
+        wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, TuiSubmit::Auto, result, term);
+      format!(r#"claude --version > "${{SCSH_RUN_LOG}}.cli-version"; {wrapped}"#)
     }
     Harness::Codex => {
       // Full interactive TUI (no `exec`): the recording shows the real Codex screen. The
@@ -789,20 +773,13 @@ exit "$(cat "${{SCSH_RUN_LOG}}.recorder-exit")"
 }
 
 /// The actual Claude argument vector, also exported by invocation inspection.
-pub fn claude_argv(
-  model: Option<&str>, effort: Option<&str>, prompt: &str, options: crate::invocation::Options,
-) -> Vec<String> {
+pub fn claude_argv(model: Option<&str>, effort: Option<&str>, prompt: &str) -> Vec<String> {
   let mut args = vec!["claude".into(), "--permission-mode".into(), "bypassPermissions".into()];
   if let Some(model) = model {
     args.extend(["--model".into(), model.into()]);
   }
   if let Some(effort) = effort {
     args.extend(["--effort".into(), effort.into()]);
-  }
-  if options.claude_mode == crate::invocation::ClaudeMode::Headless {
-    args.extend(
-      ["--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages"].map(str::to_string),
-    );
   }
   args.extend(["--".into(), prompt.into()]);
   args

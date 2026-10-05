@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import selectors
+import shlex
 import signal
 import socket
 import statistics
@@ -20,7 +21,7 @@ WORKFLOW_BRANCH = "scsh-workflow"
 COMMIT_NAME = "dkorolev-neon-elon-bot"
 COMMIT_EMAIL = "dmitry.korolev+elon-presley@gmail.com"
 ARMS = ("host-print", "container-print", "container-interactive",
-        "scsh-interactive", "scsh-headless", "scsh-compact")
+        "scsh-interactive", "scsh-compact")
 HOOK = '''import json, os, pathlib, sys
 event = json.load(sys.stdin)
 if os.environ.get("PARITY_TASK") != "one-turn":
@@ -51,12 +52,12 @@ def checked(command, **kwargs):
     return result.stdout
 
 
-def definition(prompt, mode, contract):
+def definition(prompt, contract):
     return ("description: Controlled Claude prompt comparison\n"
             "params:\n  PARITY_TASK:\n    type: string\n    default: one-turn\n"
             "steps:\n  solve:\n    agent:\n      harness: claude\n"
             f"      model: {MODEL}\n      effort: medium\n"
-            f"      claude_mode: {mode}\n      prompt_contract: {contract}\n"
+            f"      prompt_contract: {contract}\n"
             "    inactivity_timeout: 120\n    prompt: |\n" +
             "".join("      " + line + "\n" for line in prompt.splitlines()) +
             "    inputs:\n      PARITY_TASK: params.PARITY_TASK\n"
@@ -91,10 +92,9 @@ def prepare(root, binary, samples):
                     "joined by commas. The Stop hook does not write the result for this task.")
             prompt = (f"Task nonce {nonce}.\n{task}\n"
                       "Do not change or commit project files; only the requested result under tmp/ may be written.")
-            for mode in ("interactive", "headless"):
-                for contract in ("verbatim", "standard", "compact"):
-                    name = f"parity_{workload.replace('-', '_')}_{repeat}_{mode}_{contract}"
-                    write(source / ".harness" / f"{name}.yml", definition(prompt, mode, contract))
+            for contract in ("verbatim", "standard", "compact"):
+                name = f"parity_{workload.replace('-', '_')}_{repeat}_{contract}"
+                write(source / ".harness" / f"{name}.yml", definition(prompt, contract))
             # Rotate the controls deterministically while keeping all calls sequential.
             order = ARMS[repeat % len(ARMS):] + ARMS[:repeat % len(ARMS)]
             plan.extend({"workload": workload, "repeat": repeat, "arm": arm} for arm in order)
@@ -106,7 +106,7 @@ def prepare(root, binary, samples):
     write(root / "plan.json", {"samples": samples, "model": MODEL, "effort": "medium", "schedule": plan,
           "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
           "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-          "fixture_protocol": 2, "git_branch": WORKFLOW_BRANCH,
+          "fixture_protocol": 3, "git_branch": WORKFLOW_BRANCH,
           "fixture_revision": checked(["git", "rev-parse", "HEAD"], cwd=source).strip(),
           "nonce_policy": "Identical within matched controls; different for each repetition. Cache disabled in settings."})
     return source, plan
@@ -194,6 +194,20 @@ def supervise(command, cwd, env, logfile, on_tick=None):
                 process.wait(timeout=5)
 
 
+def recording_evidence(path):
+    """Require an actual asciinema stream with terminal output, not an empty placeholder."""
+    try:
+        lines = path.read_text().splitlines()
+        header = json.loads(lines[0])
+        events = [json.loads(line) for line in lines[1:]]
+        output = "".join(event[2] for event in events if len(event) >= 3 and event[1] == "o")
+        return {"valid": header.get("version") in (2, 3) and bool(output), "bytes": path.stat().st_size,
+                "output_events": sum(len(event) >= 3 and event[1] == "o" for event in events),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    except (OSError, ValueError, IndexError, TypeError, AttributeError, KeyError):
+        return {"valid": False}
+
+
 def sample(root, source, binary, image, spec, env):
     setup_started = time.monotonic()
     arm, workload, repeat = (spec[key] for key in ("arm", "workload", "repeat"))
@@ -203,13 +217,16 @@ def sample(root, source, binary, image, spec, env):
     checked(["git", "clone", "-q", "--no-hardlinks", str(source), str(work)])
     checked(["git", "config", "user.name", COMMIT_NAME], cwd=work)
     checked(["git", "config", "user.email", COMMIT_EMAIL], cwd=work)
-    mode = "interactive" if arm.endswith("interactive") else "headless"
     contract = "verbatim" if workload == "one-turn" else "standard"
     if arm == "scsh-compact":
         contract = "compact"
-    name = f"parity_{workload.replace('-', '_')}_{repeat}_{mode}_{contract}"
+    name = f"parity_{workload.replace('-', '_')}_{repeat}_{contract}"
     manifest = json.loads(checked([str(binary), "inspect-prompt", "--def", name], cwd=work, env=env))
     invocation = manifest["InvocationInspection"][0]["InvocationManifest"]
+    # Print is a direct-CLI control only. Every scsh arm must remain a recorded TUI.
+    print_argv = invocation["argument_vector"][:1] + [
+        "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages"
+    ] + invocation["argument_vector"][1:]
     write(out / "invocation.json", manifest)
     current_env = dict(env, PARITY_TASK=workload)
     state = Path(env["SCSH_HOME"])
@@ -225,15 +242,16 @@ def sample(root, source, binary, image, spec, env):
         current_env.update(SCSH_RESULT="tmp/inspection/solve.json", DISABLE_PROMPT_CACHING="1")
         if arm == "host-print":
             current_env["CLAUDE_CONFIG_DIR"] = str(config)
-            command = invocation["argument_vector"]
+            command = print_argv
         else:
             command = ["podman", "run", "--rm", "--name", container, "--userns=keep-id",
                        "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
                        "-v", f"{work}:/home/agent/repo"]
             for key in ("CLAUDE_CODE_OAUTH_TOKEN", "SCSH_RESULT", "PARITY_TASK", "DISABLE_PROMPT_CACHING"):
                 command.extend(["-e", key])
-            command.extend([image, "/bin/sh", "-c", invocation["command"]])
-            if mode == "interactive":
+            launcher = shlex.join(print_argv) if arm == "container-print" else invocation["command"]
+            command.extend([image, "/bin/sh", "-c", launcher])
+            if arm == "container-interactive":
                 def finish():
                     if result_path.exists() and terminal_native(config):
                         write(work / "tmp/scsh-run.log.shutdown", "exit")
@@ -262,6 +280,8 @@ def sample(root, source, binary, image, spec, env):
             row["image_matches"] = observed.get("image_id") == image
             row["prompt_matches"] = observed["submitted_prompt"]["sha256"] == row["prompt_sha256"]
             result_path = ledgers[0].parent.parent / "results/solve.json"
+            cast = ledgers[0].parent.parent / "casts" / ledgers[0].name.replace(".usage-ledger.json", ".cast")
+            row["recording"] = recording_evidence(cast)
         else:
             ledger = {}
     else:
@@ -271,6 +291,8 @@ def sample(root, source, binary, image, spec, env):
         ledger = json.loads(inspected.stdout).get("ClaudeUsageLedger", {})
         row["attempts"] = 1
         row.update(image_matches=True, prompt_matches=True)
+        if arm == "container-interactive":
+            row["recording"] = recording_evidence(work / "tmp/scsh-run.log.cast")
     aggregate = ledger.get("aggregate") or {}
     usage = aggregate.get("TokenUsage", {})
     row.update(usage=usage, complete=usage.get("complete", False))
@@ -286,7 +308,9 @@ def sample(root, source, binary, image, spec, env):
         actual = None
     row["correct"] = actual == expected
     row["zero_cache"] = bool(tokens and tokens["cache_read"] == tokens["cache_write"] == 0)
-    row["eligible"] = (row["correct"] and row["complete"] and row["zero_cache"] and row["exit_code"] == 0
+    needs_cast = arm.startswith("scsh-") or arm == "container-interactive"
+    row["eligible"] = ((not needs_cast or row.get("recording", {}).get("valid", False))
+                       and row["correct"] and row["complete"] and row["zero_cache"] and row["exit_code"] == 0
                        and row.get("image_matches", False) and row.get("prompt_matches", False)
                        and row["observed_models"] == [MODEL] and (workload != "one-turn" or
                        (usage.get("tool_calls") == 0 and usage.get("llm_round_trips") == 1)))
@@ -299,7 +323,7 @@ def sample(root, source, binary, image, spec, env):
 def report(root, rows):
     comparisons = []
     for workload in ("one-turn", "repository"):
-        for left, right in [*zip(ARMS, ARMS[1:]), ("container-print", "scsh-headless")]:
+        for left, right in [*zip(ARMS, ARMS[1:]), ("container-print", "scsh-interactive")]:
             pairs = []
             for a in rows:
                 if a["workload"] != workload or a["arm"] != left:
@@ -314,7 +338,7 @@ def report(root, rows):
     write(root / "comparison.json", {"samples": rows, "comparisons": comparisons,
           "limits": ["Host environment intentionally differs from container controls.",
                      "The one-turn fixture uses a deterministic Stop hook to serialize the answer without an LLM tool call.",
-                     "One-turn A-E use verbatim prompts; F adds a compact contract. Repository E-F compares standard with compact.",
+                     "All controls use the same prompt; scsh-compact adds a contract for one-turn and shortens standard for repository.",
                      "No memory savings claim is tested here."]})
 
 

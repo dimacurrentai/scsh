@@ -458,7 +458,7 @@ impl Harness {
   pub fn is_tui(self) -> bool {
     // Every harness supports a real interactive TUI recorded via tmux + asciinema: claude/codex/
     // cursor, plus opencode (`opencode --prompt`) and grok (`grok "<prompt>"`, its default Build
-    // TUI). Callers additionally check the invocation mode for Claude headless routes.
+    // TUI).
     matches!(self, Harness::Claude | Harness::Codex | Harness::Cursor | Harness::Opencode | Harness::Grok)
   }
 
@@ -834,7 +834,6 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
     "harness",
     "model",
     "effort",
-    "claude_mode",
     "prompt_contract",
     "timeout",
     "inactivity_timeout",
@@ -851,7 +850,7 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
   for (k, _) in fields {
     if !SK.contains(&k.as_str()) {
       errors.push(format!(
-        "unknown key 'skills.{name}.{k}' (allowed: harness, model, effort, claude_mode, prompt_contract, timeout, inactivity_timeout, retry_for, retry_signature_cap, tmpfs, env, profile, commits, autoinstall, invocations, result)"
+        "unknown key 'skills.{name}.{k}' (allowed: harness, model, effort, prompt_contract, timeout, inactivity_timeout, retry_for, retry_signature_cap, tmpfs, env, profile, commits, autoinstall, invocations, result)"
       ));
     }
   }
@@ -1054,8 +1053,8 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
           "'skills.{name}.result' must contain '{{name}}' when 'invocations:' is set (each route substitutes its name)"
         ));
       }
-      if !invocations.is_empty() && (fm.contains_key("claude_mode") || fm.contains_key("prompt_contract")) {
-        errors.push(format!("'skills.{name}': put claude_mode and prompt_contract on individual invocation routes"));
+      if !invocations.is_empty() && fm.contains_key("prompt_contract") {
+        errors.push(format!("'skills.{name}': put prompt_contract on individual invocation routes"));
       }
       if fm.get("prompt_contract").is_some_and(|n| matches!(n, Node::Scalar(v) if v == "verbatim"))
         || invocations.iter().any(|r| r.options.prompt_contract == crate::invocation::PromptContract::Verbatim)
@@ -1063,7 +1062,7 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
         errors.push(format!("'skills.{name}': verbatim requires an inline task/prompt in a harness definition"));
       }
       Some(Skill {
-        options: crate::invocation::Options::parse(&fm, harness, &format!("skills.{name}"), errors),
+        options: crate::invocation::Options::parse(&fm, &format!("skills.{name}"), errors),
         name: name.to_string(),
         harness,
         model,
@@ -1238,7 +1237,6 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
       "harness",
       "model",
       "effort",
-      "claude_mode",
       "prompt_contract",
       "profile",
       "commits",
@@ -1250,7 +1248,7 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
     for (k, _) in fields {
       if !IK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, effort, claude_mode, prompt_contract, profile, commits, inactivity_timeout, retry_for, retry_signature_cap, tmpfs)"
+          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, effort, prompt_contract, profile, commits, inactivity_timeout, retry_for, retry_signature_cap, tmpfs)"
         ));
       }
     }
@@ -1349,12 +1347,7 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
     }
     if let Some(harness) = harness {
       out.push(InvocationRoute {
-        options: crate::invocation::Options::parse(
-          &fm,
-          Some(harness),
-          &format!("skills.{skill}.invocations.{default_name}"),
-          errors,
-        ),
+        options: crate::invocation::Options::parse(&fm, &format!("skills.{skill}.invocations.{default_name}"), errors),
         name: route_name,
         harness,
         model,

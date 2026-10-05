@@ -2,12 +2,24 @@
 
 Measured on 2026-10-04 with rootless Podman on `mcpclaude`, Claude Code 2.1.287, `claude-opus-5-5`, and medium effort. All 60 protocol-2 samples passed external correctness, complete native accounting, requested-model verification, and zero-cache checks. Each sample had one attempt and zero MCP calls.
 
-The candidate was built from baseline `0f41ed8` plus the working source snapshot; that baseline has the same product tree as merged main `60224d7`. The feature commits preserve the measured implementation. These measurements predate committing the implementation; binary and runner hashes identify the actual artifacts.
+The candidate was built from baseline `0f41ed8` plus the working source snapshot; that baseline has the same product tree as merged main `60224d7`. These results describe the superseded implementation that included a headless route. The corrected implementation removes that route and retains interactive recording; these measurements are not verification of the correction. These measurements predate committing the implementation; binary and runner hashes identify the actual artifacts.
 
 - Candidate binary SHA-256: `4aad2fce8c170d566b112d551e80addda31493c7570bd48171a118f052735621`.
 - Comparison runner SHA-256: `19b65c88aa9aaa17b0d7db1bdef8f83c1f21ccb60ceb85e0a33f9dafaee93c2a`.
 - Fixture revision: `f02ed2d81584cadcad67c4593b6d252b2387f721`.
 - Container image ID: `a1a292372abefa87f5f89b232a0f4e879cb862031ccbd1494becbb7f11edb106`.
+
+## Interactive correction
+
+On 2026-10-05, the corrected debug binary reproduced the submitted prompt, argument vector, and recorded shell command byte-for-byte for all ten historical `scsh-interactive` samples (five one-turn, five repository), after removing the obsolete mode field from copied definitions. Every corresponding historical asciinema v3 recording contained terminal output. This checks command equivalence against preserved recordings; it does not constitute a fresh model run.
+
+Fresh token measurements remain blocked by expired server authentication. The corrected runner now uses interactive execution for every `scsh` arm, checks for a recording, and retains direct print mode only as a comparison control.
+
+## Request context behind the gap
+
+Inspection of the preserved repetition-1 native `prompt_snapshot` attachments found 42,629 serialized tool-schema bytes in the print control and 97,270 in the interactive control. Interactive-only schemas were `Artifact` (38,533 bytes), `AskUserQuestion` (6,952), and `SendFeedback` (9,176); the shared `Agent` schema also differed. The system prompt, agent/skill listings, environment attachment, and CLI prefix differed as well. These are byte measurements, not token estimates.
+
+This confirms that matching the caller's prompt did not match the entire request. No claim of interactive-versus-print token parity follows from the successful headless comparison. Native `cost-state` records also include auxiliary Haiku usage in the interactive session; the response-ledger tables below describe the recorded task responses, not every background CLI request or account charge.
 
 ## Paired differences
 
@@ -15,6 +27,8 @@ Values are right minus left, in repetition order. Total tokens sum uncached inpu
 
 | Workload | Comparison | Five total-token differences | Median | Range |
 | --- | --- | --- | ---: | --- |
+| one-turn | `container-print` → `scsh-interactive` | 12378, 12383, 12376, 12380, 12380 | 12380 | 12376…12383 |
+| one-turn | `container-interactive` → `scsh-interactive` | 1, 8, 4, 2, 2 | 2 | 1…8 |
 | one-turn | `container-print` → `scsh-headless` | 0, 0, 0, 0, 0 | 0 | 0…0 |
 | one-turn | `container-print` → `container-interactive` | 12377, 12375, 12372, 12378, 12378 | 12377 | 12372…12378 |
 | repository | `container-print` → `scsh-headless` | -48, -57, 5, -173, -40 | -48 | -173…5 |

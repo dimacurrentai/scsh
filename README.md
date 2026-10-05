@@ -145,7 +145,7 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
   one strict schema, shown below the finished recording and stored beside the result.
   See [harness usage accounting](HARNESS-USAGE.md).
 
-Claude routes also accept `claude_mode: headless` and `prompt_contract: standard|compact|verbatim`. `effort` is forwarded to Claude in either mode. Use `scsh inspect-prompt --def <name>` to inspect the exact prompt without a model call; use `scsh inspect-claude-usage <directory>` to reconcile direct-Claude transcripts with the same accounting parser. See [Claude prompts and controlled comparisons](CLAUDE-PROMPTS.md).
+Claude routes accept `prompt_contract: standard|compact|verbatim` while retaining the interactive TUI and asciinema recording. `effort` is forwarded to Claude. Use `scsh inspect-prompt --def <name>` to inspect the exact prompt without a model call; use `scsh inspect-claude-usage <directory>` to reconcile direct-Claude transcripts with the same accounting parser. See [Claude prompts and controlled comparisons](CLAUDE-PROMPTS.md).
 
   Native token counters are required by default for every harness. After the result appears and the turn has gone quiet, ordinary watchdogs yield to a dedicated accounting wait (up to 600 seconds for every harness; override with `SCSH_USAGE_ACCOUNTING_TIMEOUT`); only then does `scsh` request a graceful exit, never automatic Ctrl-C. A still-running generation does not start that wait. Missing counters fail with `usage_accounting_timeout` or `usage_accounting_unavailable`. Set `SCSH_NO_USAGE=1` to explicitly skip this requirement and wait. Grok records native per-turn usage, including folded subagent spend. OpenCode currently has no native accounting adapter and requires that opt-out.
 
