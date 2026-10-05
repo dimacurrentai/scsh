@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import socket
 from pathlib import Path
 import subprocess
 import tempfile
@@ -33,6 +34,31 @@ class ClaudeParityTests(unittest.TestCase):
                 self.assertEqual(manifest["requested_model"], PARITY.MODEL)
                 self.assertEqual(manifest["effort"], "medium")
                 self.assertEqual(manifest["argument_vector"][-1], manifest["submitted_prompt"]["text"])
+
+    def test_renamed_candidate_can_start_and_stop_its_isolated_daemon(self):
+        binary = Path(__file__).resolve().parents[1] / "target/debug/scsh"
+        if not binary.exists():
+            self.skipTest("Build the debug binary to verify renamed-candidate daemon cleanup.")
+        with tempfile.TemporaryDirectory(prefix="scsh-parity-daemon-") as tmp:
+            root = Path(tmp)
+            renamed = root / "candidate"
+            renamed.write_bytes(binary.read_bytes())
+            installed = PARITY.isolated_binary(root, renamed)
+            self.assertEqual(installed.read_bytes(), binary.read_bytes())
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            env = dict(os.environ, SCSH_HOME=str(root / "state"), SCSH_DAEMON_PORT=str(port))
+            try:
+                PARITY.checked([str(installed), "daemon", "start"], env=env)
+                status = json.loads(PARITY.checked([str(installed), "daemon", "status", "--json"], env=env))
+                self.assertTrue(status["running"])
+            finally:
+                PARITY.checked([str(installed), "daemon", "stop"], env=env)
+            stopped = subprocess.run([str(installed), "daemon", "status", "--json"], env=env,
+                                     capture_output=True, text=True, timeout=30)
+            self.assertEqual(stopped.returncode, 1)
+            self.assertFalse(json.loads(stopped.stdout)["running"])
 
     def test_recording_requires_terminal_output(self):
         with tempfile.TemporaryDirectory(prefix="scsh-parity-cast-") as tmp:
