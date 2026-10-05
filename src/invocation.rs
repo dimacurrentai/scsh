@@ -3,14 +3,6 @@
 use crate::config::{Harness, Node};
 use std::collections::BTreeMap;
 
-/// Claude's process lifecycle; interactive remains the compatibility default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ClaudeMode {
-  #[default]
-  Interactive,
-  Headless,
-}
-
 /// How much machine-contract prose the caller asks the launcher to generate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PromptContract {
@@ -21,47 +13,32 @@ pub enum PromptContract {
   Verbatim,
 }
 
-/// Orthogonal choices affecting model input and process supervision.
+/// Caller control over generated model instructions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Options {
-  /// Print mode exits naturally and streams JSON instead of recording a TUI.
-  pub claude_mode: ClaudeMode,
   /// Generated instructions are opt-out; validation is always retained.
   pub prompt_contract: PromptContract,
 }
 
 impl Options {
-  pub fn parse(fields: &BTreeMap<&str, &Node>, harness: Option<Harness>, at: &str, errors: &mut Vec<String>) -> Self {
+  pub fn parse(fields: &BTreeMap<&str, &Node>, at: &str, errors: &mut Vec<String>) -> Self {
     let mut options = Self::default();
-    for key in ["claude_mode", "prompt_contract"] {
-      let Some(node) = fields.get(key) else { continue };
+    if let Some(node) = fields.get("prompt_contract") {
       let value = match node {
         Node::Scalar(value) => value.trim(),
         Node::Map(_) => "",
       };
-      match (key, value) {
-        ("claude_mode", "interactive") => options.claude_mode = ClaudeMode::Interactive,
-        ("claude_mode", "headless") => options.claude_mode = ClaudeMode::Headless,
-        ("prompt_contract", "standard") => options.prompt_contract = PromptContract::Standard,
-        ("prompt_contract", "compact") => options.prompt_contract = PromptContract::Compact,
-        ("prompt_contract", "verbatim") => options.prompt_contract = PromptContract::Verbatim,
-        _ => errors.push(format!(
-          "'{at}.{key}' must be {}",
-          if key == "claude_mode" { "interactive or headless" } else { "standard, compact, or verbatim" }
-        )),
-      }
-    }
-    if fields.contains_key("claude_mode") && harness != Some(Harness::Claude) {
-      errors.push(format!("'{at}.claude_mode' requires harness: claude; put it on a Claude route"));
+      options.prompt_contract = match value {
+        "standard" => PromptContract::Standard,
+        "compact" => PromptContract::Compact,
+        "verbatim" => PromptContract::Verbatim,
+        _ => {
+          errors.push(format!("'{at}.prompt_contract' must be standard, compact, or verbatim"));
+          PromptContract::Standard
+        }
+      };
     }
     options
-  }
-
-  pub fn mode_name(self) -> &'static str {
-    match self.claude_mode {
-      ClaudeMode::Interactive => "interactive",
-      ClaudeMode::Headless => "headless",
-    }
   }
 
   pub fn contract_name(self) -> &'static str {
@@ -99,7 +76,7 @@ pub fn manifest(skill: &crate::config::ResolvedInvocation) -> crate::json::Value
       ("schema_version", Value::Number(1.0)),
       ("invocation", Value::String(skill.name.clone())),
       ("harness", Value::String(skill.harness.as_str().to_string())),
-      ("execution_mode", Value::String(skill.options.mode_name().to_string())),
+      ("execution_mode", Value::String("interactive".into())),
       ("prompt_contract", Value::String(skill.options.contract_name().to_string())),
       ("requested_model", skill.model.clone().map(Value::String).unwrap_or(Value::Null)),
       ("effort", skill.effort.clone().map(Value::String).unwrap_or(Value::Null)),
@@ -126,7 +103,7 @@ pub fn manifest(skill: &crate::config::ResolvedInvocation) -> crate::json::Value
         "argument_vector",
         if skill.harness == Harness::Claude {
           Value::Array(
-            crate::runtime::claude_argv(skill.model.as_deref(), skill.effort.as_deref(), &prompt, skill.options)
+            crate::runtime::claude_argv(skill.model.as_deref(), skill.effort.as_deref(), &prompt)
               .into_iter()
               .map(Value::String)
               .collect(),
@@ -146,41 +123,10 @@ fn object(fields: Vec<(&str, crate::json::Value)>) -> crate::json::Value {
   crate::json::Value::Object(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
 }
 
-/// Print-mode failure messages come from the terminal result event, not a nonexistent cast.
-pub fn headless_error(stream: &str) -> Option<String> {
-  use crate::json::Value;
-  stream
-    .lines()
-    .filter_map(|line| crate::json::parse(line).ok())
-    .filter_map(|value| {
-      let Value::Object(fields) = value else { return None };
-      let get = |key| fields.iter().find(|(k, _)| k == key).map(|(_, v)| v);
-      if get("type") != Some(&Value::String("result".into())) || get("is_error") != Some(&Value::Bool(true)) {
-        return None;
-      }
-      match get("result") {
-        Some(Value::String(message)) => Some(message.clone()),
-        _ => Some("Claude headless result reports an error".into()),
-      }
-    })
-    .next_back()
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
   use crate::{config, harness_def, runtime};
-
-  #[test]
-  fn headless_errors_require_a_terminal_error_event() {
-    assert_eq!(
-      headless_error(r#"{"type":"result","is_error":true,"result":"You've hit your weekly limit"}"#),
-      Some("You've hit your weekly limit".into())
-    );
-    assert_eq!(headless_error(r#"{"type":"assistant","is_error":true,"result":"limit"}"#), None);
-    assert_eq!(headless_error(r#"{"type":"result","is_error":false,"result":"limit"}"#), None);
-    assert_eq!(headless_error("truncated"), None);
-  }
 
   fn workflow(policy: &str) -> harness_def::HarnessDef {
     let yaml = r#"description: Prompt fidelity test
@@ -190,7 +136,6 @@ steps:
       harness: claude
       model: claude-opus-5-5
       effort: medium
-      claude_mode: headless
       prompt_contract: POLICY
     prompt: |
       Compute the answer. Preserve '$value', `backticks`, and Unicode: café.
@@ -212,7 +157,6 @@ steps:
       let prompt = runtime::agent_task_prompt(inv.harness, &inv.skill_source, &inv.delivery, inv.options);
       let authored = step.task().unwrap().body();
       assert!(prompt.starts_with(authored.trim_end()));
-      assert_eq!(inv.options.mode_name(), "headless");
       assert_eq!(inv.effort.as_deref(), Some("medium"));
       if policy == "verbatim" {
         assert_eq!(prompt.as_bytes(), authored.as_bytes());
@@ -269,13 +213,12 @@ steps:
   }
 
   #[test]
-  fn flat_routes_accept_policies_and_reject_wrong_harness_and_typos() {
+  fn flat_routes_accept_policies_and_reject_removed_modes_and_typos() {
     let yaml = r#"description: Flat prompt
 task: Write the answer to $SCSH_RESULT.
 invocations:
-  print:
+  claude:
     harness: claude
-    claude_mode: headless
     prompt_contract: verbatim
     effort: medium
 "#;
@@ -283,19 +226,19 @@ invocations:
     let cfg = config::Config { skills: vec![def.to_skill()], terminal: config::Terminal::default() };
     assert_eq!(config::expand_invocations(&cfg)[0].options.prompt_contract, PromptContract::Verbatim);
     for bad in [
-      yaml.replace("harness: claude", "harness: codex"),
-      yaml.replace("headless", "headles"),
+      yaml.replace("prompt_contract: verbatim", "claude_mode: headless"),
+      yaml.replace("prompt_contract: verbatim", "claude_mode: interactive"),
       yaml.replace("verbatim", "raw"),
-      yaml.replace("claude_mode", "claude_mod"),
+      yaml.replace("prompt_contract", "prompt_contrac"),
     ] {
       assert!(harness_def::validate("flat", &bad, harness_def::DefSource::Repo).is_err());
     }
   }
 
   #[test]
-  fn headless_shell_preserves_exit_status_and_prompt_bytes() {
+  fn recorded_shell_preserves_exit_status_and_prompt_bytes() {
     use std::os::unix::fs::PermissionsExt;
-    let root = std::env::temp_dir().join(format!("scsh-headless-test-{}", runtime::random_nonce_6()));
+    let root = std::env::temp_dir().join(format!("scsh-recorded-test-{}", runtime::random_nonce_6()));
     std::fs::create_dir_all(&root).unwrap();
     struct Cleanup(std::path::PathBuf);
     impl Drop for Cleanup {
@@ -318,7 +261,7 @@ exit "$TEST_EXIT"
     .unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
     let prompt = "---\n'$(touch should-not-exist)' `literal` café\n\n";
-    let options = Options { claude_mode: ClaudeMode::Headless, prompt_contract: PromptContract::Verbatim };
+    let options = Options { prompt_contract: PromptContract::Verbatim };
     let command = runtime::harness_command_with_options(
       config::Harness::Claude,
       Some("opus"),
@@ -329,8 +272,21 @@ exit "$TEST_EXIT"
       &config::SkillDelivery::DirectPrompt(prompt.into()),
       options,
     );
-    assert!(!command.contains("scsh-tui-record"));
-    assert!(!command.contains("/exit"));
+    assert!(command.contains("scsh-tui-record"));
+    let args = runtime::claude_argv(Some("opus"), Some("medium"), prompt);
+    assert!(!args.iter().any(|arg| arg == "-p" || arg == "--print"));
+    assert_eq!(args.last().unwrap().as_bytes(), prompt.as_bytes());
+    let recorder = root.join("scsh-tui-record");
+    std::fs::write(
+      &recorder,
+      r#"#!/bin/sh
+[ "$3" = slash-exit ] || exit 98
+[ "$4" = none ] || exit 99
+exec sh -c "$6"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&recorder, std::fs::Permissions::from_mode(0o700)).unwrap();
     for status in [0, 17] {
       let output = runtime::command_output(
         std::process::Command::new("sh")
@@ -352,7 +308,6 @@ exit "$TEST_EXIT"
       );
       assert_eq!(std::fs::read(root.join("prompt")).unwrap(), prompt.as_bytes());
       assert!(!root.join("should-not-exist").exists());
-      assert!(!root.join("run.log.cast").exists());
     }
   }
 }

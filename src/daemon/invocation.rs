@@ -89,7 +89,7 @@ fn field<'a>(value: &'a crate::json::Value, name: &str) -> Option<&'a crate::jso
   fields.iter().find(|(key, _)| key == name).map(|(_, value)| value)
 }
 
-/// Add only allowlisted runtime observations; streamed message bodies stay in the log.
+/// Add the observed CLI version without copying terminal output.
 pub fn finish_manifest(root: &std::path::Path) -> Result<(), String> {
   use crate::json::Value;
   let path = root.join(format!("{}.invocation.json", crate::runtime::RUN_LOG_REL));
@@ -101,21 +101,5 @@ pub fn finish_manifest(root: &std::path::Path) -> Result<(), String> {
   let Some((_, Value::Object(fields))) = outer.first_mut() else { return Err("invalid invocation payload".into()) };
   let version = std::fs::read_to_string(root.join(format!("{}.cli-version", crate::runtime::RUN_LOG_REL))).ok();
   fields.push(("observed_cli_version".into(), version.map(|s| Value::String(s.trim().into())).unwrap_or(Value::Null)));
-  let stream = std::fs::read_to_string(root.join(crate::runtime::RUN_LOG_REL)).unwrap_or_default();
-  let init = stream.lines().filter_map(|line| crate::json::parse(line).ok()).find(|value| {
-    field(value, "type") == Some(&Value::String("system".into()))
-      && field(value, "subtype") == Some(&Value::String("init".into()))
-  });
-  let tools = init
-    .as_ref()
-    .and_then(|v| field(v, "tools"))
-    .and_then(|v| match v {
-      Value::Array(values) => {
-        Some(Value::Array(values.iter().filter(|v| matches!(v, Value::String(_))).cloned().collect()))
-      }
-      _ => None,
-    })
-    .unwrap_or(Value::Null);
-  fields.push(("observed_headless_tool_names".into(), tools));
   crate::atomic_write(&path, crate::json::write_pretty(&document).as_bytes()).map_err(|e| e.to_string())
 }
