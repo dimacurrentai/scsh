@@ -13,7 +13,7 @@ The candidate was built from baseline `0f41ed8` plus the working source snapshot
 
 On 2026-10-05, the corrected debug binary reproduced the submitted prompt, argument vector, and recorded shell command byte-for-byte for all ten historical `scsh-interactive` samples (five one-turn, five repository), after removing the obsolete mode field from copied definitions. Every corresponding historical asciinema v3 recording contained terminal output. This checks command equivalence against preserved recordings; it does not constitute a fresh model run.
 
-Fresh token measurements remain blocked by expired server authentication. The corrected runner now uses interactive execution for every `scsh` arm, checks for a recording, and retains direct print mode only as a comparison control.
+Fresh measurements after renewing authentication are recorded in [CLAUDE-RECORDED-RESULTS.md](CLAUDE-RECORDED-RESULTS.md). The corrected runner uses interactive execution for every `scsh` arm, checks for a recording, and retains direct print mode only as a comparison control.
 
 ## Request context behind the gap
 
