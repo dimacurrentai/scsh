@@ -34,7 +34,7 @@ The four token buckets are disjoint: uncached input, output, cache reads, and ca
 
 ## Remote verification
 
-Use only `ubuntu@mcpclaude` (`170.75.160.233`), rootless Podman, and a remote `tmux` session for verification. Finish the frozen mock-memory campaign and its queued report validation before starting another workload. Install the candidate under a separate name, for example `~/scsh-token-lab/bin/scsh-token-lab`; preserve the installed `scsh` executable and use a separate `SCSH_HOME` and daemon port.
+Use only `ubuntu@mcpclaude` (`170.75.160.233`), rootless Podman, and a remote `tmux` session for verification. Finish the frozen mock-memory campaign and its queued report validation before starting another workload. Install the candidate under a separate name, for example `~/scsh-token-lab/bin/scsh-token-lab`; preserve the installed `scsh` executable and use a separate `SCSH_HOME` and daemon port. The comparison runner copies the candidate byte-for-byte to its private output directory as `bin/scsh`, preserving the basename required by daemon ownership checks, and treats failed daemon shutdown as a failed run.
 
 Run the repository gates in that separate source checkout: formatting, debug/release clippy and builds, both Rust test profiles, and the Python gate tests. Bound unit-test execution to 30 seconds after compilation and integration tests to a few minutes. Preserve their full output with `tee`.
 

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import selectors
 import shlex
+import shutil
 import signal
 import socket
 import statistics
@@ -110,6 +111,16 @@ def prepare(root, binary, samples):
           "fixture_revision": checked(["git", "rev-parse", "HEAD"], cwd=source).strip(),
           "nonce_policy": "Identical within matched controls; different for each repetition. Cache disabled in settings."})
     return source, plan
+
+
+def isolated_binary(root, binary):
+    # Daemon ownership currently recognizes the executable basename "scsh". Preserve it
+    # inside the private campaign directory even when the supplied candidate was renamed.
+    target = root / "bin/scsh"
+    target.parent.mkdir(parents=True)
+    shutil.copyfile(binary, target)
+    target.chmod(0o700)
+    return target
 
 
 def seed_config(work, host=False):
@@ -359,6 +370,7 @@ def main():
     if not args.execute:
         print(f"Prepared {len(plan)} sequential samples in {root}; no model calls.")
         return
+    binary = isolated_binary(root, binary)
     if not args.auth_file:
         parser.error("--execute requires --auth-file containing access_token and expires_at")
     auth = json.loads(args.auth_file.read_text())
@@ -386,7 +398,7 @@ def main():
             if not row["complete"] or not row["zero_cache"]:
                 raise RuntimeError("Usage unavailable or cache policy violated; sample retained, campaign stopped.")
     finally:
-        subprocess.run([str(binary), "daemon", "stop"], env=env, timeout=30)
+        checked([str(binary), "daemon", "stop"], env=env)
 
 
 if __name__ == "__main__":
