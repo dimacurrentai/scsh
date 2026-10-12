@@ -2292,26 +2292,22 @@ pub fn init_bare_repo(path: &Path) -> Result<(), String> {
 /// Host push IN: mirror every local `refs/heads/*` branch into the bare transport repo.
 /// Code-review prep uses `git branch -f main <base>`; pushing heads (not stale
 /// `refs/remotes/origin/*`) ensures `origin/main..HEAD` resolves inside the container.
+///
+/// One push for all branches, with `--no-verify`: this is scsh copying the caller's repo,
+/// not the caller publishing work, so the caller's `pre-push` hook must not run. A repo whose
+/// hook runs its test suite otherwise ran it once per branch for every parallel run, and a
+/// hook failing under that load failed the run before the agent started.
 pub fn push_transport_refs(root: &Path, bare: &Path) -> Result<(), String> {
   init_bare_repo(bare)?;
   let bare_s = bare.to_string_lossy();
   let Some(heads) = git_stdout(root, &["for-each-ref", "--format=%(refname)", "refs/heads"]) else {
     return Err(format!("could not read local branches in {}", root.display()));
   };
-  let mut pushed = false;
-  for line in heads.lines() {
-    let refname = line.trim();
-    if refname.is_empty() {
-      continue;
-    }
-    let spec = format!("{refname}:{refname}");
-    if !git_ok(root, &["push", "--quiet", &bare_s, &spec]) {
-      return Err(format!("git push {refname} to {} failed", bare.display()));
-    }
-    pushed = true;
-  }
-  if !pushed {
+  if heads.lines().all(|line| line.trim().is_empty()) {
     return Err(format!("no local branches to push from {}", root.display()));
+  }
+  if !git_ok(root, &["push", "--quiet", "--no-verify", &bare_s, "refs/heads/*:refs/heads/*"]) {
+    return Err(format!("git push of the local branches to {} failed", bare.display()));
   }
   if let Some(branch) = git_stdout(root, &["rev-parse", "--abbrev-ref", "HEAD"]) {
     let branch = branch.trim();
@@ -4044,6 +4040,41 @@ TAG
     assert!(refs.contains("refs/heads/main"), "expected refs/heads/main in bare, got:\n{refs}");
     assert!(refs.contains("refs/heads/feature"), "expected feature branch in bare, got:\n{refs}");
     assert!(!refs.contains("refs/remotes/origin/main"), "bare should not store remote-tracking refs:\n{refs}");
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn push_transport_refs_never_runs_the_callers_pre_push_hook() {
+    let tmp = std::env::temp_dir().join(format!("scsh-push-hook-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let root = tmp.join("root");
+    let bare = tmp.join("bare.git");
+    let git = |args: &[&str]| assert!(crate::git_command().arg("-C").arg(&root).args(args).status().unwrap().success());
+    crate::git_command().args(["init", "-q"]).arg(&root).status().unwrap();
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(root.join("f"), "x").unwrap();
+    git(&["add", "f"]);
+    git(&["commit", "-qm", "init"]);
+    for branch in ["a", "b", "c"] {
+      git(&["branch", branch]);
+    }
+    // A hook like this repo's own `.githooks/pre-push`, which runs the whole test suite: it
+    // must never run, and its failure must not stop the transport.
+    let hooks = tmp.join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let marker = tmp.join("hook-ran");
+    std::fs::write(hooks.join("pre-push"), format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display())).unwrap();
+    assert!(std::process::Command::new("chmod").arg("+x").arg(hooks.join("pre-push")).status().unwrap().success());
+    git(&["config", "core.hooksPath", &hooks.to_string_lossy()]);
+    push_transport_refs(&root, &bare).unwrap();
+    assert!(!marker.exists(), "the caller's pre-push hook ran");
+    let show = crate::git_command().arg("-C").arg(&bare).args(["show-ref"]).output().unwrap();
+    let refs = String::from_utf8_lossy(&show.stdout);
+    for branch in ["a", "b", "c"] {
+      assert!(refs.contains(&format!("refs/heads/{branch}")), "every branch arrives in one push:\n{refs}");
+    }
     let _ = std::fs::remove_dir_all(&tmp);
   }
 
