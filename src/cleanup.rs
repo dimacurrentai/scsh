@@ -49,6 +49,10 @@ pub fn log_sources() -> Vec<(String, &'static str)> {
     (".invocation.json", "invocation.json"),
     (".cli-version", "cli-version"),
     (".events.jsonl", "events.jsonl"),
+    (".cline-quota-before.limits.json", "cline-quota-before.limits.json"),
+    (".cline-quota-before.plan.json", "cline-quota-before.plan.json"),
+    (".cline-quota-after.limits.json", "cline-quota-after.limits.json"),
+    (".cline-quota-after.plan.json", "cline-quota-after.plan.json"),
   ]
   .into_iter()
   .map(|(suffix, ext)| (format!("{}{suffix}", runtime::RUN_LOG_REL), ext))

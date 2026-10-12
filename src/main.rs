@@ -1168,7 +1168,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
           Some(name) if !name.starts_with('-') => {
             i += 1;
             Some(config::Harness::parse(name).ok_or_else(|| {
-              format!("unknown harness '{name}' (expected one of: claude, codex, grok, cursor, opencode)")
+              format!("unknown harness '{name}' (expected one of: claude, codex, grok, cursor, cline, opencode)")
             })?)
           }
           _ => None,
@@ -5653,6 +5653,10 @@ fn build_and_run(
     let via = if runtime::grok_auth_file_on_host().is_some() { "~/.grok/auth.json" } else { "XAI_API_KEY" };
     ok(&format!("grok credentials found ({via} forwarded into grok skills)"));
   }
+  let needs_cline = skills.iter().any(|s| s.harness.agent() == config::Harness::Cline);
+  if needs_cline && cline_auth_enabled() && runtime::cline_api_key().is_some() {
+    ok("cline credentials found (CLINE_API_KEY forwarded into cline skills)");
+  }
   let needs_cursor = skills.iter().any(|s| s.harness.agent() == config::Harness::Cursor);
   if needs_cursor && cursor_auth_enabled() && runtime::cursor_container_auth_ready() {
     let via = if runtime::cursor_api_key().is_some() {
@@ -6458,6 +6462,7 @@ fn skill_fail_detail(why: &str, harness: config::Harness, run_dir: Option<&str>,
         config::Harness::Grok => parts.push(format!("grok debug log: {l}.debug")),
         config::Harness::Cursor => {}
         config::Harness::Opencode => {}
+        config::Harness::Cline => {}
       }
     }
   }
@@ -6989,6 +6994,10 @@ fn run_one_skill(
   let forwarded_auth = claude_auth.as_ref().and_then(|_| claude_auth_fingerprint());
   let codex_auth = if agent == config::Harness::Codex && codex_auth_enabled() { forward_codex(&run_dir) } else { None };
   let grok_auth = if agent == config::Harness::Grok && grok_auth_enabled() { forward_grok(&run_dir) } else { None };
+  if agent == config::Harness::Cline {
+    seed_cline_notices(&run_dir);
+  }
+  let cline_auth = if agent == config::Harness::Cline && cline_auth_enabled() { forward_cline(&run_dir) } else { None };
   let cursor_auth = if agent == config::Harness::Cursor {
     install_cursor_usage_hooks(&run_dir);
     if cursor_auth_enabled() {
@@ -7056,6 +7065,12 @@ fn run_one_skill(
       if !key.is_empty() {
         container_env.push((runtime::XAI_API_KEY_ENV.to_string(), key));
       }
+    }
+  }
+  // `SCSH_NO_CLINE_AUTH` withholds the key too, not only the providers file.
+  if agent == config::Harness::Cline && cline_auth_enabled() {
+    if let Some(key) = runtime::cline_api_key() {
+      container_env.push((runtime::CLINE_API_KEY_ENV.to_string(), key));
     }
   }
   if agent == config::Harness::Cursor {
@@ -7183,9 +7198,7 @@ fn run_one_skill(
     startup: (!headless).then(|| ui::screen::StartupStall::jittered(startup_seed)),
     // Independent of SCSH_NO_USAGE: partial counters and hooks prove liveness even when
     // exact final accounting is disabled. Fresh per-attempt trees exclude prior sessions.
-    startup_complete: Some(Box::new(|| {
-      daemon::usage::from_run_dir(skill.harness, &run_dir).is_some_and(|usage| usage.has_started_work())
-    })),
+    startup_complete: Some(Box::new(|| daemon::usage::native_work_started(skill.harness, &run_dir))),
     limit_wait,
   };
   // Completion watch: stop as soon as the task crosses its declared finish line, rather than
@@ -7316,6 +7329,9 @@ fn run_one_skill(
   }
   if let Some(p) = &grok_auth {
     scrub_grok_credentials(p);
+  }
+  if let Some(p) = &cline_auth {
+    scrub_cline_credentials(p);
   }
   if cursor_auth {
     scrub_cursor_credentials(&run_dir);
@@ -8556,7 +8572,57 @@ fn forward_grok(run_dir: &Path) -> Option<PathBuf> {
   Some(dest)
 }
 
-/// Remove forwarded Grok credentials from a run dir, keeping grok's session/log data.
+/// Write a minimal Cline `providers.json` holding only the key [`runtime::cline_api_key`]
+/// resolves (env, then `~/.cline`, then `~/.env`) — the same key the container env and the
+/// quota snapshots use, and never the host file's other providers' secrets.
+fn forward_cline(run_dir: &Path) -> Option<PathBuf> {
+  let key = runtime::cline_api_key()?;
+  let dest = run_dir.join(runtime::CLINE_FORWARD_REL).join("data/settings");
+  std::fs::create_dir_all(&dest).ok()?;
+  std::fs::write(dest.join("providers.json"), cline_providers_json(&key, now_secs())).ok()?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(dest.join("providers.json"), std::fs::Permissions::from_mode(0o600));
+  }
+  Some(dest)
+}
+
+/// The shape `cline auth` writes. Both `lastUsedProvider` and the entry's `updatedAt` are
+/// load-bearing: without either, the TUI opens its "Connect a model provider" onboarding and
+/// waits there.
+fn cline_providers_json(key: &str, epoch_secs: u64) -> String {
+  let t = runtime::format_utc_timestamp(epoch_secs);
+  let updated = format!("{}-{}-{}T{}:{}:{}.000Z", &t[0..4], &t[4..6], &t[6..8], &t[9..11], &t[11..13], &t[13..15]);
+  format!(
+    "{{\"version\":1,\"lastUsedProvider\":\"cline\",\"modes\":{{}},\"providers\":{{\"cline\":{{\"settings\":{{\"provider\":\"cline\",\"apiKey\":{}}},\"updatedAt\":{},\"tokenSource\":\"manual\"}}}}}}",
+    json::quote(key),
+    json::quote(&updated)
+  )
+}
+
+/// Mark every Cline CLI notice as already shown. After the first answer the TUI otherwise
+/// raises a promo modal ("Try ClinePass", "Introducing Cline Desktop") that swallows the next
+/// keystrokes, so the recorder's `/quit` only dismissed it and the run sat until the resend.
+/// The ids are the ones cline 3.0.70 (`CLINE_VERSION`) defines.
+fn seed_cline_notices(run_dir: &Path) {
+  let dir = run_dir.join(runtime::CLINE_FORWARD_REL).join("data/settings");
+  let _ = std::fs::create_dir_all(&dir).and_then(|_| {
+    std::fs::write(
+      dir.join("cli-notices.json"),
+      r#"{"shown":{"cline-cli-cline-pass-intro":true,"cline-cli-desktop-launch":true}}"#,
+    )
+  });
+}
+
+fn scrub_cline_credentials(settings_dir: &Path) {
+  let _ = std::fs::remove_file(settings_dir.join("providers.json"));
+}
+
+fn cline_auth_enabled() -> bool {
+  runtime::auth_forwarding_enabled(config::Harness::Cline)
+}
+
 fn scrub_grok_credentials(grok_dir: &Path) {
   for name in ["auth.json", "config.toml", "user-settings.json"] {
     let _ = std::fs::remove_file(grok_dir.join(name));
@@ -11061,7 +11127,7 @@ fn print_help_command(name: &str) {
       "live subscription usage per harness",
       "scsh quota [harness] [--json] [--session <id>]",
       &[
-        ("[harness]", "One of claude, codex, grok, cursor — none queries all four (opencode has no quota endpoint)."),
+        ("[harness]", "One of claude, codex, grok, cursor, cline — none queries all five (opencode has no quota endpoint)."),
         ("--json", "Machine-readable: per-harness status, plan, percent-used windows with reset times, and a summary line."),
         ("--session <id>", "Report into this session id (used by the Setup tab's Check quota button)."),
         ("(a job)", "One run per harness: each writes sessions/<id>/results/quota-<harness>.json and its own status line."),
@@ -11099,7 +11165,7 @@ fn print_help_command(name: &str) {
       "build the container images outside a run",
       "scsh build-images [harness…] [--force] [--rebuild-base] [--session <id>]",
       &[
-        ("[harness…]", "Harness images to build (opencode, claude, codex, grok, cursor); none = all."),
+        ("[harness…]", "Harness images to build (opencode, claude, codex, grok, cursor, cline); none = all."),
         ("--force", "Rebuild the selected harness images even when up to date (--no-cache)."),
         ("--rebuild-base", "Force-rebuild the shared base image first (--no-cache), then the selection."),
         ("--session <id>", "Report into this session id (used by the dashboard's Build buttons)."),
@@ -11350,6 +11416,7 @@ the run fails only when every selected skill is skipped.",
   help_row("SCSH_NO_OPENCODE_AUTH=1", "Do not forward opencode credentials into containers.");
   help_row("SCSH_NO_CLAUDE_AUTH=1", "Do not forward Claude credentials into containers.");
   help_row("SCSH_NO_CURSOR_AUTH=1", "Do not forward Cursor credentials into containers.");
+  help_row("SCSH_NO_CLINE_AUTH=1", "Do not forward the Cline API key into containers.");
   help_row("SCSH_NO_GH_AUTH=1", "Do not forward GitHub CLI credentials into containers.");
   println!();
   println!("{}", h_head("After a run"));
@@ -11385,13 +11452,14 @@ fn print_help_config() {
 
     add:                    #   key must match the skill directory name
       harness: opencode     #     direct run — OR use invocations: for a matrix (below)
-                            #     harnesses: opencode | claude | codex | grok | cursor
+                            #     harnesses: opencode | claude | codex | grok | cursor | cline
                             #     headless (no terminal recording; a live transcript instead,
                             #     same image, login, and token accounting as the TUI):
                             #     claude-headless | codex-headless
       model: openai/...     #     optional; the model the harness passes to the tool
       effort: high        #     optional; reasoning effort (claude/grok: low..max, codex:
-                          #       minimal..xhigh, cursor: low..high as --model slug suffixes). With
+                          #       minimal..xhigh, cursor: low..high as --model slug suffixes,
+                          #       cline: the levels the selected model offers). With
                           #       invocations: a default routes may override; harnesses
                           #       without an effort knob ignore it
       # Definitions: prompt_contract: standard|compact|verbatim (default standard).
@@ -11500,7 +11568,7 @@ fn print_help_internals() {
   print!(
     r#"  scsh builds the shared base image (`scsh-base:latest`) first — or skips it when the tag
   already matches the embedded Dockerfile fingerprint — then builds the needed per-harness
-  images (`scsh-opencode`, `scsh-claude`, `scsh-codex`, `scsh-grok`, `scsh-cursor`) on top IN PARALLEL,
+  images (`scsh-opencode`, `scsh-claude`, `scsh-codex`, `scsh-grok`, `scsh-cursor`, `scsh-cline`) on top IN PARALLEL,
   skipping any whose tag already matches. Each build is version-checked during the build. Then, for
   EVERY selected skill in parallel, it prepares a /tmp run dir (scsh-YYYYMMDD-HHMMSS-utc-run-<invocation> on docker/podman,
   or scsh-<nonce>-run-<invocation> on Apple container — ≤ 64 chars, middle-truncated with .. when
@@ -11604,7 +11672,8 @@ fn print_help_internals() {
   no setup step. Built once, then cached and reused (the first run does the build):
     languages/build  python3 (+ uv), Go, Rust (cargo), C/C++ (gcc/g++/make/cmake),
                      perl, gawk, node
-    harness images   scsh-opencode (+ opencode-ai), scsh-claude (+ @anthropic-ai/claude-code)
+    harness images   scsh-opencode (+ opencode-ai), scsh-claude (+ @anthropic-ai/claude-code),
+                     scsh-codex, scsh-grok, scsh-cursor, scsh-cline (+ cline)
     data/CLI         jq, yq, ripgrep, shellcheck, git (+ git-lfs), gh, sqlite3,
                      psql, protoc, curl/wget, tar/gzip/xz/zip/unzip, patch, tree
     cloud            aws (v2), gcloud + gsutil, kubectl
@@ -11653,8 +11722,8 @@ fn print_help_defs() {
   print!(
     r#"  steps:                   a block map; each step runs on its own agent, in its own clone
     <id>:
-      agent:               harness: claude|codex|cursor|grok|opencode, or claude-headless|codex-headless;
-                           optional model:, effort:
+      agent:               harness: claude|codex|cursor|grok|cline|opencode, or claude-headless|
+                           codex-headless; optional model:, effort:
       prompt: |            intent only — scsh appends the machine I/O contract
       inputs:              env vars for the step:  NAME: params.X  or  NAME: stepid.field
       output:              typed result fields the step must write to $SCSH_RESULT (JSON)
@@ -11910,10 +11979,40 @@ mod tests {
 [2.0, "o", "\u001b[43;1H\u001b[38;5;231m●\u001b[C\u001b[39mLogin expired ·\u001b[CPlease\u001b[Crun\u001b[C/login\u001b[45;1H\u001b[38;5;246m✻\u001b[39m \u001b[38;5;246mBrewed for 0s\u001b[39m"]"#;
 
   #[test]
+  fn cline_notices_are_marked_shown_before_the_tui_starts() {
+    let run = std::env::temp_dir().join(format!("scsh-cline-notices-{}", runtime::random_nonce_6()));
+    seed_cline_notices(&run);
+    let text =
+      std::fs::read_to_string(run.join(runtime::CLINE_FORWARD_REL).join("data/settings/cli-notices.json")).unwrap();
+    // Each promo modal swallowed the recorder's `/quit`; both ids of cline 3.0.70 must be set.
+    for id in ["cline-cli-cline-pass-intro", "cline-cli-desktop-launch"] {
+      assert!(text.contains(&format!("\"{id}\":true")), "{text}");
+    }
+    let _ = std::fs::remove_dir_all(run);
+  }
+
+  #[test]
+  fn forwarded_cline_providers_select_the_cline_provider() {
+    let doc = cline_providers_json("ck-\"1", 1_791_824_537);
+    let json::Value::Object(root) = json::parse(&doc).unwrap() else { panic!("{doc}") };
+    let get = |k: &str| root.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+    // Without lastUsedProvider the Cline TUI stops on its onboarding screen.
+    assert_eq!(get("lastUsedProvider"), Some(json::Value::String("cline".into())));
+    assert!(doc.contains(r#""updatedAt":"2026-10-12T17:02:17.000Z""#), "the TUI needs updatedAt too: {doc}");
+    assert!(doc.contains(r#""apiKey":"ck-\"1""#), "{doc}");
+  }
+
+  #[test]
   fn a_claude_container_that_came_up_logged_out_is_an_auth_rejection() {
     let screen = ptyrec::cast_output_text(CLAUDE_LOGGED_OUT_CAST);
     assert!(harness_came_up_logged_out(config::Harness::Claude, &screen), "{screen}");
-    for harness in [config::Harness::Codex, config::Harness::Grok, config::Harness::Cursor, config::Harness::Opencode] {
+    for harness in [
+      config::Harness::Codex,
+      config::Harness::Grok,
+      config::Harness::Cursor,
+      config::Harness::Opencode,
+      config::Harness::Cline,
+    ] {
       assert!(!harness_came_up_logged_out(harness, &screen), "{} keeps its real verdict", harness.as_str());
     }
     assert!(!harness_came_up_logged_out(config::Harness::Claude, "fixing the login page: Run /login redirects"));

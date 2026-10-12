@@ -247,14 +247,8 @@ USER agent
 
 # --- Claude Code harness image (install harness last) ---
 FROM scsh-base AS scsh-claude
-# Pinned, like CURSOR_AGENT_VERSION below. An unpinned `npm install -g` would freeze whatever
-# version happened to be latest the day the image was first built: image rebuilds are keyed on
-# the Dockerfile TEXT (`runtime::image_build_fingerprint`), so nothing here changing means the
-# image never rebuilds, and a months-old claude would sit in it forever. Bumping this ARG is
-# how the claude CLI moves — the changed text flips the fingerprint and forces the rebuild.
-# 2.1.239 is the floor for the usage-limit wait: `autoContinueAtUsageLimit` (see
-# `quota::container_settings_json`) is ignored by CLIs older than that.
-# Opus 5.5 support starts at 2.1.280; 2.1.287 requires Node >=22.
+# Pinned. Bump CLAUDE_CODE_VERSION to rebuild (fingerprint is the Dockerfile text).
+# 2.1.239+ for autoContinueAtUsageLimit; 2.1.287 needs Node >=22.
 ARG CLAUDE_CODE_VERSION=2.1.287
 RUN set -eux; \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; \
@@ -319,4 +313,18 @@ RUN set -eux; \
     chown -R agent:agent /home/agent
 ENV CURSOR_CONFIG_DIR=/home/agent/repo/tmp/.cursor
 ENV XDG_CONFIG_HOME=/home/agent/repo/tmp/.config
+USER agent
+
+# --- Cline CLI harness image (install harness last) ---
+# Pinned like CLAUDE_CODE_VERSION. Node 22: on 20 cline warns it cannot read the trust store.
+FROM scsh-base AS scsh-cline
+ARG CLINE_VERSION=3.0.70
+RUN set -eux; \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; \
+    apt-get install -y --no-install-recommends nodejs; \
+    rm -rf /var/lib/apt/lists/*; \
+    npm install -g "cline@${CLINE_VERSION}"; \
+    chmod -R a+rX "$(npm root -g)"; \
+    HOME=/tmp cline --version; \
+    chown -R agent:agent /home/agent
 USER agent

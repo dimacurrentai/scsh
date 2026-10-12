@@ -163,6 +163,40 @@ fn client_js_function(source: &str, name: &str) -> String {
 }
 
 #[test]
+fn cline_setup_labels_match_the_live_client() {
+  if crate::runtime::which("node").is_none() {
+    return;
+  }
+  let source = live_client_js();
+  let mut script = client_js_function(&source, "clineEffortLabel") + &client_js_function(&source, "clineChoiceLabel");
+  let mut checked = 0;
+  for model in crate::config::cline_models() {
+    let mut efforts: Vec<Option<&str>> = model.efforts.iter().map(|e| Some(*e)).collect();
+    efforts.push(None);
+    for effort in efforts {
+      let expected = crate::config::cline_selection_label(model.id, effort);
+      script.push_str(&format!(
+        "if (clineChoiceLabel({name}, {effort}) !== {expected}) throw new Error('label parity: ' + {expected});\n",
+        name = crate::json::quote(model.name),
+        effort = effort.map(crate::json::quote).unwrap_or_else(|| "''".into()),
+        expected = crate::json::quote(&expected),
+      ));
+      checked += 1;
+    }
+  }
+  for level in ["minimal", "low", "medium", "high", "xhigh", "max", ""] {
+    script.push_str(&format!(
+      "if (clineEffortLabel({level}) !== {expected}) throw new Error('effort parity: ' + {level});\n",
+      level = crate::json::quote(level),
+      expected = crate::json::quote(&crate::config::cline_effort_label(level)),
+    ));
+  }
+  assert!(checked > crate::config::cline_models().len(), "every model with and without each of its efforts");
+  let output = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
+  assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
 fn transcript_box_matches_the_live_client() {
   if crate::runtime::which("node").is_none() {
     return;
@@ -1281,7 +1315,7 @@ fn index_page_carries_the_setup_panel_and_its_client_wiring() {
   }
   // First paint already lists every harness + known image (§13: no empty limbo).
   assert!(html.contains("checking…"), "skeleton starts in checking…");
-  for name in ["Claude", "Codex", "Grok", "Opencode", "Cursor"] {
+  for name in ["Claude", "Codex", "Grok", "Opencode", "Cursor", "Cline"] {
     assert!(html.contains(name), "harness card {name} on first paint");
   }
   let cursor_card = html.find(">Cursor</strong>").expect("Cursor skeleton card");
@@ -1289,7 +1323,14 @@ fn index_page_carries_the_setup_panel_and_its_client_wiring() {
   assert!(cursor_card < opencode_card, "OpenCode belongs after every native harness");
   assert!(html.contains("scsh-base:latest"), "base image row on first paint");
   for tag in
-    ["scsh-opencode:latest", "scsh-claude:latest", "scsh-codex:latest", "scsh-grok:latest", "scsh-cursor:latest"]
+    [
+      "scsh-opencode:latest",
+      "scsh-claude:latest",
+      "scsh-codex:latest",
+      "scsh-grok:latest",
+      "scsh-cursor:latest",
+      "scsh-cline:latest",
+    ]
   {
     assert!(html.contains(tag), "harness image {tag} on first paint");
   }

@@ -153,7 +153,7 @@ pub struct Skill {
   /// `invocations` is set.
   pub harness: Option<Harness>,
   pub model: Option<String>,
-  /// Reasoning effort for harnesses with an effort knob (claude, codex, grok, cursor). With
+  /// Reasoning effort for harnesses with an effort knob (claude, codex, grok, cursor, cline). With
   /// `invocations:` it is the default each route may override; routes whose harness
   /// has no effort knob simply ignore an inherited value.
   pub effort: Option<String>,
@@ -398,8 +398,8 @@ pub enum EnvRule {
 
 /// The built-in harness that runs a skill inside the container: `opencode`, `claude`
 /// (Claude Code), `codex` (OpenAI Codex CLI — the native harness for GPT models),
-/// `grok` (xAI Grok CLI — the native harness for Grok models), or `cursor` (Cursor
-/// Agent CLI).
+/// `grok` (xAI Grok CLI — the native harness for Grok models), `cursor` (Cursor
+/// Agent CLI), or `cline` (Cline CLI — Cline Pass and pay-as-you-go models).
 ///
 /// `claude-headless` and `codex-headless` run the same CLI, image, credentials, and native
 /// session accounting as their agent, but in its non-interactive JSON-streaming mode: no
@@ -412,6 +412,7 @@ pub enum Harness {
   Codex,
   Grok,
   Cursor,
+  Cline,
   ClaudeHeadless,
   CodexHeadless,
 }
@@ -420,7 +421,8 @@ impl Harness {
   /// Every agent (one image, one credential set, one Setup card each), in UI listing order
   /// (Setup tab, image tables, doctor preflight). Headless invocation types are not listed:
   /// they share their agent's image and login.
-  pub const ALL: [Harness; 5] = [Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor, Harness::Opencode];
+  pub const ALL: [Harness; 6] =
+    [Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor, Harness::Opencode, Harness::Cline];
 
   /// The headless invocation types, each sharing its [`Harness::agent`]'s image and login.
   pub const HEADLESS: [Harness; 2] = [Harness::ClaudeHeadless, Harness::CodexHeadless];
@@ -438,6 +440,7 @@ impl Harness {
       Harness::Codex => "codex",
       Harness::Grok => "grok",
       Harness::Cursor => "cursor",
+      Harness::Cline => "cline",
       Harness::ClaudeHeadless => "claude-headless",
       Harness::CodexHeadless => "codex-headless",
     }
@@ -451,6 +454,7 @@ impl Harness {
       Harness::Codex => "Codex",
       Harness::Grok => "Grok",
       Harness::Cursor => "Cursor",
+      Harness::Cline => "Cline",
       Harness::ClaudeHeadless => "Claude (headless)",
       Harness::CodexHeadless => "Codex (headless)",
     }
@@ -475,7 +479,7 @@ impl Harness {
 
   /// Every known harness name, for error messages.
   pub fn known() -> &'static [&'static str] {
-    &["opencode", "claude", "codex", "grok", "cursor", "claude-headless", "codex-headless"]
+    &["opencode", "claude", "codex", "grok", "cursor", "cline", "claude-headless", "codex-headless"]
   }
 
   /// Whether this harness runs as an interactive TUI recorded under tmux + asciinema (rather
@@ -525,6 +529,9 @@ impl Harness {
       Harness::Grok => &["low", "medium", "high", "xhigh", "max"],
       Harness::Cursor => &["low", "medium", "high"],
       Harness::Claude => &["low", "medium", "high", "xhigh", "max"],
+      // Union of the per-model knobs. The route is "Cline {model} {effort}";
+      // `cline_model_effort_error` rejects a level the chosen model does not have.
+      Harness::Cline => &["minimal", "low", "medium", "high", "xhigh", "max"],
       _ => &[],
     }
   }
@@ -791,6 +798,9 @@ pub fn validate(src: &str) -> Result<Config, Vec<String>> {
     let cfg = Config { skills: skills.clone(), terminal };
     let mut by_result: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for inv in expand_invocations(&cfg) {
+      if let Some(msg) = model_effort_error(inv.harness, inv.model.as_deref(), inv.effort.as_deref()) {
+        errors.push(format!("'skills.{}.effort' {msg}", inv.name));
+      }
       by_result.entry(inv.result.clone()).or_default().push(inv.name.clone());
     }
     for (path, names) in by_result {
@@ -1393,12 +1403,103 @@ fn known_effort_level(level: &str) -> bool {
   matches!(level, "minimal" | "low" | "medium" | "high" | "xhigh" | "max")
 }
 
+/// One Cline Pass model: pick this first, then one of `efforts`.
+pub struct ClineModel {
+  pub id: &'static str,
+  pub name: &'static str,
+  pub efforts: &'static [&'static str],
+  /// Effort a default probe should send when the model has a knob.
+  pub probe: Option<&'static str>,
+}
+
+/// Pass models whose effort lists come from the Cline CLI catalog (`reasoningOptions`).
+pub fn cline_models() -> &'static [ClineModel] {
+  const NONE: &[&str] = &[];
+  const GLM: &[&str] = &["low", "high", "max"];
+  const FULL: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+  &[
+    ClineModel { id: "cline-pass/glm-5.3", name: "GLM-5.3", efforts: GLM, probe: Some("high") },
+    ClineModel { id: "cline-pass/glm-5.3-flash", name: "GLM-5.3-Flash", efforts: GLM, probe: Some("high") },
+    ClineModel { id: "cline-pass/kimi-k3", name: "Kimi K3", efforts: NONE, probe: None },
+    ClineModel { id: "cline-pass/qwen3.8-max", name: "Qwen3.8 Max", efforts: FULL, probe: Some("medium") },
+    ClineModel { id: "cline-pass/deepseek-v4-pro", name: "DeepSeek V4 Pro", efforts: NONE, probe: None },
+    ClineModel { id: "cline-pass/qwen3.7-max", name: "Qwen3.7 Max", efforts: NONE, probe: None },
+    ClineModel { id: "cline-pass/qwen3.7-plus", name: "Qwen3.7 Plus", efforts: NONE, probe: None },
+    ClineModel { id: "cline-pass/minimax-m3", name: "MiniMax-M3", efforts: NONE, probe: None },
+    ClineModel { id: "cline-pass/mimo-v2.5", name: "MiMo-V2.5", efforts: NONE, probe: None },
+    ClineModel { id: "cline-pass/mimo-v2.5-pro", name: "MiMo-V2.5-Pro", efforts: NONE, probe: None },
+    ClineModel {
+      id: "cline-pass/muse-spark-1.3-contributor",
+      name: "Muse Spark 1.3 Contributor",
+      efforts: FULL,
+      probe: Some("medium"),
+    },
+    ClineModel { id: "cline-pass/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", efforts: NONE, probe: None },
+  ]
+}
+
+pub fn cline_model(id: &str) -> Option<&'static ClineModel> {
+  cline_models().iter().find(|m| m.id == id)
+}
+
+/// Cline's own thinking-menu word for an effort value (`xhigh` → `Extra High`).
+pub fn cline_effort_label(effort: &str) -> String {
+  match effort {
+    "xhigh" => "Extra High".to_string(),
+    "minimal" => "Minimal".to_string(),
+    other => {
+      let mut chars = other.chars();
+      match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+      }
+    }
+  }
+}
+
+/// `Cline GLM-5.3 High`. The model name comes first; effort is that model's, not the harness's.
+pub fn cline_selection_label(model_id: &str, effort: Option<&str>) -> String {
+  let name = cline_model(model_id).map(|m| m.name).unwrap_or(model_id);
+  match effort {
+    Some(effort) => format!("Cline {name} {}", cline_effort_label(effort)),
+    None => format!("Cline {name}"),
+  }
+}
+
+/// Per-model effort check for harnesses whose effort belongs to the selected model (Cline). `None` when there is no effort, the harness is not model-scoped, or
+/// the model accepts it. Every route validator calls this after `check_effort_for_harness`.
+pub(crate) fn model_effort_error(harness: Harness, model: Option<&str>, effort: Option<&str>) -> Option<String> {
+  (harness.agent() == Harness::Cline).then(|| cline_model_effort_error(model, effort?)).flatten()
+}
+
+/// `None` when this model accepts `effort`. The message names the model, then the level.
+fn cline_model_effort_error(model: Option<&str>, effort: &str) -> Option<String> {
+  let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) else {
+    return Some(format!(
+      "is '{effort}', but cline selects a model first (there is no 'Cline {}')",
+      cline_effort_label(effort)
+    ));
+  };
+  let profile = cline_model(model)?;
+  if profile.efforts.is_empty() {
+    return Some(format!("is set, but {} has no effort knob", cline_selection_label(model, None)));
+  }
+  if !profile.efforts.contains(&effort) {
+    return Some(format!(
+      "is '{effort}', not an effort {} accepts (accepted: {})",
+      cline_selection_label(model, None),
+      profile.efforts.join(", ")
+    ));
+  }
+  None
+}
+
 /// An EXPLICIT effort on a specific harness must be a level that harness's CLI accepts.
 pub(crate) fn check_effort_for_harness(field: &str, harness: Harness, effort: &str, errors: &mut Vec<String>) {
   let levels = harness.effort_levels();
   if levels.is_empty() {
     errors.push(format!(
-      "'{field}' is set, but harness '{}' has no effort knob (effort works with: claude, codex, grok, cursor)",
+      "'{field}' is set, but harness '{}' has no effort knob (effort works with: claude, codex, grok, cursor, cline)",
       harness.as_str()
     ));
   } else if !levels.contains(&effort) {
@@ -1908,6 +2009,32 @@ mod tests {
     assert_eq!(inv[0].effort.as_deref(), Some("high"), "codex inherits the skill default");
     assert_eq!(inv[1].effort.as_deref(), Some("xhigh"), "grok route override wins");
     assert_eq!(inv[2].effort.as_deref(), Some("high"), "Claude inherits and forwards effort");
+  }
+
+  #[test]
+  fn cline_effort_follows_the_selected_model() {
+    assert_eq!(cline_selection_label("cline-pass/glm-5.3", Some("high")), "Cline GLM-5.3 High");
+    assert_eq!(cline_selection_label("cline-pass/qwen3.8-max", Some("medium")), "Cline Qwen3.8 Max Medium");
+    let bare = r#"skills:
+  probe:
+    harness: cline
+    effort: medium
+    result: tmp/x.json
+"#;
+    let err = validate(bare).unwrap_err().join("\n");
+    assert!(err.contains("there is no 'Cline Medium'"), "{err}");
+    let glm = r#"skills:
+  probe:
+    harness: cline
+    model: cline-pass/glm-5.3
+    effort: medium
+    result: tmp/x.json
+"#;
+    let err = validate(glm).unwrap_err().join("\n");
+    assert!(err.contains("not an effort Cline GLM-5.3 accepts"), "{err}");
+    assert!(err.contains("low, high, max"), "{err}");
+    let ok = glm.replace("medium", "high");
+    assert!(validate(&ok).is_ok(), "{}", validate(&ok).unwrap_err().join("\n"));
   }
 
   #[test]
@@ -2804,6 +2931,7 @@ skills:
     // opencode and grok now run as recorded interactive TUIs too.
     assert!(Harness::Opencode.is_tui());
     assert!(Harness::Grok.is_tui());
+    assert!(Harness::Cline.is_tui());
     // A headless type is its agent's CLI without a terminal: same agent, never a TUI.
     for (headless, agent) in [(Harness::ClaudeHeadless, Harness::Claude), (Harness::CodexHeadless, Harness::Codex)] {
       assert!(headless.is_headless() && !headless.is_tui(), "{headless:?}");

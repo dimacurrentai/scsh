@@ -155,10 +155,22 @@ If Setup says **Found via keychain** or **Missing**, the running daemon did not 
      `~/.grok`.
   2. Otherwise, a non-empty `XAI_API_KEY` in the environment.
 
+## cline — Cline CLI (Cline Pass)
+
+- **Install:** `npm install -g cline` (Node 22 or newer). Inside containers `scsh` installs the pinned `CLINE_VERSION` from `src/Dockerfile`, so the host version does not need to match.
+- **Log in:** `cline auth` and sign in to the Cline provider, or create an API key in your Cline account and export it as `CLINE_API_KEY`. The `cline-pass/…` models in `.scsh.yml` need a Cline Pass subscription.
+- **Artifact produced:** `~/.cline/data/settings/providers.json`, whose `providers.cline.settings.apiKey` holds the key.
+- **What `scsh` probes** (`cline_api_key()`), first match wins:
+  1. A non-empty `CLINE_API_KEY` in the environment.
+  2. The `cline` provider's `apiKey` in `~/.cline/data/settings/providers.json`.
+  3. A `CLINE_API_KEY=` line in `~/.env` (an `export ` prefix is fine).
+- **What `scsh` forwards:** the key alone, never your host Cline settings. Each run gets a fresh, minimal `providers.json` that selects the Cline provider, and its data directory marks Cline's one-time promo notices as shown, so the interactive TUI starts straight at the prompt. `SCSH_NO_CLINE_AUTH=1` disables the forwarding.
+- **Quota:** with the key, `scsh quota` and each run's before/after snapshots read the five-hour, weekly, and monthly Cline Pass windows from `api.cline.bot`.
+
 ## gemini — Gemini CLI (not yet an `scsh` harness)
 
 > **Honest note:** `gemini` is **not** an `scsh` harness on this branch — the harness set
-> in `src/config.rs` is exactly `opencode`, `claude`, `codex`, `grok`, and `cursor` (plus the
+> in `src/config.rs` is exactly `opencode`, `claude`, `codex`, `grok`, `cursor`, and `cline` (plus the
 > headless `claude-headless` and `codex-headless`), and
 > `scsh` probes nothing Gemini-related. This section is groundwork only: authenticate now
 > and a future `gemini` harness can forward the same artifacts.
@@ -207,6 +219,7 @@ One line per tool; exit 0 means `scsh` will consider that harness available.
 | codex | `test -f "${CODEX_HOME:-$HOME/.codex}/auth.json" \|\| [ -n "$OPENAI_API_KEY" ]` |
 | cursor | `[ -n "$CURSOR_API_KEY" ] \|\| test -f ~/.config/cursor/auth.json \|\| test -f ~/.cursor/auth.json \|\| security find-generic-password -s cursor-access-token -w >/dev/null 2>&1` |
 | grok | `test -f "${GROK_HOME:-$HOME/.grok}/auth.json" \|\| [ -n "$XAI_API_KEY" ]` |
+| cline | `[ -n "$CLINE_API_KEY" ] \|\| grep -q '"apiKey"' ~/.cline/data/settings/providers.json 2>/dev/null \|\| grep -Eq '^[[:space:]]*(export )?CLINE_API_KEY=.' ~/.env 2>/dev/null` |
 | gemini | *(not probed by `scsh` — no harness yet)* `[ -n "$GEMINI_API_KEY" ] \|\| ls ~/.gemini >/dev/null 2>&1` |
 | opencode | `test -f "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"` |
 
@@ -221,5 +234,5 @@ Every browser-login flow above stores a **refresh token**, and refresh tokens ca
 be rotated server-side. The symptom is a harness that probed as *available* (the artifact
 exists) but fails at run time — e.g. a stale opencode OpenAI credential yields
 `Token refresh failed: 401`. The fix is always the same: re-run that tool's login command
-on the host (`claude`, `codex login`, `cursor agent login`, `grok login`,
+on the host (`claude`, `codex login`, `cursor agent login`, `grok login`, `cline auth`,
 `opencode auth login`) and re-run `scsh`.

@@ -133,7 +133,7 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
 
 ### A skill's fields
 
-- **`harness`** *(required for direct run)* — `claude`, `codex`, `grok`, `cursor`, or `opencode`; or a headless type, `claude-headless` or `codex-headless`. Omit at the skill level when using `invocations:`; each route supplies its own.
+- **`harness`** *(required for direct run)* — `claude`, `codex`, `grok`, `cursor`, `cline`, or `opencode`; or a headless type, `claude-headless` or `codex-headless`. Omit at the skill level when using `invocations:`; each route supplies its own.
 - **`invocations:`** *(optional matrix)* — named routes, each with `harness`, optional `model`, optional `profile` (overrides the skill-level default), optional `commits` (overrides the skill-level default). Mutually exclusive with top-level `harness` / `model`.
   By default every harness runs as a real interactive TUI recorded via tmux + asciinema (see
   [`DAEMON.md`](DAEMON.md)), pointed at the skill's `SKILL.md` — e.g. claude with
@@ -148,7 +148,7 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
   `events.jsonl`, and the offline job snapshot embeds the transcript.
 - **`model`** *(optional)* — the model the harness passes to its tool. Cursor defaults to
   `cursor-grok-4.6-high-fast` (Grok 4.6 High Fast); an explicit model overrides it.
-  Every Claude Code, Codex, Cursor, and Grok attempt, interactive or headless, normalizes its native token counters into
+  Every Claude Code, Codex, Cursor, Grok, and Cline attempt, interactive or headless, normalizes its native token counters into
   one strict schema, shown below the finished recording or transcript and stored beside the result.
   See [harness usage accounting](HARNESS-USAGE.md).
 
@@ -648,14 +648,14 @@ The one place they are all listed. Host-side knobs, all optional:
 | `SCSH_REAP_CONTAINERS` | on | `0` disables the daemon's zombie-container reaper: it destroys `scsh-*-run-*` containers that stay unclaimed by any live job for ~30 consecutive minutes of once-a-minute sweeps — orphans left by a killed `scsh run`. |
 | `SCSH_NO_RETRY` | off | `1` disables the single automatic retry of transient failures. |
 | `SCSH_QUIET` | off | `1` runs harnesses at their default log level (output is still teed to the run log). |
-| `SCSH_NO_CLAUDE_AUTH` / `SCSH_NO_OPENCODE_AUTH` / `SCSH_NO_CODEX_AUTH` / `SCSH_NO_GROK_AUTH` / `SCSH_NO_CURSOR_AUTH` | off | `1` skips forwarding that harness's host credentials into containers. |
+| `SCSH_NO_CLAUDE_AUTH` / `SCSH_NO_OPENCODE_AUTH` / `SCSH_NO_CODEX_AUTH` / `SCSH_NO_GROK_AUTH` / `SCSH_NO_CURSOR_AUTH` / `SCSH_NO_CLINE_AUTH` | off | `1` skips forwarding that harness's host credentials into containers. |
 | `SCSH_NO_GH_AUTH` | off | `1` skips forwarding `GH_TOKEN`/`GITHUB_TOKEN` and the host GitHub CLI `hosts.yml` into containers. |
 | `SCSH_ANNOTATE_MODEL` | `gpt-5.6-luna` | Model `scsh annotate-cast` drives via Codex. |
 | `SCSH_STATS_FILE` | `~/.scsh/stats.jsonl` | Where run statistics are journaled. |
 | `SCSH_HARNESS_HOME` | `~/.harness` | User-level harness-definition directory. |
 | `SCSH_BIN` | self | Path to the scsh binary the daemon re-execs (tests/packaging override). |
 
-Host credentials `scsh` reads (never stored, forwarded per-run): `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY`, `GH_TOKEN`, `GITHUB_TOKEN` — plus each CLI's own login files.
+Host credentials `scsh` reads (never stored, forwarded per-run): `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY`, `CLINE_API_KEY`, `GH_TOKEN`, `GITHUB_TOKEN` — plus each CLI's own login files.
 
 Inside every container, scsh sets the skill contract: `SCSH=1`, `SCSH_RESULT` (the result
 file path), and `SCSH_RUN_LOG` (the teed harness log). A workflow host step additionally gets
