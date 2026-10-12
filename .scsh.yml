@@ -114,3 +114,24 @@ skills:
         model: grok-build
         effort: low
         profile: local-agents-credentials
+      # The headless-compare profile (HEADLESS-COMPARE.md): each agent twice on the same
+      # workload, once as its recorded TUI and once headless, so the job page shows a
+      # player beside a transcript and the usage files compare like for like.
+      cmp-claude-tui:
+        harness: claude
+        model: claude-opus-4-8
+        profile: headless-compare
+      cmp-claude-headless:
+        harness: claude-headless
+        model: claude-opus-4-8
+        profile: headless-compare
+      cmp-codex-tui:
+        harness: codex
+        model: gpt-5.6-luna
+        effort: low
+        profile: headless-compare
+      cmp-codex-headless:
+        harness: codex-headless
+        model: gpt-5.6-luna
+        effort: low
+        profile: headless-compare
