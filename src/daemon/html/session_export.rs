@@ -50,6 +50,11 @@ pub(crate) enum CastExport {
     diff_html: Option<String>,
     annotation: Option<&'static str>,
   },
+  /// A headless run: its transcript, already rendered by the same code the live page fetches.
+  Transcript {
+    html: String,
+    diff_html: Option<String>,
+  },
   Note {
     text: String,
     diff_html: Option<String>,
@@ -59,14 +64,16 @@ pub(crate) enum CastExport {
 impl CastExport {
   pub(crate) fn diff_html(&self) -> Option<&str> {
     match self {
-      CastExport::Cast { diff_html, .. } | CastExport::Note { diff_html, .. } => diff_html.as_deref(),
+      CastExport::Cast { diff_html, .. }
+      | CastExport::Transcript { diff_html, .. }
+      | CastExport::Note { diff_html, .. } => diff_html.as_deref(),
     }
   }
 
   fn annotation(&self) -> Option<&'static str> {
     match self {
       CastExport::Cast { annotation, .. } => *annotation,
-      CastExport::Note { .. } => None,
+      CastExport::Transcript { .. } | CastExport::Note { .. } => None,
     }
   }
 }
@@ -365,6 +372,9 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
         chapter_keys = chapter_keys,
         annotation_chip = annotation_chip,
       )
+    }
+    CastExport::Transcript { html, .. } => {
+      format!("<div class=\"transcript\" data-proc=\"{}\">{html}</div>\n", proc.index)
     }
     // Parity with the live page: no text-log body exists anywhere — the cast is the
     // output format — so an unrecorded proc exports as its note row alone.

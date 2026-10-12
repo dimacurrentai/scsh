@@ -207,6 +207,7 @@ mod tests {
         container_name: None,
         container_runtime: None,
         cast_path: None,
+        transcript_path: None,
         diff_path: None,
         skill_source: None,
         route: None,

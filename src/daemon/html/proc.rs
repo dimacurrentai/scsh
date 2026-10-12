@@ -20,6 +20,23 @@ pub(crate) fn proc_has_cast(proc: &ProcRecord) -> bool {
   proc.cast_path.is_some()
 }
 
+/// Whether this proc is a headless run with an event stream to render as a transcript.
+pub(crate) fn proc_has_transcript(proc: &ProcRecord) -> bool {
+  proc.transcript_path.is_some()
+}
+
+/// The transcript box of a headless run: the client fetches `/transcript/<session>/<proc>`
+/// (server-rendered, see `transcript.rs`) into it and re-fetches while the stream grows.
+pub(crate) fn transcript_embed_html(session_id: &str, proc: &ProcRecord) -> String {
+  format!(
+    r#"<div class="transcript" data-transcript-url="/transcript/{sid}/{idx}" data-proc="{idx}" data-status="{status}"><div class="tx-loading dim">loading transcript…</div></div>
+"#,
+    sid = esc(session_id),
+    idx = proc.index,
+    status = proc.status.as_str(),
+  )
+}
+
 /// Cache hits written before attempt clocks were corrected copied the source run's duration into
 /// `elapsed`. Their detail still identifies them unambiguously. New records additionally label
 /// that duration as `source run took …`, so their own elapsed value is safe to display.

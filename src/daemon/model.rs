@@ -217,6 +217,10 @@ pub struct ProcRecord {
   /// container runs (grows in real time; a prefix is a valid partial cast), then the
   /// durable copy under the daemon dir after the skill finishes.
   pub cast_path: Option<String>,
+  /// Host path of a headless run's native event stream (`…events.jsonl`): the live run-dir
+  /// file while the container runs, then the durable copy under the session's logs. The
+  /// session browser renders it as a transcript in place of a terminal recording.
+  pub transcript_path: Option<String>,
   /// Host path of the packdiff-packed review page for the commits this step brought into
   /// the caller's branch (`$SCSH_HOME/sessions/<session>/diffs/…`). Set after the run
   /// integrates a commit-enabled skill's commits; `None` for steps that committed nothing.
@@ -1038,6 +1042,7 @@ mod tests {
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: None,
       route: None,
@@ -1337,6 +1342,7 @@ mod tests {
         container_name: None,
         container_runtime: None,
         cast_path: None,
+        transcript_path: None,
         diff_path: None,
         skill_source: None,
         route: None,
@@ -1523,6 +1529,7 @@ mod tests {
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: None,
       route: None,
@@ -1632,6 +1639,7 @@ mod tests {
         container_name: None,
         container_runtime: None,
         cast_path: None,
+        transcript_path: None,
         diff_path: None,
         skill_source: None,
         route: None,
@@ -1684,6 +1692,7 @@ mod tests {
           container_name: None,
           container_runtime: None,
           cast_path: None,
+          transcript_path: None,
           diff_path: None,
           skill_source: None,
           route: None,
@@ -1713,6 +1722,7 @@ mod tests {
           container_name: None,
           container_runtime: None,
           cast_path: None,
+          transcript_path: None,
           diff_path: None,
           skill_source: None,
           route: None,

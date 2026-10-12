@@ -142,12 +142,14 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
   The two **headless** types run the same CLI in its non-interactive JSON mode instead —
   `claude -p --output-format stream-json` and `codex exec --json` — with no tmux and no
   asciinema. Each uses its agent's image and login and is counted from the same native
-  session files, so its token usage compares directly with the TUI route's. Its native event
-  stream is kept beside the run's logs as `….events.jsonl`.
+  session files, so its token usage compares directly with the TUI route's. The job page shows
+  a live **transcript** in place of the player: agent messages, collapsible tool calls with
+  their input and output, and the closing result. The raw event stream downloads as
+  `events.jsonl`, and the offline job snapshot embeds the transcript.
 - **`model`** *(optional)* — the model the harness passes to its tool. Cursor defaults to
   `cursor-grok-4.6-high-fast` (Grok 4.6 High Fast); an explicit model overrides it.
   Every Claude Code, Codex, Cursor, and Grok attempt, interactive or headless, normalizes its native token counters into
-  one strict schema, shown below the finished run and stored beside the result.
+  one strict schema, shown below the finished recording or transcript and stored beside the result.
   See [harness usage accounting](HARNESS-USAGE.md).
 
 Claude routes accept `prompt_contract: standard|compact|verbatim` while retaining the interactive TUI and asciinema recording. `effort` is forwarded to Claude. Use `scsh inspect-prompt --def <name>` to inspect the exact prompt without a model call; use `scsh inspect-claude-usage <directory>` to reconcile direct-Claude transcripts with the same accounting parser. See [Claude prompts and controlled comparisons](CLAUDE-PROMPTS.md).

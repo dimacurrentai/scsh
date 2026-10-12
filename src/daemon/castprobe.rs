@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use super::jsonio::cast_growth_json;
-use super::model::{ProcStatus, Store};
+use super::jsonio::{cast_growth_json, transcript_growth_json};
+use super::model::{ProcRecord, ProcStatus, Store};
 
 /// Incremental parser state for one proc's asciicast file.
 ///
@@ -118,21 +118,30 @@ fn event_time(line: &str) -> Option<f64> {
   rest.split([',', ']']).next()?.trim().parse::<f64>().ok()
 }
 
-/// One tracked proc: `(session id, proc index, cast path, still running)`.
+/// One tracked proc: `(session id, proc index, file path, still running)`. The file is the
+/// cast for a recorded run and the event stream for a headless one.
 pub(crate) type CastProcSnapshot = (String, usize, String, bool);
 
-/// Snapshot every proc with a registered cast, taken under the store lock so the file
-/// probing itself happens with the lock released.
-pub(crate) fn cast_probe_snapshot(store: &Store) -> Vec<CastProcSnapshot> {
+/// One tracked headless proc; the path is its event stream.
+pub(crate) type TranscriptProcSnapshot = CastProcSnapshot;
+
+/// Every proc whose `file` is registered, taken under the store lock so the file probing
+/// itself happens with the lock released.
+fn tracked_procs(store: &Store, file: impl Fn(&ProcRecord) -> Option<&String>) -> Vec<CastProcSnapshot> {
   let mut out = Vec::new();
   for (id, session) in &store.sessions {
     for proc in &session.procs {
-      if let Some(cast_path) = &proc.cast_path {
-        out.push((id.clone(), proc.index, cast_path.clone(), proc.status == ProcStatus::Running));
+      if let Some(path) = file(proc) {
+        out.push((id.clone(), proc.index, path.clone(), proc.status == ProcStatus::Running));
       }
     }
   }
   out
+}
+
+/// Snapshot every proc with a registered cast.
+pub(crate) fn cast_probe_snapshot(store: &Store) -> Vec<CastProcSnapshot> {
+  tracked_procs(store, |proc| proc.cast_path.as_ref())
 }
 
 /// Probe the snapshot's casts and return the `cast_growth` WebSocket messages to
@@ -160,6 +169,34 @@ pub(crate) fn probe_growth_messages(
   out
 }
 
+/// Snapshot every proc with a registered transcript.
+pub(crate) fn transcript_probe_snapshot(store: &Store) -> Vec<TranscriptProcSnapshot> {
+  tracked_procs(store, |proc| proc.transcript_path.as_ref())
+}
+
+/// The `transcript_growth` WebSocket messages to broadcast: one per running proc whose event
+/// stream grew since the last tick (by size — the page re-fetches the rendered fragment, so
+/// there is nothing to parse here), plus one final `"running": false` when a tracked proc
+/// stops. `sizes` remembers the last size seen per proc.
+pub(crate) fn transcript_growth_messages(
+  procs: &[TranscriptProcSnapshot], sizes: &mut HashMap<(String, usize), u64>,
+) -> Vec<((String, usize), String)> {
+  let mut out = Vec::new();
+  for (session, index, path, running) in procs {
+    let key = (session.clone(), *index);
+    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if *running {
+      if sizes.insert(key.clone(), len) != Some(len) && len > 0 {
+        out.push((key, transcript_growth_json(session, *index, true)));
+      }
+    } else if sizes.remove(&key).is_some() {
+      out.push((key, transcript_growth_json(session, *index, false)));
+    }
+  }
+  sizes.retain(|(session, index), _| procs.iter().any(|(s, i, _, _)| s == session && i == index));
+  out
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -171,6 +208,24 @@ mod tests {
 
   const HEADER_V3: &str = r#"{"version": 3, "term": {"cols": 200, "rows": 50}}"#;
   const HEADER_V2: &str = r#"{"version": 2, "width": 200, "height": 50}"#;
+
+  #[test]
+  fn transcript_growth_is_announced_once_per_change_and_once_at_the_end() {
+    let path = temp_cast("transcript");
+    std::fs::write(&path, "{}\n").unwrap();
+    let p = path.to_string_lossy().into_owned();
+    let mut sizes = HashMap::new();
+    let running = vec![("s".to_string(), 1, p.clone(), true)];
+    assert_eq!(transcript_growth_messages(&running, &mut sizes).len(), 1);
+    assert!(transcript_growth_messages(&running, &mut sizes).is_empty(), "no growth, no message");
+    std::fs::write(&path, "{}\n{}\n").unwrap();
+    assert_eq!(transcript_growth_messages(&running, &mut sizes).len(), 1);
+    let done = vec![("s".to_string(), 1, p, false)];
+    let last = transcript_growth_messages(&done, &mut sizes);
+    assert!(last[0].1.contains("\"running\": false"), "{}", last[0].1);
+    assert!(transcript_growth_messages(&done, &mut sizes).is_empty());
+    let _ = std::fs::remove_file(path);
+  }
 
   #[test]
   fn probe_of_missing_or_empty_file_reports_no_growth() {

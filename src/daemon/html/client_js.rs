@@ -1012,6 +1012,14 @@ function updateProcFields(det, p, nowUnix) {
   } else if (containerEl) containerEl.remove();
   // A proc that gained a cast upgrades its slim row to the embed and gets a run-snapshot
   // link above Force stop.
+  const txEl = det.querySelector('.transcript');
+  if (hasTranscript(p) && !txEl) {
+    det.insertAdjacentHTML('beforeend', transcriptEmbedHtml(p));
+  } else if (txEl && txEl.dataset.status !== p.status) {
+    // The final fetch drops the "working" tail and shows the closing result.
+    txEl.dataset.status = p.status;
+    if (txEl.dataset.ready) loadTranscript(txEl);
+  }
   const castEl = det.querySelector('.cast');
   if (hasCast(p) && !castEl) {
     ensureProcSnapshot(det, p);
@@ -1046,6 +1054,56 @@ function updateProcFields(det, p, nowUnix) {
   } else if (metaBlock) metaBlock.remove();
 }
 function hasCast(p) { return !!p.cast_path && SESSION_ID != null; }
+function hasTranscript(p) { return !!p.transcript_path && SESSION_ID != null; }
+// A headless run's body: the server renders the transcript (transcript.rs) and this box
+// fetches it. Mirrors proc.rs `transcript_embed_html`.
+function transcriptEmbedHtml(p) {
+  return '<div class="transcript" data-transcript-url="/transcript/' + encodeURIComponent(SESSION_ID) + '/' + p.index +
+    '" data-proc="' + esc(String(p.index)) + '" data-status="' + esc(p.status) + '">' +
+    '<div class="tx-loading dim">loading transcript…</div></div>';
+}
+// Fetch the rendered transcript into each not-yet-loaded box.
+function initTranscripts(root) {
+  root.querySelectorAll('.transcript:not([data-ready])').forEach(box => {
+    box.dataset.ready = '1';
+    loadTranscript(box);
+  });
+}
+// Re-render a transcript from the server. Rows the viewer expanded stay expanded, matched by
+// position: new entries are only appended, and a finished tool call fills in its own row in
+// place, so no row ever moves. A viewer parked at the bottom of the page keeps
+// following new entries. Growth notices arrive per tick, so reloads are coalesced.
+function loadTranscript(box) {
+  if (box._loading) { box._again = true; return; }
+  box._loading = true;
+  const open = new Set();
+  box.querySelectorAll('.tx-list > li').forEach((li, i) => {
+    const d = li.querySelector('details');
+    if (d && d.open) open.add(i);
+  });
+  const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 40;
+  fetch(box.dataset.transcriptUrl + '?ts=' + Date.now()).then(r => r.ok ? r.text() : null).catch(() => null).then(html => {
+    box._loading = false;
+    if (html != null) {
+      box.innerHTML = html;
+      box.querySelectorAll('.tx-list > li').forEach((li, i) => {
+        const d = li.querySelector('details');
+        if (d && open.has(i)) d.open = true;
+      });
+      const det = box.closest('details.proc');
+      if (atBottom && det && det.open && box.dataset.status === 'running') {
+        window.scrollTo({ top: document.body.scrollHeight });
+      }
+    }
+    if (box._again) { box._again = false; setTimeout(() => loadTranscript(box), 500); }
+  });
+}
+function onTranscriptGrowth(msg) {
+  if (!SESSION_ID || msg.session !== SESSION_ID) return;
+  const det = document.querySelector('details.proc[data-index="' + CSS.escape(String(msg.proc)) + '"]');
+  const box = det && det.querySelector('.transcript[data-ready]');
+  if (box) loadTranscript(box);
+}
 // The per-proc top-right action stack, created on first need.
 function ensureProcActions(det) {
   let actions = det.querySelector('.proc-actions');
@@ -1377,8 +1435,9 @@ function procHtml(p, isOpen, nowUnix) {
   const container = p.container_name ? '<div class="container dim">' + containerDetailsHtml(p) + '</div>' : '';
   // Mirrors the server-rendered shape (session.rs): recorded procs embed the player; a
   // proc without a recording — an annotate row, say — stays a slim summary-only row.
-  // There is deliberately no text-log body: the cast IS the output format.
-  const body = hasCast(p) ? castEmbedHtml(p) : '';
+  // There is deliberately no text-log body: the cast (or a headless run's transcript) IS
+  // the output format.
+  const body = hasCast(p) ? castEmbedHtml(p) : hasTranscript(p) ? transcriptEmbedHtml(p) : '';
   const elapsedText = procElapsedPhrase(p, nowUnix);
   const step = workflowStepIdForProc(p);
   const taskAttrs = step ? ' data-workflow-step="' + esc(step) + '"' : '';
@@ -2305,6 +2364,7 @@ function renderSession(session, nowUnix) {
     }
   });
   initCasts(root);
+  initTranscripts(root);
   syncSessionLede(session, nowUnix);
   syncFleetSections(session, nowUnix);
   syncJobReport(session);
@@ -2440,6 +2500,7 @@ function syncFleetSections(session, nowUnix) {
 }
 function onWsMessage(msg) {
   if (msg.type === 'cast_growth') { onCastGrowth(msg); return; }
+  if (msg.type === 'transcript_growth') { onTranscriptGrowth(msg); return; }
   onTick(msg);
 }
 let lastTickSecs = 0;
@@ -2525,6 +2586,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) resy
   initSessionMetaFromDom();
   bindSessionProcs(root);
   initCasts(root);
+  initTranscripts(root);
   initSessionStop();
   initSessionRestart();
   initProcKills(root);
