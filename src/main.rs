@@ -6462,7 +6462,7 @@ fn skill_fail_detail(why: &str, harness: config::Harness, run_dir: Option<&str>,
         config::Harness::Grok => parts.push(format!("grok debug log: {l}.debug")),
         config::Harness::Cursor => {}
         config::Harness::Opencode => {}
-        config::Harness::Cline => {}
+        config::Harness::Cline | config::Harness::ClineHeadless => {}
       }
     }
   }
@@ -8589,8 +8589,8 @@ fn forward_cline(run_dir: &Path) -> Option<PathBuf> {
 }
 
 /// The shape `cline auth` writes. Both `lastUsedProvider` and the entry's `updatedAt` are
-/// load-bearing: without either, the TUI opens its "Connect a model provider" onboarding and
-/// waits there.
+/// load-bearing: without either, the TUI (not `--json`) opens its "Connect a model provider"
+/// onboarding and waits there.
 fn cline_providers_json(key: &str, epoch_secs: u64) -> String {
   let t = runtime::format_utc_timestamp(epoch_secs);
   let updated = format!("{}-{}-{}T{}:{}:{}.000Z", &t[0..4], &t[4..6], &t[6..8], &t[9..11], &t[11..13], &t[13..15]);
@@ -11455,7 +11455,7 @@ fn print_help_config() {
                             #     harnesses: opencode | claude | codex | grok | cursor | cline
                             #     headless (no terminal recording; a live transcript instead,
                             #     same image, login, and token accounting as the TUI):
-                            #     claude-headless | codex-headless
+                            #     claude-headless | codex-headless | cline-headless
       model: openai/...     #     optional; the model the harness passes to the tool
       effort: high        #     optional; reasoning effort (claude/grok: low..max, codex:
                           #       minimal..xhigh, cursor: low..high as --model slug suffixes,
@@ -11723,7 +11723,7 @@ fn print_help_defs() {
     r#"  steps:                   a block map; each step runs on its own agent, in its own clone
     <id>:
       agent:               harness: claude|codex|cursor|grok|cline|opencode, or claude-headless|
-                           codex-headless; optional model:, effort:
+                           codex-headless|cline-headless; optional model:, effort:
       prompt: |            intent only — scsh appends the machine I/O contract
       inputs:              env vars for the step:  NAME: params.X  or  NAME: stepid.field
       output:              typed result fields the step must write to $SCSH_RESULT (JSON)
@@ -12034,7 +12034,7 @@ mod tests {
     assert!(harness_came_up_logged_out(config::Harness::ClaudeHeadless, &sample), "{sample}");
     // The print-mode wording is Claude's own; the TUI route and other agents keep their verdict.
     assert!(!harness_came_up_logged_out(config::Harness::Claude, &sample));
-    for harness in [config::Harness::CodexHeadless, config::Harness::Codex] {
+    for harness in [config::Harness::CodexHeadless, config::Harness::Codex, config::Harness::ClineHeadless] {
       assert!(!harness_came_up_logged_out(harness, &sample), "{} keeps its real verdict", harness.as_str());
     }
     // A usage limit keeps its own verdict here too.

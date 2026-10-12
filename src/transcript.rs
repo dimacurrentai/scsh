@@ -1,8 +1,8 @@
 //! The transcript of a headless harness run, normalized from the CLI's own event stream.
 //!
-//! `claude-headless` (`claude -p --output-format stream-json --verbose`) and `codex-headless`
-//! (`codex exec --json`) each print one JSON event per line, in unrelated vocabularies. This
-//! module reads either of them into one short list of
+//! `claude-headless` (`claude -p --output-format stream-json --verbose`), `codex-headless`
+//! (`codex exec --json`), and `cline-headless` (`cline --json`) each print one JSON event per
+//! line, in three unrelated vocabularies. This module reads any of them into one short list of
 //! [`Entry`] values — what the agent said, what it thought, which tools it called with what
 //! arguments and what came back, and how the run ended — which the session browser renders as
 //! the run's body in place of a terminal recording, and which failure classification reads
@@ -84,6 +84,7 @@ pub fn parse(harness: Harness, stream: &str) -> Transcript {
     match harness {
       Harness::ClaudeHeadless => claude_event(&mut t, &event),
       Harness::CodexHeadless => codex_event(&mut t, &event),
+      Harness::ClineHeadless => cline_event(&mut t, &event),
       _ => {}
     }
   }
@@ -249,6 +250,82 @@ fn codex_usage_detail(usage: &Value) -> String {
   parts.join(" · ")
 }
 
+/// `cline --json`: `agent_event` wrappers around `content_start`/`content_end` blocks for text,
+/// reasoning, and tools, plus `done` and one closing `run_result`. `hook_event` lines only
+/// mirror the agent events and are skipped.
+fn cline_event(t: &mut Transcript, event: &Value) {
+  match string(event, "type") {
+    Some("agent_event") => {
+      let Some(inner) = field(event, "event") else { return };
+      match (string(inner, "type"), string(inner, "contentType")) {
+        (Some("content_start"), Some("tool")) => {
+          let input = field(inner, "input").cloned().unwrap_or(Value::Null);
+          t.entries.push(Entry::Tool {
+            id: string(inner, "toolCallId").map(str::to_string),
+            name: string(inner, "toolName").unwrap_or("tool").to_string(),
+            summary: input_summary(&input),
+            input: clip(&json::write_pretty(&input)),
+            output: None,
+            ok: None,
+          });
+        }
+        (Some("content_end"), Some("tool")) => {
+          let output = field(inner, "output");
+          let ok = match output {
+            Some(Value::Array(results)) => {
+              results.iter().all(|r| !matches!(field(r, "success"), Some(Value::Bool(false))))
+            }
+            _ => field(inner, "error").is_none(),
+          };
+          let text = match output {
+            Some(Value::Array(results)) => results
+              .iter()
+              .map(|r| match (string(r, "result"), string(r, "error")) {
+                (_, Some(error)) => error.to_string(),
+                (Some(result), _) => result.to_string(),
+                _ => json::write(r),
+              })
+              .collect::<Vec<_>>()
+              .join("\n"),
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => json::write_pretty(other),
+            None => string(inner, "error").unwrap_or("").to_string(),
+          };
+          complete_tool(t, string(inner, "toolCallId"), text, ok);
+        }
+        (Some("content_end"), Some("text")) => push_text(t, string(inner, "text")),
+        (Some("content_end"), Some("reasoning" | "thinking")) => {
+          push_thinking(t, string(inner, "text").or_else(|| string(inner, "reasoning")))
+        }
+        (Some("error"), _) => push_error(t, string(inner, "message").or_else(|| string(inner, "error"))),
+        _ => {}
+      }
+    }
+    Some("run_result") => {
+      t.finished = true;
+      let reason = string(event, "finishReason").unwrap_or("finished");
+      let ok = reason == "completed";
+      let mut parts = vec![reason.to_string()];
+      if let Some(n) = number(event, "iterations") {
+        parts.push(format!("{n} iterations"));
+      }
+      if let Some(ms) = number(event, "durationMs") {
+        parts.push(format!("{:.1}s", ms / 1000.0));
+      }
+      if !ok {
+        let message = string(event, "error").or_else(|| string(event, "text")).unwrap_or(reason).to_string();
+        t.error = Some(message.clone());
+        if message != reason {
+          parts.push(message);
+        }
+      }
+      t.entries.push(Entry::Result { ok, detail: parts.join(" · ") });
+    }
+    Some("error") => push_error(t, string(event, "message").or_else(|| string(event, "error"))),
+    _ => {}
+  }
+}
+
 fn tool_entry(id: Option<String>, name: &str, summary: &str, input: &str) -> Entry {
   Entry::Tool { id, name: name.to_string(), summary: one_line(summary), input: clip(input), output: None, ok: None }
 }
@@ -294,7 +371,7 @@ fn input_summary(input: &Value) -> String {
     match field(input, key) {
       Some(Value::String(s)) if !s.is_empty() => return one_line(s),
       Some(Value::Array(items)) if !items.is_empty() => {
-        // Strings, or objects naming a `path`.
+        // Strings, or objects naming a `path` (Cline's `read_files`).
         let parts: Vec<&str> = items
           .iter()
           .filter_map(|v| match v {
@@ -400,6 +477,16 @@ mod tests {
 {"type":"turn.completed","usage":{"input_tokens":30262,"cached_input_tokens":14848,"output_tokens":52}}
 "#;
 
+  /// Verbatim shape of a real `cline --json` run (cline 3.0.70).
+  const CLINE: &str = r#"{"ts":"2026-10-12T17:02:18.244Z","type":"hook_event","hookEventName":"agent_start"}
+{"ts":"2026-10-12T17:02:22.683Z","type":"agent_event","event":{"type":"usage","inputTokens":5653,"outputTokens":20}}
+{"ts":"2026-10-12T17:02:22.687Z","type":"agent_event","event":{"type":"content_start","contentType":"tool","toolCallId":"c1","toolName":"run_commands","input":{"commands":["echo hello > out.txt"]}}}
+{"ts":"2026-10-12T17:02:22.694Z","type":"agent_event","event":{"type":"content_end","contentType":"tool","toolCallId":"c1","toolName":"run_commands","output":[{"query":"echo hello > out.txt","result":"","success":true}]}}
+{"ts":"2026-10-12T17:02:24.601Z","type":"agent_event","event":{"type":"content_start","contentType":"text","text":"done"}}
+{"ts":"2026-10-12T17:02:24.606Z","type":"agent_event","event":{"type":"content_end","contentType":"text","text":"done"}}
+{"ts":"2026-10-12T17:02:24.790Z","type":"run_result","finishReason":"completed","iterations":2,"durationMs":6371,"text":"done"}
+"#;
+
   #[test]
   fn claude_stream_pairs_tool_calls_with_their_results() {
     let t = parse(Harness::ClaudeHeadless, CLAUDE);
@@ -437,6 +524,23 @@ mod tests {
     assert!(matches!(t.entries.last(), Some(Entry::Result { ok: true, detail }) if detail.contains("input 30262")));
     let failed = parse(Harness::CodexHeadless, r#"{"type":"turn.failed","error":{"message":"usage limit reached"}}"#);
     assert_eq!(failed.error.as_deref(), Some("usage limit reached"));
+  }
+
+  #[test]
+  fn cline_stream_reads_tools_text_and_result() {
+    let t = parse(Harness::ClineHeadless, CLINE);
+    assert!(t.finished && t.error.is_none());
+    let Entry::Tool { name, summary, ok, .. } = &t.entries[0] else { panic!("{:?}", t.entries) };
+    assert_eq!((name.as_str(), summary.as_str(), *ok), ("run_commands", "echo hello > out.txt", Some(true)));
+    let read = r#"{"type":"agent_event","event":{"type":"content_start","contentType":"tool","toolCallId":"r","toolName":"read_files","input":{"files":[{"path":"/repo/a.md"},{"path":"b.md"}]}}}"#;
+    let t2 = parse(Harness::ClineHeadless, read);
+    assert!(
+      matches!(&t2.entries[0], Entry::Tool { summary, .. } if summary == "/repo/a.md ; b.md"),
+      "{:?}",
+      t2.entries
+    );
+    assert!(matches!(&t.entries[1], Entry::Text { text } if text == "done"), "text appears once: {:?}", t.entries);
+    assert!(matches!(&t.entries[2], Entry::Result { ok: true, detail } if detail.contains("2 iterations")));
   }
 
   #[test]

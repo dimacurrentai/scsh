@@ -670,7 +670,8 @@ pub struct ClineSession {
 /// One Cline session. Tokens come from the session document's `aggregateUsage` when the CLI
 /// wrote it, otherwise from `usage`. Round trips and tool calls come from the conversation:
 /// one assistant message with `metrics` per model response, one `tool_use` block per call —
-/// the same two counts Claude reports, so the routes compare directly.
+/// the same two counts Claude reports, so the routes compare directly. Both interfaces (TUI
+/// and `--json`) write these files, so `cline` and `cline-headless` are counted identically.
 /// A session that has not finished is incomplete.
 pub fn cline_session_summary(session: &ClineSession) -> Summary {
   let Ok(root) = json::parse(&session.session) else { return unavailable(Harness::Cline) };
@@ -689,7 +690,7 @@ pub fn cline_session_summary(session: &ClineSession) -> Summary {
   };
   Summary {
     harness: Harness::Cline,
-    // A finished task is `completed`. The TUI rests at `idle` with the counters already
+    // Headless exits as `completed`. The TUI rests at `idle` with the counters already
     // final; `/quit` only happens after the host has accepted those counters.
     complete: tokens.is_some() && matches!(string(&root, "status"), Some("completed") | Some("idle")),
     tokens,

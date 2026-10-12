@@ -133,15 +133,15 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
 
 ### A skill's fields
 
-- **`harness`** *(required for direct run)* — `claude`, `codex`, `grok`, `cursor`, `cline`, or `opencode`; or a headless type, `claude-headless` or `codex-headless`. Omit at the skill level when using `invocations:`; each route supplies its own.
+- **`harness`** *(required for direct run)* — `claude`, `codex`, `grok`, `cursor`, `cline`, or `opencode`; or a headless type, `claude-headless`, `codex-headless`, or `cline-headless`. Omit at the skill level when using `invocations:`; each route supplies its own.
 - **`invocations:`** *(optional matrix)* — named routes, each with `harness`, optional `model`, optional `profile` (overrides the skill-level default), optional `commits` (overrides the skill-level default). Mutually exclusive with top-level `harness` / `model`.
   By default every harness runs as a real interactive TUI recorded via tmux + asciinema (see
   [`DAEMON.md`](DAEMON.md)), pointed at the skill's `SKILL.md` — e.g. claude with
   `--permission-mode bypassPermissions` (host `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or
   `~/.claude/.credentials.json`), opencode via `opencode --prompt`, grok via its default Build TUI.
-  The two **headless** types run the same CLI in its non-interactive JSON mode instead —
-  `claude -p --output-format stream-json` and `codex exec --json` — with no tmux and no
-  asciinema. Each uses its agent's image and login and is counted from the same native
+  The three **headless** types run the same CLI in its non-interactive JSON mode instead —
+  `claude -p --output-format stream-json`, `codex exec --json`, `cline --json` — with no tmux
+  and no asciinema. Each uses its agent's image and login and is counted from the same native
   session files, so its token usage compares directly with the TUI route's. The job page shows
   a live **transcript** in place of the player: agent messages, collapsible tool calls with
   their input and output, and the closing result. The raw event stream downloads as

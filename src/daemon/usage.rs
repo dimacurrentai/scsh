@@ -222,7 +222,7 @@ pub fn from_run_dir(harness: crate::config::Harness, run_dir: &Path) -> Option<S
         .map(|stream| crate::usage::grok_session_summary(&stream))
         .unwrap_or_else(|| unavailable(Harness::Grok)),
     ),
-    crate::config::Harness::Cline => Some(cline_summary(run_dir)),
+    crate::config::Harness::Cline | crate::config::Harness::ClineHeadless => Some(cline_summary(run_dir)),
     crate::config::Harness::Opencode => None,
   }
 }
