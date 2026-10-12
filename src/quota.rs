@@ -489,8 +489,8 @@ fn curl_config_quote(s: &str) -> String {
 /// status and hint. Network only happens when credentials are actually found.
 pub fn fetch(harness: Harness) -> HarnessQuota {
   match harness {
-    Harness::Claude => claude_quota(),
-    Harness::Codex => codex_quota(),
+    Harness::Claude | Harness::ClaudeHeadless => claude_quota(),
+    Harness::Codex | Harness::CodexHeadless => codex_quota(),
     Harness::Grok => grok_quota(),
     Harness::Cursor => cursor_quota(),
     Harness::Opencode => HarnessQuota::down(

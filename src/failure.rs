@@ -367,6 +367,14 @@ pub fn claude_logged_out(text: &str) -> bool {
     || (compact.contains("loginexpired") && compact.contains("pleaserunlogin"))
 }
 
+/// Whether `claude -p` ended on a refused login. Print mode has no status line: its `result`
+/// carries the API's refusal ("Failed to authenticate: OAuth session expired…", "Invalid API
+/// key · Please run /login"). Matched on letters only, like [`claude_logged_out`].
+pub fn claude_print_auth_refused(text: &str) -> bool {
+  let compact: String = text.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect();
+  compact.contains("failedtoauthenticate") || (compact.contains("invalidapikey") && compact.contains("runlogin"))
+}
+
 /// Whether Claude Code is retrying a failing API call ("API error · Retrying in 1s · attempt
 /// 1/10"). That is all a refused `CLAUDE_CODE_OAUTH_TOKEN` shows before the watchdog ends the
 /// run, and an outage looks the same: this only says the provider is worth asking.
@@ -804,6 +812,18 @@ mod tests {
     // One phrase alone is prose, not the status line.
     for quoted in ["the docs say: Run /login first", "Login expired", "user is not logged in", ""] {
       assert!(!claude_logged_out(quoted), "{quoted}");
+    }
+  }
+
+  #[test]
+  fn claude_print_mode_refusal_needs_the_api_refusal_wording() {
+    // The `result` text of `claude -p` runs with an expired login and a bogus key (2026-10-12).
+    assert!(claude_print_auth_refused("Failed to authenticate: OAuth session expired and could not be refreshed"));
+    assert!(claude_print_auth_refused("Invalid API key · Please run /login"));
+    assert!(claude_print_auth_refused("FAILED TO AUTHENTICATE. API Error: 401"));
+    // "Invalid API key" alone is prose about a key, not the refusal that names the fix.
+    for quoted in ["the invalid API key check moved to config.rs", "Run /login to continue", "authenticated", ""] {
+      assert!(!claude_print_auth_refused(quoted), "{quoted}");
     }
   }
 

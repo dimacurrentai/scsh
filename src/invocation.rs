@@ -76,7 +76,7 @@ pub fn manifest(skill: &crate::config::ResolvedInvocation) -> crate::json::Value
       ("schema_version", Value::Number(1.0)),
       ("invocation", Value::String(skill.name.clone())),
       ("harness", Value::String(skill.harness.as_str().to_string())),
-      ("execution_mode", Value::String("interactive".into())),
+      ("execution_mode", Value::String(if skill.harness.is_headless() { "headless" } else { "interactive" }.into())),
       ("prompt_contract", Value::String(skill.options.contract_name().to_string())),
       ("requested_model", skill.model.clone().map(Value::String).unwrap_or(Value::Null)),
       ("effort", skill.effort.clone().map(Value::String).unwrap_or(Value::Null)),
@@ -101,9 +101,9 @@ pub fn manifest(skill: &crate::config::ResolvedInvocation) -> crate::json::Value
       ),
       (
         "argument_vector",
-        if skill.harness == Harness::Claude {
+        if skill.harness.agent() == Harness::Claude {
           Value::Array(
-            crate::runtime::claude_argv(skill.model.as_deref(), skill.effort.as_deref(), &prompt)
+            crate::runtime::claude_argv_for(skill.harness, skill.model.as_deref(), skill.effort.as_deref(), &prompt)
               .into_iter()
               .map(Value::String)
               .collect(),

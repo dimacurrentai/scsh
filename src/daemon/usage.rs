@@ -130,7 +130,8 @@ impl Completion {
 }
 
 fn accounting_bytes(harness: crate::config::Harness, dir: &Path) -> u64 {
-  let paths = match harness {
+  // A headless run writes the same native files as its agent's TUI run.
+  let paths = match harness.agent() {
     crate::config::Harness::Cursor => {
       vec![dir.join(format!("{}.cursor-hooks.jsonl", crate::runtime::RUN_LOG_REL))]
     }
@@ -149,6 +150,8 @@ fn accounting_bytes(harness: crate::config::Harness, dir: &Path) -> u64 {
 /// Each attempt owns a fresh transcript tree. Require it to change at or after the
 /// result and require its latest logical turn to be terminal.
 fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -> Option<Summary> {
+  // A headless run writes the same native files as its agent's TUI run.
+  let harness = harness.agent();
   let result_time = std::fs::metadata(result).ok()?.modified().ok()?;
   let paths = match harness {
     crate::config::Harness::Cursor => vec![dir.join(format!("{}.cursor-hooks.jsonl", crate::runtime::RUN_LOG_REL))],
@@ -191,11 +194,11 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
 /// This performs no network request and no model call.
 pub fn from_run_dir(harness: crate::config::Harness, run_dir: &Path) -> Option<Summary> {
   match harness {
-    crate::config::Harness::Claude => Some(
+    crate::config::Harness::Claude | crate::config::Harness::ClaudeHeadless => Some(
       claude_session_summary(&run_dir.join(crate::runtime::CLAUDE_AUTH_REL).join(".claude/projects"))
         .unwrap_or_else(|| unavailable(Harness::ClaudeCode)),
     ),
-    crate::config::Harness::Codex => Some(
+    crate::config::Harness::Codex | crate::config::Harness::CodexHeadless => Some(
       codex_session_summary(&run_dir.join(crate::runtime::CODEX_FORWARD_REL).join("sessions"))
         .unwrap_or_else(|| unavailable(Harness::Codex)),
     ),

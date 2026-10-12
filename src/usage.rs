@@ -449,6 +449,7 @@ pub(crate) fn unavailable(harness: Harness) -> Summary {
 /// Native turn boundaries, separate from token snapshots: a tool-call response or
 /// cumulative counter alone does not mean the agent has finished its last turn.
 pub(crate) fn turn_finished(harness: crate::config::Harness, stream: &str) -> bool {
+  let harness = harness.agent();
   let mut finished = false;
   for line in stream.lines().filter(|line| !line.trim().is_empty()) {
     let Ok(event) = json::parse(line) else { return false };

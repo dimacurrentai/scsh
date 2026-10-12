@@ -23,12 +23,12 @@ pub fn catalog_models(harness: Harness) -> &'static [CatalogModel] {
       CatalogModel { id: "openai/gpt-5.6-luna", kind: "primary" },
       CatalogModel { id: "openai/gpt-5.6-terra", kind: "builtin" },
     ],
-    Harness::Claude => &[
+    Harness::Claude | Harness::ClaudeHeadless => &[
       CatalogModel { id: "sonnet", kind: "primary" },
       CatalogModel { id: "claude-opus-4-8", kind: "builtin" },
       CatalogModel { id: "claude-fable-5", kind: "builtin" },
     ],
-    Harness::Codex => &[
+    Harness::Codex | Harness::CodexHeadless => &[
       CatalogModel { id: "gpt-5.6-luna", kind: "primary" },
       CatalogModel { id: "gpt-5.6-terra", kind: "builtin" },
       CatalogModel { id: "gpt-5.6-sol", kind: "builtin" },
@@ -612,7 +612,7 @@ invocations:
     ));
     if let Some(ref e) = t.effort {
       out.push_str(&format!("    effort: {e}\n"));
-    } else if t.harness == Harness::Codex {
+    } else if t.harness.agent() == Harness::Codex {
       out.push_str("    effort: low\n");
     }
   }

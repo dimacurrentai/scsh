@@ -48,6 +48,7 @@ pub fn log_sources() -> Vec<(String, &'static str)> {
     (".usage-final", "usage-final"),
     (".invocation.json", "invocation.json"),
     (".cli-version", "cli-version"),
+    (".events.jsonl", "events.jsonl"),
   ]
   .into_iter()
   .map(|(suffix, ext)| (format!("{}{suffix}", runtime::RUN_LOG_REL), ext))

@@ -14,6 +14,15 @@ the attempt's forwarded credentials and temporary config are scrubbed:
   Resumed work invalidates the previous completed stop. Cursor emits a completed `stop` before the same generation's trailing `afterAgentResponse` and `sessionEnd`; those trailing records preserve the stop, while a later generation or tool call invalidates it. The hooks live in the forwarded
   config home, never in the skill repository.
 
+**Headless types count exactly like their agents.** `claude-headless` and `codex-headless`
+run the same CLI in print/exec mode, and that mode writes the same native session files as the
+TUI: Claude's transcript JSONL and Codex's rollout files. `scsh` reads those files with the same parser, never the headless event stream. The
+stored `TokenUsage.harness` is the agent's (`claude_code`, `codex`), and the route's
+own harness name stays on the proc and in `scsh stats`. A TUI route and a headless route of
+one agent therefore report directly comparable numbers. Any difference between them is a
+real difference in what the CLI sent; for example, Claude's interactive mode adds tool
+schemas that print mode does not (see [CLAUDE-PROMPTS-RESULTS.md](CLAUDE-PROMPTS-RESULTS.md)).
+
 Once a result exists and the turn has gone quiet, the host owns a single accounting deadline: up to 600 seconds for every harness, allowing time for delayed API retries. Accounting completion releases the run immediately; the deadline is a maximum wait. Screen activity and a still-growing native stream hold that deadline — Cursor writes the result with a tool, then generates the final message with no hooks until `stop`. Override the wait with `SCSH_USAGE_ACCOUNTING_TIMEOUT` (positive integer seconds; invalid values fall back to 600 seconds). Startup, inactivity, wall-clock, and result-quiescence watchdogs yield during that bounded phase. The host validates fresh native records and the latest turn's completion, atomically saves the accounting snapshot, then authorizes the container to request a clean exit (`/exit` or `/quit`). No completion path sends Ctrl-C. Teardown gets a separate bounded grace period; a wedged process is still cleaned up. A timeout is recorded before teardown and stays a failure even if counters arrive late.
 
 Missing or incomplete native counters fail the attempt as `usage_accounting_unavailable`; a harness that remains live without complete accounting for the full deadline fails as `usage_accounting_timeout`. Both retain the result, recording, hook stream, and run clone for inspection. For latency-sensitive work where counters are deliberately unnecessary, `SCSH_NO_USAGE=1 scsh run …` disables the requirement and accounting wait for every harness.

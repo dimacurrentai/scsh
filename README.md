@@ -133,16 +133,21 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
 
 ### A skill's fields
 
-- **`harness`** *(required for direct run)* — **`opencode`** or **`claude`**. Omit at the skill level when using `invocations:`; each route supplies its own.
+- **`harness`** *(required for direct run)* — `claude`, `codex`, `grok`, `cursor`, or `opencode`; or a headless type, `claude-headless` or `codex-headless`. Omit at the skill level when using `invocations:`; each route supplies its own.
 - **`invocations:`** *(optional matrix)* — named routes, each with `harness`, optional `model`, optional `profile` (overrides the skill-level default), optional `commits` (overrides the skill-level default). Mutually exclusive with top-level `harness` / `model`.
   By default every harness runs as a real interactive TUI recorded via tmux + asciinema (see
   [`DAEMON.md`](DAEMON.md)), pointed at the skill's `SKILL.md` — e.g. claude with
   `--permission-mode bypassPermissions` (host `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or
   `~/.claude/.credentials.json`), opencode via `opencode --prompt`, grok via its default Build TUI.
+  The two **headless** types run the same CLI in its non-interactive JSON mode instead —
+  `claude -p --output-format stream-json` and `codex exec --json` — with no tmux and no
+  asciinema. Each uses its agent's image and login and is counted from the same native
+  session files, so its token usage compares directly with the TUI route's. Its native event
+  stream is kept beside the run's logs as `….events.jsonl`.
 - **`model`** *(optional)* — the model the harness passes to its tool. Cursor defaults to
   `cursor-grok-4.6-high-fast` (Grok 4.6 High Fast); an explicit model overrides it.
-  Every Claude Code, Codex, and Cursor attempt normalizes its native token counters into
-  one strict schema, shown below the finished recording and stored beside the result.
+  Every Claude Code, Codex, Cursor, and Grok attempt, interactive or headless, normalizes its native token counters into
+  one strict schema, shown below the finished run and stored beside the result.
   See [harness usage accounting](HARNESS-USAGE.md).
 
 Claude routes accept `prompt_contract: standard|compact|verbatim` while retaining the interactive TUI and asciinema recording. `effort` is forwarded to Claude. Use `scsh inspect-prompt --def <name>` to inspect the exact prompt without a model call; use `scsh inspect-claude-usage <directory>` to reconcile direct-Claude transcripts with the same accounting parser. See [Claude prompts and controlled comparisons](CLAUDE-PROMPTS.md).
