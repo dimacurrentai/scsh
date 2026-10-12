@@ -493,7 +493,7 @@ pub fn fetch(harness: Harness) -> HarnessQuota {
     Harness::Codex | Harness::CodexHeadless => codex_quota(),
     Harness::Grok => grok_quota(),
     Harness::Cursor => cursor_quota(),
-    Harness::Cline => cline_quota(),
+    Harness::Cline | Harness::ClineHeadless => cline_quota(),
     Harness::Opencode => HarnessQuota::down(
       harness,
       "unsupported",

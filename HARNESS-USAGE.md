@@ -19,10 +19,11 @@ the attempt's forwarded credentials and temporary config are scrubbed:
   same two counts as Claude Code. A session still on its first response has no counters and
   stays incomplete.
 
-**Headless types count exactly like their agents.** `claude-headless` and `codex-headless`
-run the same CLI in print/exec mode, and that mode writes the same native session files as the
-TUI: Claude's transcript JSONL and Codex's rollout files. `scsh` reads those files with the same parser, never the headless event stream. The
-stored `TokenUsage.harness` is the agent's (`claude_code`, `codex`), and the route's
+**Headless types count exactly like their agents.** `claude-headless`, `codex-headless`, and
+`cline-headless` run the same CLI in print/exec/JSON mode, and that mode writes the same native
+session files as the TUI: Claude's transcript JSONL, Codex's rollout files, Cline's session
+documents. `scsh` reads those files with the same parser, never the headless event stream. The
+stored `TokenUsage.harness` is the agent's (`claude_code`, `codex`, `cline`), and the route's
 own harness name stays on the proc and in `scsh stats`. A TUI route and a headless route of
 one agent therefore report directly comparable numbers. Any difference between them is a
 real difference in what the CLI sent; for example, Claude's interactive mode adds tool

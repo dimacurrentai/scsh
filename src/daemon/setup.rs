@@ -40,7 +40,7 @@ pub fn catalog_models(harness: Harness) -> &'static [CatalogModel] {
     Harness::Cursor => {
       &[CatalogModel { id: "auto", kind: "primary" }, CatalogModel { id: "composer-2.5", kind: "builtin" }]
     }
-    Harness::Cline => &[
+    Harness::Cline | Harness::ClineHeadless => &[
       CatalogModel { id: "cline-pass/glm-5.3", kind: "primary" },
       CatalogModel { id: "cline-pass/kimi-k3", kind: "builtin" },
       CatalogModel { id: "cline-pass/qwen3.8-max", kind: "builtin" },

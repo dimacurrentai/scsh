@@ -401,10 +401,10 @@ pub enum EnvRule {
 /// `grok` (xAI Grok CLI — the native harness for Grok models), `cursor` (Cursor
 /// Agent CLI), or `cline` (Cline CLI — Cline Pass and pay-as-you-go models).
 ///
-/// `claude-headless` and `codex-headless` run the same CLI, image, credentials, and native
-/// session accounting as their agent, but in its non-interactive JSON-streaming mode: no
-/// tmux, no asciinema, and a structured transcript in the session browser instead of a
-/// terminal recording. [`Harness::agent`] maps each to its agent.
+/// `claude-headless`, `codex-headless`, and `cline-headless` run the same CLI, image,
+/// credentials, and native session accounting as their agent, but in its non-interactive
+/// JSON-streaming mode: no tmux, no asciinema, and a structured transcript in the session
+/// browser instead of a terminal recording. [`Harness::agent`] maps each to its agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Harness {
   Opencode,
@@ -415,6 +415,7 @@ pub enum Harness {
   Cline,
   ClaudeHeadless,
   CodexHeadless,
+  ClineHeadless,
 }
 
 impl Harness {
@@ -425,7 +426,7 @@ impl Harness {
     [Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor, Harness::Opencode, Harness::Cline];
 
   /// The headless invocation types, each sharing its [`Harness::agent`]'s image and login.
-  pub const HEADLESS: [Harness; 2] = [Harness::ClaudeHeadless, Harness::CodexHeadless];
+  pub const HEADLESS: [Harness; 3] = [Harness::ClaudeHeadless, Harness::CodexHeadless, Harness::ClineHeadless];
 
   /// Parse a `harness:` value; `None` for an unknown harness.
   pub fn parse(s: &str) -> Option<Harness> {
@@ -443,6 +444,7 @@ impl Harness {
       Harness::Cline => "cline",
       Harness::ClaudeHeadless => "claude-headless",
       Harness::CodexHeadless => "codex-headless",
+      Harness::ClineHeadless => "cline-headless",
     }
   }
 
@@ -457,6 +459,7 @@ impl Harness {
       Harness::Cline => "Cline",
       Harness::ClaudeHeadless => "Claude (headless)",
       Harness::CodexHeadless => "Codex (headless)",
+      Harness::ClineHeadless => "Cline (headless)",
     }
   }
 
@@ -468,6 +471,7 @@ impl Harness {
     match self {
       Harness::ClaudeHeadless => Harness::Claude,
       Harness::CodexHeadless => Harness::Codex,
+      Harness::ClineHeadless => Harness::Cline,
       other => other,
     }
   }
@@ -479,7 +483,7 @@ impl Harness {
 
   /// Every known harness name, for error messages.
   pub fn known() -> &'static [&'static str] {
-    &["opencode", "claude", "codex", "grok", "cursor", "cline", "claude-headless", "codex-headless"]
+    &["opencode", "claude", "codex", "grok", "cursor", "cline", "claude-headless", "codex-headless", "cline-headless"]
   }
 
   /// Whether this harness runs as an interactive TUI recorded under tmux + asciinema (rather
@@ -1466,7 +1470,8 @@ pub fn cline_selection_label(model_id: &str, effort: Option<&str>) -> String {
   }
 }
 
-/// Per-model effort check for harnesses whose effort belongs to the selected model (Cline). `None` when there is no effort, the harness is not model-scoped, or
+/// Per-model effort check for harnesses whose effort belongs to the selected model (Cline,
+/// either interface). `None` when there is no effort, the harness is not model-scoped, or
 /// the model accepts it. Every route validator calls this after `check_effort_for_harness`.
 pub(crate) fn model_effort_error(harness: Harness, model: Option<&str>, effort: Option<&str>) -> Option<String> {
   (harness.agent() == Harness::Cline).then(|| cline_model_effort_error(model, effort?)).flatten()
@@ -2933,7 +2938,11 @@ skills:
     assert!(Harness::Grok.is_tui());
     assert!(Harness::Cline.is_tui());
     // A headless type is its agent's CLI without a terminal: same agent, never a TUI.
-    for (headless, agent) in [(Harness::ClaudeHeadless, Harness::Claude), (Harness::CodexHeadless, Harness::Codex)] {
+    for (headless, agent) in [
+      (Harness::ClaudeHeadless, Harness::Claude),
+      (Harness::CodexHeadless, Harness::Codex),
+      (Harness::ClineHeadless, Harness::Cline),
+    ] {
       assert!(headless.is_headless() && !headless.is_tui(), "{headless:?}");
       assert_eq!(headless.agent(), agent);
       assert!(!agent.is_headless() && agent.agent() == agent, "{agent:?}");

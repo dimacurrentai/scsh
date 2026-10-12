@@ -2,12 +2,12 @@
 
 This file **is** the test. It is an executable Markdown harness: an agent — or a human — runs the numbered steps in order and checks each **Predict** line. There is no runner script.
 
-It proves that the headless invocation types — `claude-headless` and `codex-headless` — run end to end without a terminal recording, render a transcript in the session browser, and report token usage on the same basis as their interactive twins. The `headless-compare` profile in [`.scsh.yml`](.scsh.yml) runs the minimal [`.skills/harness-smoke/SKILL.md`](.skills/harness-smoke/SKILL.md) workload four times: each of Claude and Codex once as its recorded TUI (`cmp-<agent>-tui`) and once headless (`cmp-<agent>-headless`), with the same model and effort. Routes whose agent has no host login are skipped, not failed.
+It proves that the three headless invocation types — `claude-headless`, `codex-headless`, and `cline-headless` — run end to end without a terminal recording, render a transcript in the session browser, and report token usage on the same basis as their interactive twins. The `headless-compare` profile in [`.scsh.yml`](.scsh.yml) runs the minimal [`.skills/harness-smoke/SKILL.md`](.skills/harness-smoke/SKILL.md) workload six times: each of Claude, Codex, and Cline once as its recorded TUI (`cmp-<agent>-tui`) and once headless (`cmp-<agent>-headless`), with the same model and effort. Routes whose agent has no host login are skipped, not failed.
 
 ## Prerequisites
 
 1. **A container runtime** — docker, podman, or Apple `container` (macOS), engine running.
-2. **At least one of** Claude (`claude` logged in, or `CLAUDE_CODE_OAUTH_TOKEN`) or Codex (`codex login`, or `OPENAI_API_KEY`).
+2. **At least one of** Claude (`claude` logged in, or `CLAUDE_CODE_OAUTH_TOKEN`), Codex (`codex login`, or `OPENAI_API_KEY`), Cline (`cline auth`, or `CLINE_API_KEY`).
 3. **`jq`** for step 7.
 
 ## The harness (run these in order)
@@ -24,18 +24,18 @@ Run from the repo root. `SCSH` is this repo's own build (`./target/debug/scsh`),
    - **Predict:** empty output. (`scsh run` clones committed state only.)
 
 4. **Profile.** `$SCSH check-profile headless-compare`
-   - **Predict:** `profile 'headless-compare' has 4 skills`.
+   - **Predict:** `profile 'headless-compare' has 6 skills`.
 
 5. **Inspect, no model call.** `$SCSH inspect-prompt headless-compare | jq -r '.InvocationInspection[] | .InvocationManifest | "\(.harness) \(.execution_mode)"'`
-   - **Predict:** four lines; every `*-headless` harness reads `headless`, every other one `interactive`. The two routes of one agent carry the byte-identical `submitted_prompt`.
+   - **Predict:** six lines; every `*-headless` harness reads `headless`, every other one `interactive`. The two routes of one agent carry the byte-identical `submitted_prompt`.
 
 6. **Run.** `$SCSH run --profile headless-compare`
-   - **Predict:** exit 0, one `✓` line per available route, and a final `✓ job http://127.0.0.1:7399/job/<id>` line. No headless route builds an image of its own: the build rows name only `claude` and `codex`. Keep the job id: `JOB=<id>`.
+   - **Predict:** exit 0, one `✓` line per available route, and a final `✓ job http://127.0.0.1:7399/job/<id>` line. No headless route builds an image of its own: the build rows name only `claude`, `codex`, and `cline`. Keep the job id: `JOB=<id>`.
 
 7. **Usage on one basis.** For each agent with both routes present:
 
    ```sh
-   for a in claude codex; do
+   for a in claude codex cline; do
      for m in tui headless; do
        f=~/.scsh/sessions/$JOB/results/harness-smoke-cmp-$a-$m.usage.json
        [ -f "$f" ] && jq -r --arg r "$a-$m" '.TokenUsage | "\($r)\t\(.harness)\t\(.source)\t\(.complete)\t\(.tokens.input)\t\(.tokens.output)\t\(.tokens.cache_read)\t\(.llm_round_trips)\t\(.tool_calls)"' "$f"

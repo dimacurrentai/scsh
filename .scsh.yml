@@ -135,3 +135,13 @@ skills:
         model: gpt-5.6-luna
         effort: low
         profile: headless-compare
+      cmp-cline-tui:
+        harness: cline
+        model: cline-pass/glm-5.3
+        effort: high
+        profile: headless-compare
+      cmp-cline-headless:
+        harness: cline-headless
+        model: cline-pass/glm-5.3
+        effort: high
+        profile: headless-compare
