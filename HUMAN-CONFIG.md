@@ -158,7 +158,8 @@ If Setup says **Found via keychain** or **Missing**, the running daemon did not 
 ## gemini — Gemini CLI (not yet an `scsh` harness)
 
 > **Honest note:** `gemini` is **not** an `scsh` harness on this branch — the harness set
-> in `src/config.rs` is exactly `opencode`, `claude`, `codex`, `grok`, and `cursor`, and
+> in `src/config.rs` is exactly `opencode`, `claude`, `codex`, `grok`, and `cursor` (plus the
+> headless `claude-headless` and `codex-headless`), and
 > `scsh` probes nothing Gemini-related. This section is groundwork only: authenticate now
 > and a future `gemini` harness can forward the same artifacts.
 

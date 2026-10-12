@@ -458,8 +458,13 @@ pub fn effective_workflow_meta(session: &Session) -> Option<WorkflowMeta> {
     });
     order += 1;
   }
-  let build_id_for: std::collections::BTreeMap<String, String> =
+  let build_ids: std::collections::BTreeMap<String, String> =
     harness_procs.keys().map(|h| (h.clone(), format!("build_{h}"))).collect();
+  // A headless step waits on its agent's image build (`claude-headless` → `build_claude`).
+  let build_id_for = |harness: &str| {
+    let image = crate::config::Harness::parse(harness).map_or(harness, |h| h.agent().as_str());
+    build_ids.get(image)
+  };
   for (h, idx) in &harness_procs {
     let mut needs = Vec::new();
     if base_proc.is_some() {
@@ -508,7 +513,7 @@ pub fn effective_workflow_meta(session: &Session) -> Option<WorkflowMeta> {
       }
       let harness_step = parse_loop_iteration_id(&visible.id).map(|(base, _, _)| base).unwrap_or(&visible.id);
       if let Some(h) = harness_for_step(session, harness_step) {
-        if let Some(bid) = build_id_for.get(h) {
+        if let Some(bid) = build_id_for(h) {
           if !needs.iter().any(|x| x == bid) {
             needs.push(bid.clone());
           }
@@ -545,13 +550,13 @@ pub fn effective_workflow_meta(session: &Session) -> Option<WorkflowMeta> {
       seen.insert(name.clone());
       let mut needs = def_needs.as_ref().and_then(|m| m.get(name)).cloned().unwrap_or_default();
       if let Some(h) = session.procs.iter().find(|p| p.index == *idx).and_then(|p| p.harness.as_deref()) {
-        if let Some(bid) = build_id_for.get(h) {
+        if let Some(bid) = build_id_for(h) {
           if !needs.iter().any(|x| x == bid) {
             needs.push(bid.clone());
           }
         }
       } else if let Some(sk) = session.skills.iter().find(|s| s.name == *name) {
-        if let Some(bid) = build_id_for.get(&sk.harness) {
+        if let Some(bid) = build_id_for(&sk.harness) {
           if !needs.iter().any(|x| x == bid) {
             needs.push(bid.clone());
           }
@@ -576,7 +581,7 @@ pub fn effective_workflow_meta(session: &Session) -> Option<WorkflowMeta> {
         continue;
       }
       let mut needs = def_needs.as_ref().and_then(|m| m.get(&sk.name)).cloned().unwrap_or_default();
-      if let Some(bid) = build_id_for.get(&sk.harness) {
+      if let Some(bid) = build_id_for(&sk.harness) {
         if !needs.iter().any(|x| x == bid) {
           needs.push(bid.clone());
         }

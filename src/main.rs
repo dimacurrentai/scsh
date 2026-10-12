@@ -28,6 +28,7 @@ mod runtime;
 mod sha1;
 mod sha256;
 mod stats;
+mod transcript;
 mod ui;
 mod usage;
 mod version;
@@ -5632,9 +5633,9 @@ fn build_and_run(
   }
   let caller_tip = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
 
-  let needs_opencode = skills.iter().any(|s| s.harness == config::Harness::Opencode);
-  let needs_claude = skills.iter().any(|s| s.harness == config::Harness::Claude);
-  let needs_codex = skills.iter().any(|s| s.harness == config::Harness::Codex);
+  let needs_opencode = skills.iter().any(|s| s.harness.agent() == config::Harness::Opencode);
+  let needs_claude = skills.iter().any(|s| s.harness.agent() == config::Harness::Claude);
+  let needs_codex = skills.iter().any(|s| s.harness.agent() == config::Harness::Codex);
   if needs_opencode && opencode_auth_enabled() && runtime::opencode_auth_ready() {
     ok("opencode creds found (auth.json and opencode config forwarded into the run clone)");
   }
@@ -5647,12 +5648,12 @@ fn build_and_run(
     let via = if runtime::codex_auth_file_on_host().is_some() { "~/.codex/auth.json" } else { "OPENAI_API_KEY" };
     ok(&format!("codex credentials found ({via} forwarded into codex skills)"));
   }
-  let needs_grok = skills.iter().any(|s| s.harness == config::Harness::Grok);
+  let needs_grok = skills.iter().any(|s| s.harness.agent() == config::Harness::Grok);
   if needs_grok && grok_auth_enabled() && runtime::grok_container_auth_ready() {
     let via = if runtime::grok_auth_file_on_host().is_some() { "~/.grok/auth.json" } else { "XAI_API_KEY" };
     ok(&format!("grok credentials found ({via} forwarded into grok skills)"));
   }
-  let needs_cursor = skills.iter().any(|s| s.harness == config::Harness::Cursor);
+  let needs_cursor = skills.iter().any(|s| s.harness.agent() == config::Harness::Cursor);
   if needs_cursor && cursor_auth_enabled() && runtime::cursor_container_auth_ready() {
     let via = if runtime::cursor_api_key().is_some() {
       "CURSOR_API_KEY"
@@ -5676,9 +5677,10 @@ fn build_and_run(
   // Harness build order: first time each harness appears in the manifest (not enum sort).
   let mut harness_list = Vec::new();
   let mut seen_harness = std::collections::BTreeSet::new();
+  // A headless type builds (and reuses) its agent's image.
   for s in skills {
-    if seen_harness.insert(s.harness) {
-      harness_list.push(s.harness);
+    if seen_harness.insert(s.harness.agent()) {
+      harness_list.push(s.harness.agent());
     }
   }
   let rt_name = rt.name.clone();
@@ -6450,8 +6452,8 @@ fn skill_fail_detail(why: &str, harness: config::Harness, run_dir: Option<&str>,
     parts.push(format!("output log: {l}"));
     if runtime::harness_verbose_enabled() {
       match harness {
-        config::Harness::Claude => parts.push(format!("claude debug log: {l}.debug")),
-        config::Harness::Codex => parts.push(format!("codex final message: {l}.last")),
+        config::Harness::Claude | config::Harness::ClaudeHeadless => parts.push(format!("claude debug log: {l}.debug")),
+        config::Harness::Codex | config::Harness::CodexHeadless => parts.push(format!("codex final message: {l}.last")),
         config::Harness::Grok => parts.push(format!("grok debug log: {l}.debug")),
         config::Harness::Cursor => {}
         config::Harness::Opencode => {}
@@ -6495,11 +6497,32 @@ fn cast_tail_text(cast: &Path) -> String {
   }
 }
 
+/// What a failed run last showed, for failure classification: the rendered tail of a TUI's
+/// recording, or — for a headless run, which has no screen — the errors its event stream
+/// reported followed by the tail of its stderr log.
+fn run_screen_text(run_dir: &Path, harness: config::Harness) -> String {
+  if !harness.is_headless() {
+    return cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL));
+  }
+  const KEEP_CHARS: usize = 4 * 1024;
+  let events = std::fs::read_to_string(run_dir.join(runtime::RUN_EVENTS_REL)).unwrap_or_default();
+  let log = std::fs::read_to_string(run_dir.join(runtime::RUN_LOG_REL)).unwrap_or_default();
+  let mut log_tail = log.as_str();
+  if log_tail.len() > KEEP_CHARS {
+    let mut cut = log_tail.len() - KEEP_CHARS;
+    while !log_tail.is_char_boundary(cut) {
+      cut += 1;
+    }
+    log_tail = &log_tail[cut..];
+  }
+  format!("{}\n{log_tail}", transcript::parse(harness, &events).failure_text())
+}
+
 /// Claude's and grok's literal TUI limit prose is understood here, each only on its own harness.
 /// Other harnesses can quote those words while reporting an unrelated failure and must retain
 /// their real verdict.
 fn harness_exited_on_usage_limit(harness: config::Harness, sample: &str) -> bool {
-  match harness {
+  match harness.agent() {
     config::Harness::Claude => limitwait::detect(sample).is_some_and(|state| state != limitwait::LimitState::Resumed),
     config::Harness::Grok => limitwait::grok_quota_exhausted(sample),
     _ => false,
@@ -6518,7 +6541,7 @@ fn usage_limit_reset(harness: config::Harness, captured: Option<u64>) -> Option<
 
 /// How a limit verdict names what stopped the run, for the row's detail line.
 fn usage_limit_why(harness: config::Harness, resets_at: Option<u64>) -> String {
-  let owner = match harness {
+  let owner = match harness.agent() {
     config::Harness::Claude => "a claude.ai usage limit".to_string(),
     other => format!("the {} account's usage limit", other.as_str()),
   };
@@ -6533,9 +6556,13 @@ fn usage_limit_why(harness: config::Harness, resets_at: Option<u64>) -> String {
 /// their real verdict and the uncertain [`failure::suspected_cause`] hint. A usage limit is
 /// never read as a logout.
 fn harness_came_up_logged_out(harness: config::Harness, sample: &str) -> bool {
-  harness == config::Harness::Claude
-    && failure::claude_logged_out(sample)
-    && !harness_exited_on_usage_limit(harness, sample)
+  let refused = match harness {
+    config::Harness::Claude => failure::claude_logged_out(sample),
+    // Print mode has no status line; it ends with the API's own refusal as its result.
+    config::Harness::ClaudeHeadless => failure::claude_logged_out(sample) || failure::claude_print_auth_refused(sample),
+    _ => false,
+  };
+  refused && !harness_exited_on_usage_limit(harness, sample)
 }
 
 /// The row's detail for a refused Claude login, naming the fix for the credential that was refused.
@@ -6557,8 +6584,10 @@ keeps its original environment"
 
 /// Add an uncertain screen diagnosis only after the run has already failed.
 /// Keep the observed failure reason intact: hints never choose a retry policy.
-fn finish_harness_failure(spinner: &ui::screen::Proc, reason: &str, detail: &str, run_dir: &Path) {
-  let sample = cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL));
+fn finish_harness_failure(
+  spinner: &ui::screen::Proc, reason: &str, detail: &str, run_dir: &Path, harness: config::Harness,
+) {
+  let sample = run_screen_text(run_dir, harness);
   let cause = failure::suspected_cause(&sample);
   let detail = match cause {
     Some(cause) => format!("{detail}\n{}", cause.detail()),
@@ -6936,7 +6965,11 @@ fn run_one_skill(
 
   // Run the harness command in a named container with the clone mounted at /home/agent/repo,
   // under the skill's optional wall-clock timeout.
-  spinner.note(&format!("{} interactive run…", skill.harness.as_str()));
+  // Images, credentials, and accounting follow the agent; a headless type only changes how
+  // its CLI is launched and watched.
+  let agent = skill.harness.agent();
+  let headless = skill.harness.is_headless();
+  spinner.note(&format!("{} {} run…", skill.harness.as_str(), if headless { "headless" } else { "interactive" }));
   let name = run_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| skill.name.clone());
   // The harness tees its output to this log under the mount's gitignored tmp/ (= on the host).
   // Create its parent so `tee` can write even before the skill touches tmp/.
@@ -6946,24 +6979,16 @@ fn run_one_skill(
   }
   let mut log = log_path.to_string_lossy().into_owned();
   // Copy host opencode auth/config into the run clone's tmp/ (rides the repo mount; no mounts).
-  let opencode_forward = if skill.harness == config::Harness::Opencode && opencode_auth_enabled() {
-    forward_opencode(&run_dir)
-  } else {
-    None
-  };
-  let claude_auth = if skill.harness == config::Harness::Claude && claude_auth_enabled() {
-    forward_claude_auth(&run_dir)
-  } else {
-    None
-  };
+  let opencode_forward =
+    if agent == config::Harness::Opencode && opencode_auth_enabled() { forward_opencode(&run_dir) } else { None };
+  let claude_auth =
+    if agent == config::Harness::Claude && claude_auth_enabled() { forward_claude_auth(&run_dir) } else { None };
   // Taken as the login is handed over, not after the run: a host that refreshes its login while
   // this attempt is being refused must read as changed, and so earn the retry.
   let forwarded_auth = claude_auth.as_ref().and_then(|_| claude_auth_fingerprint());
-  let codex_auth =
-    if skill.harness == config::Harness::Codex && codex_auth_enabled() { forward_codex(&run_dir) } else { None };
-  let grok_auth =
-    if skill.harness == config::Harness::Grok && grok_auth_enabled() { forward_grok(&run_dir) } else { None };
-  let cursor_auth = if skill.harness == config::Harness::Cursor {
+  let codex_auth = if agent == config::Harness::Codex && codex_auth_enabled() { forward_codex(&run_dir) } else { None };
+  let grok_auth = if agent == config::Harness::Grok && grok_auth_enabled() { forward_grok(&run_dir) } else { None };
+  let cursor_auth = if agent == config::Harness::Cursor {
     install_cursor_usage_hooks(&run_dir);
     if cursor_auth_enabled() {
       forward_cursor(&run_dir)
@@ -6973,6 +6998,7 @@ fn run_one_skill(
   } else {
     false
   };
+  // The host->pane keystroke channel exists only for the Claude TUI (its limit dialogs).
   let key_channel = if skill.harness == config::Harness::Claude {
     match HostKeyChannel::create(&run_dir) {
       Ok(channel) => Some(channel),
@@ -7012,26 +7038,26 @@ fn run_one_skill(
       }
     }
   }
-  if skill.harness == config::Harness::Claude {
+  if agent == config::Harness::Claude {
     if let Some(token) = runtime::claude_oauth_token() {
       container_env.push((runtime::CLAUDE_OAUTH_TOKEN_ENV.to_string(), token));
     }
   }
-  if skill.harness == config::Harness::Codex {
+  if agent == config::Harness::Codex {
     if let Ok(key) = std::env::var(runtime::OPENAI_API_KEY_ENV) {
       if !key.is_empty() {
         container_env.push((runtime::OPENAI_API_KEY_ENV.to_string(), key));
       }
     }
   }
-  if skill.harness == config::Harness::Grok {
+  if agent == config::Harness::Grok {
     if let Ok(key) = std::env::var(runtime::XAI_API_KEY_ENV) {
       if !key.is_empty() {
         container_env.push((runtime::XAI_API_KEY_ENV.to_string(), key));
       }
     }
   }
-  if skill.harness == config::Harness::Cursor {
+  if agent == config::Harness::Cursor {
     if let Some(key) = runtime::cursor_api_key() {
       container_env.push((runtime::CURSOR_API_KEY_ENV.to_string(), key));
     }
@@ -7146,10 +7172,14 @@ fn run_one_skill(
       })
     },
   });
+  // A headless run's heartbeat is its event stream: one line per message, tool call, and result.
+  // The startup-stall budgets exist for TUIs that can wedge behind a spinner or a dialog; a
+  // headless CLI either streams or exits, and its first model turn may legitimately think in
+  // silence past those budgets, so only the ordinary inactivity limit applies.
   let watch = ui::screen::ActivityWatch {
-    file: run_dir.join(runtime::RUN_CAST_REL),
+    file: run_dir.join(if headless { runtime::RUN_EVENTS_REL } else { runtime::RUN_CAST_REL }),
     limit: Duration::from_secs(inactivity_secs),
-    startup: Some(ui::screen::StartupStall::jittered(startup_seed)),
+    startup: (!headless).then(|| ui::screen::StartupStall::jittered(startup_seed)),
     // Independent of SCSH_NO_USAGE: partial counters and hooks prove liveness even when
     // exact final accounting is disabled. Fresh per-attempt trees exclude prior sessions.
     startup_complete: Some(Box::new(|| {
@@ -7184,7 +7214,10 @@ fn run_one_skill(
     c.container_event(spinner.index(), "start", &name, &rt.name);
     // The bind-mounted cast grows on the host while the harness runs; registering it now
     // lets the session browser download/replay the recording mid-run.
-    c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
+    // A headless run records no cast; its event stream is preserved with the logs.
+    if !headless {
+      c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
+    }
   }
   let result = spinner.run_watched(&run[0], &run[1..], timeout, Some(&watch), Some(&done));
   let accounting_complete = matches!(&result, Ok((true, ui::screen::Killed::No, _)));
@@ -7292,7 +7325,7 @@ fn run_one_skill(
       if (skill.harness == config::Harness::Claude && observed_reset_at.is_some())
         || skill.harness == config::Harness::Grok =>
     {
-      let sample = cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL));
+      let sample = run_screen_text(&run_dir, skill.harness);
       if skill.harness == config::Harness::Grok && limitwait::grok_quota_exhausted(&sample) {
         observed_reset_at = usage_limit_reset(skill.harness, observed_reset_at);
       }
@@ -7310,18 +7343,18 @@ fn run_one_skill(
     _,
   )) = &result
   {
-    let sample = cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL));
+    let sample = run_screen_text(&run_dir, skill.harness);
     let logged_out = harness_came_up_logged_out(skill.harness, &sample);
     // A refused CLAUDE_CODE_OAUTH_TOKEN never reaches a logged-out screen, only Claude's API
     // retry banner, which an outage shows too: ask the provider about the token itself.
     let token_refused = !logged_out
-      && skill.harness == config::Harness::Claude
+      && agent == config::Harness::Claude
       && failure::claude_api_error_retrying(&sample)
       && runtime::claude_oauth_token().and_then(|token| quota::claude_token_refused(&token)) == Some(true);
     if logged_out || token_refused {
       let why = auth_rejected_why(token_refused);
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      finish_harness_failure(&spinner, failure::reason::HARNESS_AUTH_REJECTED, &detail, &run_dir);
+      finish_harness_failure(&spinner, failure::reason::HARNESS_AUTH_REJECTED, &detail, &run_dir, skill.harness);
       return SkillRun::failed(failure::reason::HARNESS_AUTH_REJECTED, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_auth_fingerprint(forwarded_auth)
@@ -7348,7 +7381,7 @@ fn run_one_skill(
   };
   if let Some((reason, why)) = usage_failure {
     let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-    finish_harness_failure(&spinner, reason, &detail, &run_dir);
+    finish_harness_failure(&spinner, reason, &detail, &run_dir, skill.harness);
     return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir)
       .with_fail_detail(&why)
       .with_usage(usage)
@@ -7363,7 +7396,7 @@ fn run_one_skill(
     Ok((false, ui::screen::Killed::Timeout, _)) => {
       let why = format!("timed out after {}s", skill.timeout.unwrap_or(0));
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      finish_harness_failure(&spinner, failure::reason::CONTAINER_TIMEOUT, &detail, &run_dir);
+      finish_harness_failure(&spinner, failure::reason::CONTAINER_TIMEOUT, &detail, &run_dir, skill.harness);
       return SkillRun::failed(failure::reason::CONTAINER_TIMEOUT, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage)
@@ -7374,7 +7407,7 @@ fn run_one_skill(
       // its own reason so stats can tell a stuck harness from a slow one.
       let why = format!("no new screen content for {inactivity_secs}s (inactivity_timeout)");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      finish_harness_failure(&spinner, failure::reason::CONTAINER_INACTIVE, &detail, &run_dir);
+      finish_harness_failure(&spinner, failure::reason::CONTAINER_INACTIVE, &detail, &run_dir, skill.harness);
       return SkillRun::failed(failure::reason::CONTAINER_INACTIVE, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage)
@@ -7396,7 +7429,7 @@ fn run_one_skill(
       if let Some(c) = &daemon_client {
         c.proc_phase(spinner.index(), None, resets_at, &why);
       }
-      finish_harness_failure(&spinner, failure::reason::HARNESS_USAGE_LIMIT, &detail, &run_dir);
+      finish_harness_failure(&spinner, failure::reason::HARNESS_USAGE_LIMIT, &detail, &run_dir, skill.harness);
       return SkillRun::failed(failure::reason::HARNESS_USAGE_LIMIT, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_limit_reset(resets_at)
@@ -7417,7 +7450,7 @@ fn run_one_skill(
         )
       };
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      finish_harness_failure(&spinner, failure::reason::STARTUP_STALLED, &detail, &run_dir);
+      finish_harness_failure(&spinner, failure::reason::STARTUP_STALLED, &detail, &run_dir, skill.harness);
       return SkillRun::failed(failure::reason::STARTUP_STALLED, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage)
@@ -7430,7 +7463,7 @@ fn run_one_skill(
     Ok((false, ui::screen::Killed::Done, _)) => {
       let why = "stopped after the result file went quiet, but the result did not survive collection".to_string();
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      finish_harness_failure(&spinner, failure::reason::HARNESS_NONZERO, &detail, &run_dir);
+      finish_harness_failure(&spinner, failure::reason::HARNESS_NONZERO, &detail, &run_dir, skill.harness);
       return SkillRun::failed(failure::reason::HARNESS_NONZERO, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage)
@@ -7442,7 +7475,7 @@ fn run_one_skill(
       // Classify from the excerpt AND the rendered cast tail: the proc lines carry only the
       // wrapper's own output for a TUI harness, while the screen that matters — cursor's
       // "Reconnecting to …", a provider's 529 page, a login demand — lives in the recording.
-      let sample = format!("{why}\n{}", cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL)));
+      let sample = format!("{why}\n{}", run_screen_text(&run_dir, skill.harness));
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       // A limit that made the harness EXIT rather than park never reaches the wait above, but
       // it is the same event and needs the same answer: retry when the window reopens, not on a
@@ -7454,7 +7487,7 @@ fn run_one_skill(
         if let Some(c) = &daemon_client {
           c.proc_phase(spinner.index(), None, observed_reset_at, &why);
         }
-        finish_harness_failure(&spinner, failure::reason::HARNESS_USAGE_LIMIT, &detail, &run_dir);
+        finish_harness_failure(&spinner, failure::reason::HARNESS_USAGE_LIMIT, &detail, &run_dir, skill.harness);
         return SkillRun::failed(failure::reason::HARNESS_USAGE_LIMIT, Some(run_dir_str), Some(log), clone_dir)
           .with_fail_detail(&why)
           .with_limit_reset(observed_reset_at)
@@ -7468,7 +7501,7 @@ fn run_one_skill(
       } else {
         failure::reason::HARNESS_NONZERO
       };
-      finish_harness_failure(&spinner, reason, &detail, &run_dir);
+      finish_harness_failure(&spinner, reason, &detail, &run_dir, skill.harness);
       return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage)
@@ -7477,7 +7510,7 @@ fn run_one_skill(
     Err(e) => {
       let why = format!("could not run container: {e}");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      finish_harness_failure(&spinner, failure::reason::CONTAINER_RUN, &detail, &run_dir);
+      finish_harness_failure(&spinner, failure::reason::CONTAINER_RUN, &detail, &run_dir, skill.harness);
       return SkillRun::failed(failure::reason::CONTAINER_RUN, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage)
@@ -7493,7 +7526,7 @@ fn run_one_skill(
     if let Err(e) = collect_skill_result(root, &run_dir, artifact, secs) {
       let why = format!("declared artifact: {e}");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      finish_harness_failure(&spinner, failure::reason::RESULT_MISSING, &detail, &run_dir);
+      finish_harness_failure(&spinner, failure::reason::RESULT_MISSING, &detail, &run_dir, skill.harness);
       return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
         .with_usage(usage)
@@ -7512,7 +7545,7 @@ fn run_one_skill(
         Err(error) => {
           let why = format!("could not read collected result '{}': {error}", skill.result);
           let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-          finish_harness_failure(&spinner, failure::reason::RESULT_MISSING, &detail, &run_dir);
+          finish_harness_failure(&spinner, failure::reason::RESULT_MISSING, &detail, &run_dir, skill.harness);
           return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
             .with_fail_detail(&why)
             .with_usage(usage)
@@ -7587,7 +7620,7 @@ fn run_one_skill(
     }
     Err(e) => {
       let detail = skill_fail_detail(&e, skill.harness, Some(&run_dir_str), Some(&log));
-      finish_harness_failure(&spinner, failure::reason::RESULT_MISSING, &detail, &run_dir);
+      finish_harness_failure(&spinner, failure::reason::RESULT_MISSING, &detail, &run_dir, skill.harness);
       SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&e)
         .with_usage(usage)
@@ -7649,7 +7682,7 @@ fn persist_run_artifacts(
   }
 
   let usage = run_usage(run_dir, harness, accounting_complete);
-  if harness == config::Harness::Claude {
+  if harness.agent() == config::Harness::Claude {
     let root = run_dir.join(runtime::CLAUDE_AUTH_REL).join(".claude/projects");
     let paths = daemon::usage::jsonl_files(&root);
     let (names, transcripts) = match paths {
@@ -9300,7 +9333,8 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
         base_only = true;
         continue;
       }
-      match config::Harness::parse(n) {
+      // `claude-headless` names the same image as `claude`.
+      match config::Harness::parse(n).map(config::Harness::agent) {
         Some(h) if selected.contains(&h) => {}
         Some(h) => selected.push(h),
         None => {
@@ -11344,6 +11378,9 @@ fn print_help_config() {
     add:                    #   key must match the skill directory name
       harness: opencode     #     direct run — OR use invocations: for a matrix (below)
                             #     harnesses: opencode | claude | codex | grok | cursor
+                            #     headless (no terminal recording; a live transcript instead,
+                            #     same image, login, and token accounting as the TUI):
+                            #     claude-headless | codex-headless
       model: openai/...     #     optional; the model the harness passes to the tool
       effort: high        #     optional; reasoning effort (claude/grok: low..max, codex:
                           #       minimal..xhigh, cursor: low..high as --model slug suffixes). With
@@ -11608,7 +11645,8 @@ fn print_help_defs() {
   print!(
     r#"  steps:                   a block map; each step runs on its own agent, in its own clone
     <id>:
-      agent:               harness: claude|codex|cursor|grok|opencode; optional model:, effort:
+      agent:               harness: claude|codex|cursor|grok|opencode, or claude-headless|codex-headless;
+                           optional model:, effort:
       prompt: |            intent only — scsh appends the machine I/O contract
       inputs:              env vars for the step:  NAME: params.X  or  NAME: stepid.field
       output:              typed result fields the step must write to $SCSH_RESULT (JSON)
@@ -11876,6 +11914,29 @@ mod tests {
     assert!(!harness_came_up_logged_out(config::Harness::Claude, &limited));
     assert!(auth_rejected_why(false).contains("refresh the login on the host"));
     assert!(auth_rejected_why(true).contains("claude setup-token"));
+  }
+
+  #[test]
+  fn a_headless_claude_run_ending_on_a_refused_login_is_an_auth_rejection() {
+    // `claude -p` has no status line: the refusal arrives as its error result, and the
+    // classifier reads it from the same failure text `run_screen_text` builds.
+    let stream = r#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-4-8"}
+{"type":"result","subtype":"success","is_error":true,"num_turns":1,"result":"Failed to authenticate: OAuth session expired and could not be refreshed"}
+"#;
+    let sample = transcript::parse(config::Harness::ClaudeHeadless, stream).failure_text();
+    assert!(harness_came_up_logged_out(config::Harness::ClaudeHeadless, &sample), "{sample}");
+    // The print-mode wording is Claude's own; the TUI route and other agents keep their verdict.
+    assert!(!harness_came_up_logged_out(config::Harness::Claude, &sample));
+    for harness in [config::Harness::CodexHeadless, config::Harness::Codex] {
+      assert!(!harness_came_up_logged_out(harness, &sample), "{} keeps its real verdict", harness.as_str());
+    }
+    // A usage limit keeps its own verdict here too.
+    let limited = format!("{sample}\nYou've hit your session limit \u{b7} resets 8:50am");
+    assert!(!harness_came_up_logged_out(config::Harness::ClaudeHeadless, &limited));
+    // A successful run's text never reads as a refusal.
+    let ok = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"Done."}"#;
+    let sample = transcript::parse(config::Harness::ClaudeHeadless, ok).failure_text();
+    assert!(!harness_came_up_logged_out(config::Harness::ClaudeHeadless, &sample));
   }
 
   #[test]

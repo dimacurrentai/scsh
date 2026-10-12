@@ -16,8 +16,9 @@ use std::collections::BTreeMap;
 pub struct Config {
   /// One or more scoped skills, in file order. scsh runs them all in parallel.
   pub skills: Vec<Skill>,
-  /// PTY geometry for harness runs; every harness runs (and is asciinema-recorded)
-  /// inside a pseudo-terminal of this size. Optional top-level `terminal:` block.
+  /// PTY geometry for recorded harness runs: every TUI harness runs (and is
+  /// asciinema-recorded) inside a pseudo-terminal of this size; headless types have no
+  /// terminal. Optional top-level `terminal:` block.
   pub terminal: Terminal,
 }
 
@@ -398,30 +399,35 @@ pub enum EnvRule {
 /// The built-in harness that runs a skill inside the container: `opencode`, `claude`
 /// (Claude Code), `codex` (OpenAI Codex CLI — the native harness for GPT models),
 /// `grok` (xAI Grok CLI — the native harness for Grok models), or `cursor` (Cursor
-/// Agent CLI — `cursor agent` headless).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Agent CLI).
+///
+/// `claude-headless` and `codex-headless` run the same CLI, image, credentials, and native
+/// session accounting as their agent, but in its non-interactive JSON-streaming mode: no
+/// tmux, no asciinema, and a structured transcript in the session browser instead of a
+/// terminal recording. [`Harness::agent`] maps each to its agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Harness {
   Opencode,
   Claude,
   Codex,
   Grok,
   Cursor,
+  ClaudeHeadless,
+  CodexHeadless,
 }
 
 impl Harness {
-  /// Every harness, in UI listing order (Setup tab, image tables, doctor preflight).
+  /// Every agent (one image, one credential set, one Setup card each), in UI listing order
+  /// (Setup tab, image tables, doctor preflight). Headless invocation types are not listed:
+  /// they share their agent's image and login.
   pub const ALL: [Harness; 5] = [Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor, Harness::Opencode];
+
+  /// The headless invocation types, each sharing its [`Harness::agent`]'s image and login.
+  pub const HEADLESS: [Harness; 2] = [Harness::ClaudeHeadless, Harness::CodexHeadless];
 
   /// Parse a `harness:` value; `None` for an unknown harness.
   pub fn parse(s: &str) -> Option<Harness> {
-    match s {
-      "opencode" => Some(Harness::Opencode),
-      "claude" => Some(Harness::Claude),
-      "codex" => Some(Harness::Codex),
-      "grok" => Some(Harness::Grok),
-      "cursor" => Some(Harness::Cursor),
-      _ => None,
-    }
+    Harness::ALL.into_iter().chain(Harness::HEADLESS).find(|h| h.as_str() == s)
   }
 
   /// The canonical name, as written in `.scsh.yml`.
@@ -432,6 +438,8 @@ impl Harness {
       Harness::Codex => "codex",
       Harness::Grok => "grok",
       Harness::Cursor => "cursor",
+      Harness::ClaudeHeadless => "claude-headless",
+      Harness::CodexHeadless => "codex-headless",
     }
   }
 
@@ -443,23 +451,39 @@ impl Harness {
       Harness::Codex => "Codex",
       Harness::Grok => "Grok",
       Harness::Cursor => "Cursor",
+      Harness::ClaudeHeadless => "Claude (headless)",
+      Harness::CodexHeadless => "Codex (headless)",
     }
+  }
+
+  /// The agent this invocation type runs: itself for an interactive harness, the
+  /// interactive sibling for a headless one. Images, credentials, quota, and native
+  /// usage accounting are all keyed by the agent, which is what keeps a headless run's
+  /// token counts directly comparable with the same agent's TUI run.
+  pub fn agent(self) -> Harness {
+    match self {
+      Harness::ClaudeHeadless => Harness::Claude,
+      Harness::CodexHeadless => Harness::Codex,
+      other => other,
+    }
+  }
+
+  /// Whether this invocation type runs its CLI's non-interactive JSON-streaming mode.
+  pub fn is_headless(self) -> bool {
+    self.agent() != self
   }
 
   /// Every known harness name, for error messages.
   pub fn known() -> &'static [&'static str] {
-    &["opencode", "claude", "codex", "grok", "cursor"]
+    &["opencode", "claude", "codex", "grok", "cursor", "claude-headless", "codex-headless"]
   }
 
   /// Whether this harness runs as an interactive TUI recorded under tmux + asciinema (rather
-  /// than a headless print/exec mode). For a TUI harness a missing result file can be a transient
-  /// external interruption (a stray signal / teardown killing the pane) worth one retry, not only
-  /// a deterministic skill bug.
+  /// than a headless JSON-streaming mode). For a TUI harness a missing result file can be a
+  /// transient external interruption (a stray signal / teardown killing the pane) worth one
+  /// retry, not only a deterministic skill bug.
   pub fn is_tui(self) -> bool {
-    // Every harness supports a real interactive TUI recorded via tmux + asciinema: claude/codex/
-    // cursor, plus opencode (`opencode --prompt`) and grok (`grok "<prompt>"`, its default Build
-    // TUI).
-    matches!(self, Harness::Claude | Harness::Codex | Harness::Cursor | Harness::Opencode | Harness::Grok)
+    !self.is_headless()
   }
 
   /// Seconds of cast inactivity before a run is killed when YAML omits `inactivity_timeout:`.
@@ -477,17 +501,17 @@ impl Harness {
   /// installed skill inside that container. Harnesses without native skill discovery get a
   /// neutral `tmp/.scsh-skills/` home that the prompt references by path.
   pub fn global_skills_rel(self) -> &'static str {
-    match self {
+    match self.agent() {
       Harness::Claude => "tmp/.claude-auth/.claude/skills",
       Harness::Cursor => "tmp/.cursor/skills",
-      Harness::Opencode | Harness::Codex | Harness::Grok => RUN_SKILLS_REL,
+      _ => RUN_SKILLS_REL,
     }
   }
 
   /// Whether this harness's CLI natively discovers skills in [`Self::global_skills_rel`]
   /// (its user-level skills directory), making them invocable by name (`/<name>`).
   pub fn resolves_skills_by_name(self) -> bool {
-    matches!(self, Harness::Claude | Harness::Cursor)
+    matches!(self.agent(), Harness::Claude | Harness::Cursor)
   }
 
   pub fn supports_effort(self) -> bool {
@@ -496,12 +520,12 @@ impl Harness {
 
   /// The effort levels this harness's CLI accepts (empty = no effort knob).
   pub fn effort_levels(self) -> &'static [&'static str] {
-    match self {
+    match self.agent() {
       Harness::Codex => &["minimal", "low", "medium", "high", "xhigh"],
       Harness::Grok => &["low", "medium", "high", "xhigh", "max"],
       Harness::Cursor => &["low", "medium", "high"],
       Harness::Claude => &["low", "medium", "high", "xhigh", "max"],
-      Harness::Opencode => &[],
+      _ => &[],
     }
   }
 }
@@ -2780,6 +2804,15 @@ skills:
     // opencode and grok now run as recorded interactive TUIs too.
     assert!(Harness::Opencode.is_tui());
     assert!(Harness::Grok.is_tui());
+    // A headless type is its agent's CLI without a terminal: same agent, never a TUI.
+    for (headless, agent) in [(Harness::ClaudeHeadless, Harness::Claude), (Harness::CodexHeadless, Harness::Codex)] {
+      assert!(headless.is_headless() && !headless.is_tui(), "{headless:?}");
+      assert_eq!(headless.agent(), agent);
+      assert!(!agent.is_headless() && agent.agent() == agent, "{agent:?}");
+      assert_eq!(Harness::parse(headless.as_str()), Some(headless));
+    }
+    assert!(Harness::ALL.iter().all(|h| !h.is_headless()), "ALL lists agents only");
+    assert!(Harness::HEADLESS.iter().all(|h| h.is_headless()));
   }
 
   #[test]

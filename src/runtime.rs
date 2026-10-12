@@ -204,8 +204,8 @@ pub fn base_image_fingerprint(dockerfile: &str, uid: u32, gid: u32, tz: &str) ->
 pub fn image_tag(harness: Harness) -> String {
   match harness {
     Harness::Opencode => "scsh-opencode:latest".to_string(),
-    Harness::Claude => "scsh-claude:latest".to_string(),
-    Harness::Codex => "scsh-codex:latest".to_string(),
+    Harness::Claude | Harness::ClaudeHeadless => "scsh-claude:latest".to_string(),
+    Harness::Codex | Harness::CodexHeadless => "scsh-codex:latest".to_string(),
     Harness::Grok => "scsh-grok:latest".to_string(),
     Harness::Cursor => "scsh-cursor:latest".to_string(),
   }
@@ -215,8 +215,8 @@ pub fn image_tag(harness: Harness) -> String {
 pub fn image_target(harness: Harness) -> &'static str {
   match harness {
     Harness::Opencode => "scsh-opencode",
-    Harness::Claude => "scsh-claude",
-    Harness::Codex => "scsh-codex",
+    Harness::Claude | Harness::ClaudeHeadless => "scsh-claude",
+    Harness::Codex | Harness::CodexHeadless => "scsh-codex",
     Harness::Grok => "scsh-grok",
     Harness::Cursor => "scsh-cursor",
   }
@@ -453,6 +453,12 @@ pub const RUN_LOG_REL: &str = "tmp/scsh-run.log";
 /// so the file can be downloaded and replayed while the skill is still running.
 pub const RUN_CAST_REL: &str = "tmp/scsh-run.log.cast";
 
+/// Per-run native event stream of a headless harness (one JSON object per line, exactly as
+/// the CLI printed it), RELATIVE to the repo: `${SCSH_RUN_LOG}.events.jsonl` in-container.
+/// It is the headless counterpart of [`RUN_CAST_REL`]: the watchdog's heartbeat while the
+/// run is alive and the source of the session browser's transcript afterwards.
+pub const RUN_EVENTS_REL: &str = "tmp/scsh-run.log.events.jsonl";
+
 /// The env var (set in the generated image) that carries the in-container log
 /// path the harness command tees its output to.
 pub const RUN_LOG_VAR: &str = "SCSH_RUN_LOG";
@@ -519,13 +525,15 @@ pub fn harness_container_env(harness: Harness) -> Vec<(String, String)> {
 fn harness_container_env_verbose(harness: Harness, verbose: bool) -> Vec<(String, String)> {
   match harness {
     Harness::Opencode => vec![("OPENCODE_CLIENT".to_string(), "scsh".to_string())],
-    Harness::Claude if verbose => {
+    Harness::Claude | Harness::ClaudeHeadless if verbose => {
       vec![("DEBUG".to_string(), "1".to_string()), ("CLAUDE_CODE_DEBUG_LOG_LEVEL".to_string(), "verbose".to_string())]
     }
-    Harness::Claude => Vec::new(),
+    Harness::Claude | Harness::ClaudeHeadless => Vec::new(),
     // Codex is a Rust CLI; RUST_LOG enables its tracing output (stderr → the teed run log).
-    Harness::Codex if verbose => vec![("RUST_LOG".to_string(), "codex_core=info,codex_exec=info".to_string())],
-    Harness::Codex => Vec::new(),
+    Harness::Codex | Harness::CodexHeadless if verbose => {
+      vec![("RUST_LOG".to_string(), "codex_core=info,codex_exec=info".to_string())]
+    }
+    Harness::Codex | Harness::CodexHeadless => Vec::new(),
     // Grok's verbosity comes from --debug/--debug-file flags; no env needed.
     Harness::Grok => Vec::new(),
     // Point cursor-agent at forwarded config + auth under the repo's gitignored tmp/.
@@ -729,6 +737,30 @@ pub fn harness_command_with_options(
       tui.push_str(&shell_quote(&prompt));
       wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, TuiSubmit::Auto, result, term)
     }
+    Harness::ClaudeHeadless => {
+      // Print mode with the native event stream: the same argument vector as the TUI plus
+      // `-p --output-format stream-json --verbose`. Claude writes the same session JSONL either
+      // way, so accounting reads the same files as an interactive run.
+      let argv = claude_argv_for(harness, model, effort, &prompt);
+      let wrapped = wrap_headless_shell(harness, skill_source, model, &shell_join(&argv));
+      format!(r#"claude --version > "${{SCSH_RUN_LOG}}.cli-version"; {wrapped}"#)
+    }
+    Harness::CodexHeadless => {
+      // `codex exec --json`: one JSON event per line on stdout. Same sandbox bypass, model,
+      // and effort flags as the TUI, and the same rollout files under CODEX_HOME/sessions.
+      let mut cli = String::from("codex exec --json --dangerously-bypass-approvals-and-sandbox");
+      if let Some(m) = model {
+        cli.push_str(" -m ");
+        cli.push_str(&shell_quote(m));
+      }
+      if let Some(e) = effort {
+        cli.push_str(" -c ");
+        cli.push_str(&shell_quote(&format!("model_reasoning_effort={e}")));
+      }
+      cli.push_str(" -- ");
+      cli.push_str(&shell_quote(&prompt));
+      wrap_headless_shell(harness, skill_source, model, &cli)
+    }
     Harness::Cursor => {
       let model = Some(model.unwrap_or(crate::config::CURSOR_DEFAULT_MODEL));
       // Full interactive TUI (no -p): the recording shows the real cursor-agent screen.
@@ -783,6 +815,16 @@ pub fn claude_argv(model: Option<&str>, effort: Option<&str>, prompt: &str) -> V
   }
   args.extend(["--".into(), prompt.into()]);
   args
+}
+
+/// [`claude_argv`] for either Claude interface: `claude-headless` adds print mode with the
+/// native event stream (`-p --output-format stream-json --verbose`), nothing else.
+pub fn claude_argv_for(harness: Harness, model: Option<&str>, effort: Option<&str>, prompt: &str) -> Vec<String> {
+  let mut argv = claude_argv(model, effort, prompt);
+  if harness.is_headless() {
+    argv.splice(1..1, ["-p", "--output-format", "stream-json", "--verbose"].map(String::from));
+  }
+  argv
 }
 
 /// How to politely close a harness TUI once the skill's result file exists. The value is
@@ -864,6 +906,24 @@ exit "$(cat "${{{log_var}}}.recorder-exit")""#,
     submit = submit.as_arg(),
     result_q = shell_quote(result),
     tui_q = shell_quote(tui_cmd),
+  )
+}
+
+/// Run a headless harness CLI without a terminal: its stdout (the native JSON event stream)
+/// goes to `${SCSH_RUN_LOG}.events.jsonl` ([`RUN_EVENTS_REL`]); stderr and scsh's own
+/// banner are teed to the run log, as for a TUI run. stdin is `/dev/null` (`codex exec`
+/// otherwise waits for piped input). The CLI's exit status is written to `.exit` and becomes
+/// the container's exit status: a headless CLI ends on its own when its task is done.
+fn wrap_headless_shell(harness: Harness, skill_source: &str, model: Option<&str>, cli: &str) -> String {
+  let model_label = model.unwrap_or("(harness default)");
+  format!(
+    r#"{{ mkdir -p "$(dirname "${{{log_var}}}")";
+echo "scsh: harness={} skill={skill_source} model={model_label} headless log=${{{log_var}}} events=${{{log_var}}}.events.jsonl" >&2;
+{cli} < /dev/null > "${{{log_var}}}.events.jsonl"; rc=$?;
+printf '%s\n' "$rc" > "${{{log_var}}}.exit"; }} 2>&1 | tee "${{{log_var}}}";
+exit "$(cat "${{{log_var}}}.exit")""#,
+    harness.as_str(),
+    log_var = RUN_LOG_VAR,
   )
 }
 
@@ -1700,8 +1760,8 @@ pub fn claude_container_auth_ready() -> bool {
 pub fn auth_forwarding_enabled(harness: Harness) -> bool {
   let env = match harness {
     Harness::Opencode => "SCSH_NO_OPENCODE_AUTH",
-    Harness::Claude => "SCSH_NO_CLAUDE_AUTH",
-    Harness::Codex => "SCSH_NO_CODEX_AUTH",
+    Harness::Claude | Harness::ClaudeHeadless => "SCSH_NO_CLAUDE_AUTH",
+    Harness::Codex | Harness::CodexHeadless => "SCSH_NO_CODEX_AUTH",
     Harness::Grok => "SCSH_NO_GROK_AUTH",
     Harness::Cursor => "SCSH_NO_CURSOR_AUTH",
   };
@@ -1740,8 +1800,8 @@ pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
   if !auth_forwarding_enabled(harness) {
     let env = match harness {
       Harness::Opencode => "SCSH_NO_OPENCODE_AUTH",
-      Harness::Claude => "SCSH_NO_CLAUDE_AUTH",
-      Harness::Codex => "SCSH_NO_CODEX_AUTH",
+      Harness::Claude | Harness::ClaudeHeadless => "SCSH_NO_CLAUDE_AUTH",
+      Harness::Codex | Harness::CodexHeadless => "SCSH_NO_CODEX_AUTH",
       Harness::Grok => "SCSH_NO_GROK_AUTH",
       Harness::Cursor => "SCSH_NO_CURSOR_AUTH",
     };
@@ -1765,7 +1825,7 @@ pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
         }
       }
     }
-    Harness::Claude => {
+    Harness::Claude | Harness::ClaudeHeadless => {
       if claude_oauth_token().is_some() {
         LoginPreflight { status: "found", label: "Found via CLAUDE_CODE_OAUTH_TOKEN".into(), hint: String::new() }
       } else if let Some(path) = claude_credentials_file_on_host() {
@@ -1780,7 +1840,7 @@ pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
         }
       }
     }
-    Harness::Codex => {
+    Harness::Codex | Harness::CodexHeadless => {
       if let Some(path) = codex_auth_file_on_host() {
         LoginPreflight { status: "found", label: found_via_file_label(&path), hint: String::new() }
       } else if std::env::var(OPENAI_API_KEY_ENV).map(|v| !v.is_empty()).unwrap_or(false) {
@@ -1839,7 +1899,7 @@ pub fn check_harness_host(harness: Harness) -> Result<(), String> {
         Err("opencode harness unavailable (auth not found at ~/.local/share/opencode/auth.json — run `opencode auth login`)".into())
       }
     }
-    Harness::Claude => {
+    Harness::Claude | Harness::ClaudeHeadless => {
       if claude_container_auth_ready() {
         Ok(())
       } else {
@@ -1850,7 +1910,7 @@ pub fn check_harness_host(harness: Harness) -> Result<(), String> {
         )
       }
     }
-    Harness::Codex => {
+    Harness::Codex | Harness::CodexHeadless => {
       if codex_container_auth_ready() {
         Ok(())
       } else {
@@ -3339,6 +3399,28 @@ TAG
   }
 
   #[test]
+  fn headless_types_stream_native_events_without_a_recorder() {
+    let term = crate::config::Terminal::default();
+    let delivery = crate::config::SkillDelivery::Repo;
+    for (h, cli) in [
+      (Harness::ClaudeHeadless, "claude -p --output-format stream-json --verbose --permission-mode bypassPermissions"),
+      (Harness::CodexHeadless, "codex exec --json --dangerously-bypass-approvals-and-sandbox"),
+    ] {
+      let cmd = harness_command(h, Some("m"), Some("high"), "add", "tmp/add.json", term, &delivery);
+      assert!(cmd.contains(cli), "{h:?}: {cmd}");
+      assert!(!cmd.contains("scsh-tui-record") && !cmd.contains(".cast"), "{h:?} records no terminal: {cmd}");
+      assert!(cmd.contains(r#"< /dev/null > "${SCSH_RUN_LOG}.events.jsonl""#), "{h:?}: {cmd}");
+      assert!(cmd.contains(r#"> "${SCSH_RUN_LOG}.exit""#) && cmd.contains(r#"tee "${SCSH_RUN_LOG}""#), "{h:?}: {cmd}");
+      assert_eq!(image_tag(h), image_tag(h.agent()), "{h:?} shares its agent's image");
+    }
+    // The headless Claude argv is the TUI's plus print mode, nothing else.
+    let tui = claude_argv_for(Harness::Claude, Some("m"), Some("high"), "p");
+    let mut head = claude_argv_for(Harness::ClaudeHeadless, Some("m"), Some("high"), "p");
+    head.drain(1..5);
+    assert_eq!(head, tui);
+  }
+
+  #[test]
   fn harness_command_builds_cursor_invocation() {
     let cmd = harness_command(
       Harness::Cursor,
@@ -3425,8 +3507,8 @@ TAG
 
   #[test]
   fn harness_recorded_at_configured_pty_size() {
-    // EVERY harness now records via scsh-tui-record with the PTY size as its first two args;
-    // the recording path is always ${SCSH_RUN_LOG}.cast.
+    // Every TUI harness records via scsh-tui-record with the PTY size as its first two args;
+    // the recording path is always ${SCSH_RUN_LOG}.cast. Headless types record nothing.
     let term = crate::config::Terminal { cols: 120, rows: 30 };
     for h in [Harness::Claude, Harness::Codex, Harness::Cursor, Harness::Opencode, Harness::Grok] {
       let cmd = harness_command(h, Some("m"), None, "add", "tmp/add.json", term, &crate::config::SkillDelivery::Repo);
