@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use super::castprobe::{cast_probe_snapshot, probe_growth_messages, CastProbe};
+use super::castprobe::{
+  cast_probe_snapshot, probe_growth_messages, transcript_growth_messages, transcript_probe_snapshot, CastProbe,
+};
 use super::db::StoreDb;
 use super::html;
 use super::jsonio::{field_bool, field_num, field_order, field_str, tick_json, tick_json_light};
@@ -160,6 +162,7 @@ impl Server {
     let mut last_wall = now_unix_secs();
     // Per-proc incremental cast probes (parse offsets cached across ticks) — see `castprobe`.
     let mut cast_probes: std::collections::HashMap<(String, usize), CastProbe> = std::collections::HashMap::new();
+    let mut transcript_sizes: std::collections::HashMap<(String, usize), u64> = std::collections::HashMap::new();
     // Zombie-container reaper state: the sweep runs on its own thread (container kills
     // sleep a second each), one pass at a time, tracking each unclaimed container's
     // consecutive-sweep count.
@@ -279,13 +282,15 @@ impl Server {
         // The snapshot of casts to probe is taken under the store lock; the file stats and
         // tail-parses below run with the lock released, and only when someone is listening.
         let probe_casts = self.ws_hub.client_count() > 0;
-        let (json, casts, changed_sessions) = {
+        let (json, casts, transcripts, changed_sessions) = {
           let mut store = lock_store(&self.store);
           let changed_sessions = sweep_session_changes(&mut store, now);
           include_sessions |= !changed_sessions.is_empty();
           store.reconcile(now);
           let json = if include_sessions { tick_json(&store, now) } else { tick_json_light(&store, now) };
-          (json, if probe_casts { cast_probe_snapshot(&store) } else { Vec::new() }, changed_sessions)
+          let casts = if probe_casts { cast_probe_snapshot(&store) } else { Vec::new() };
+          let transcripts = if probe_casts { transcript_probe_snapshot(&store) } else { Vec::new() };
+          (json, casts, transcripts, changed_sessions)
         };
         if !changed_sessions.is_empty() {
           self.dirty.store(true, Ordering::Relaxed);
@@ -294,6 +299,9 @@ impl Server {
         self.ws_hub.broadcast_tick(&json);
         if probe_casts {
           for ((session, proc_index), msg) in probe_growth_messages(&casts, &mut cast_probes) {
+            self.ws_hub.broadcast_growth(&session, proc_index, &msg);
+          }
+          for ((session, proc_index), msg) in transcript_growth_messages(&transcripts, &mut transcript_sizes) {
             self.ws_hub.broadcast_growth(&session, proc_index, &msg);
           }
         }
@@ -614,6 +622,9 @@ fn handle_connection(
         disposition.as_deref(),
         close,
       )?;
+    } else if req.method == "GET" && req.path.starts_with("/transcript/") {
+      let (status, body, content_type, disposition) = transcript_response(&req.path, store, db);
+      write_download_response(&mut stream, status, &body, content_type, disposition.as_deref(), close)?;
     } else if req.method == "GET" && req.path.starts_with("/diff/") {
       let (status, body, disposition) = diff_response(&req.path, store, db);
       write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref(), close)?;
@@ -712,6 +723,54 @@ fn cast_response(
     .any(|kv| kv == "dl=1")
     .then(|| format!("attachment; filename=\"scsh-{session_id}-p{proc_index}.cast\""));
   (200, body, disposition)
+}
+
+/// A headless proc's transcript source: `(harness, event-stream path, still running)`.
+/// Falls back to the archived row once the session has left the in-memory working set.
+fn proc_transcript_source(
+  store: &Arc<Mutex<Store>>, db: Option<&StoreDb>, session_id: &str, proc_index: usize,
+) -> Option<(crate::config::Harness, String, bool)> {
+  let pick = |p: &ProcRecord| {
+    let harness = crate::config::Harness::parse(p.harness.as_deref()?)?;
+    Some((harness, p.transcript_path.clone()?, matches!(p.status, ProcStatus::Running | ProcStatus::Waiting)))
+  };
+  {
+    let store = lock_store(store);
+    if let Some(s) = store.sessions.get(session_id) {
+      return s.procs.iter().find(|p| p.index == proc_index).and_then(pick);
+    }
+  }
+  archived_session(db, session_id)?.procs.iter().find(|p| p.index == proc_index).and_then(pick)
+}
+
+/// `GET /transcript/<session>/<proc>` — a headless run's transcript as a server-rendered HTML
+/// fragment (toolbar + entry list), read from its event stream at request time so a live run
+/// renders everything streamed so far. `?raw=1` downloads the native event stream itself.
+///
+/// Every `transcript_growth` notice makes the page refetch this, and each fetch rereads,
+/// reparses, and rerenders the whole stream, so a run's total cost grows quadratically with
+/// its length. That is deliberate for now: headless runs stream at most a few hundred events,
+/// the client coalesces reloads, and growth is sampled once per daemon tick. If transcripts
+/// grow large, serve only the entries after a client-supplied offset instead.
+fn transcript_response(
+  path_and_query: &str, store: &Arc<Mutex<Store>>, db: Option<&StoreDb>,
+) -> (u16, String, &'static str, Option<String>) {
+  const HTML: &str = "text/html; charset=utf-8";
+  let (path, query) = path_and_query.split_once('?').unwrap_or((path_and_query, ""));
+  let Some((session_id, proc_index)) = parse_cast_route(path.strip_prefix("/transcript/").unwrap_or("")) else {
+    return (404, "not found".into(), HTML, None);
+  };
+  let Some((harness, events_path, running)) = proc_transcript_source(store, db, session_id, proc_index) else {
+    return (404, "no transcript for this proc".into(), HTML, None);
+  };
+  // A missing file is a run that has not printed yet (or a pruned one): render it empty.
+  let stream = std::fs::read(&events_path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+  if query.split('&').any(|kv| kv == "raw=1") {
+    let disposition = format!("attachment; filename=\"scsh-{session_id}-p{proc_index}.events.jsonl\"");
+    return (200, stream, "application/x-ndjson; charset=utf-8", Some(disposition));
+  }
+  let raw = format!("/transcript/{session_id}/{proc_index}?raw=1");
+  (200, html::transcript_body_html(harness, &stream, running, Some(&raw)), HTML, None)
 }
 
 /// `GET /diff/<session>/<proc>[?dl=1]` — the packdiff-packed review page for the commits
@@ -888,6 +947,12 @@ fn gather_proc_export(proc: &ProcRecord, annotation_status: Option<&'static str>
     .filter(|p| std::path::Path::new(p).is_file())
     .and_then(|p| std::fs::read_to_string(p).ok());
   const NO_RECORDING: &str = "no recording — skipped/failed before output";
+  if let (Some(path), Some(harness)) =
+    (proc.transcript_path.as_deref(), proc.harness.as_deref().and_then(crate::config::Harness::parse))
+  {
+    let stream = std::fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    return html::CastExport::Transcript { html: html::transcript_body_html(harness, &stream, false, None), diff_html };
+  }
   let Some(cast_path) = proc.cast_path.as_deref() else {
     return html::CastExport::Note { text: NO_RECORDING.into(), diff_html };
   };
@@ -1592,6 +1657,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           container_name: None,
           container_runtime: None,
           cast_path: None,
+          transcript_path: None,
           diff_path: None,
           skill_source,
           route,
@@ -1695,6 +1761,18 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         {
           crate::annotate::suppress_automatic_annotation(std::path::Path::new(&path));
         }
+        true
+      } else {
+        false
+      }
+    }
+    "/api/v1/proc/transcript" => {
+      let session = field_str(&obj, "session").unwrap_or_default();
+      touch_session_liveness(&mut store, &session, now);
+      let proc_index = field_num(&obj, "proc").unwrap_or(0.0) as usize;
+      let path = field_str(&obj, "path").unwrap_or_default();
+      if let Some(p) = store.proc_mut(&session, proc_index) {
+        p.transcript_path = if path.is_empty() { None } else { Some(path) };
         true
       } else {
         false
@@ -2760,6 +2838,7 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: None,
       route: None,
@@ -3921,6 +4000,7 @@ mod tests {
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: None,
       route: None,
@@ -3997,6 +4077,7 @@ mod tests {
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: Some(source.into()),
       route: Some(route.into()),
@@ -4111,6 +4192,7 @@ mod tests {
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: Some("old-skill".into()),
       route: Some("opus".into()),
@@ -4273,6 +4355,7 @@ mod tests {
             container_name: None,
             container_runtime: None,
             cast_path: None,
+            transcript_path: None,
             diff_path: None,
             skill_source: None,
             route: None,
@@ -4403,6 +4486,7 @@ mod tests {
             container_name: None,
             container_runtime: None,
             cast_path: None,
+            transcript_path: None,
             diff_path: None,
             skill_source: None,
             route: None,
@@ -4467,6 +4551,7 @@ mod tests {
             container_name: None,
             container_runtime: None,
             cast_path: None,
+            transcript_path: None,
             diff_path: None,
             skill_source: None,
             route: None,
@@ -4594,6 +4679,7 @@ mod tests {
             container_name: None,
             container_runtime: None,
             cast_path: None,
+            transcript_path: None,
             diff_path: None,
             skill_source: None,
             route: None,
@@ -4664,6 +4750,7 @@ mod tests {
             container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
             container_runtime: None,
             cast_path: None,
+            transcript_path: None,
             diff_path: None,
             skill_source: None,
             route: None,
@@ -4750,6 +4837,7 @@ mod tests {
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: None,
       route: None,
@@ -4865,6 +4953,7 @@ mod tests {
             container_name: None,
             container_runtime: None,
             cast_path: None,
+            transcript_path: None,
             diff_path: None,
             skill_source: None,
             route: None,
@@ -4921,6 +5010,7 @@ mod tests {
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: None,
       route: None,
@@ -5151,6 +5241,7 @@ mod tests {
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: None,
       route: None,
@@ -5497,6 +5588,7 @@ mod tests {
             container_name: None,
             container_runtime: None,
             cast_path: None,
+            transcript_path: None,
             diff_path: None,
             skill_source: None,
             route: None,
@@ -5611,6 +5703,7 @@ mod tests {
             container_name: None,
             container_runtime: None,
             cast_path: Some(cast_path.to_string_lossy().into_owned()),
+            transcript_path: None,
             diff_path: None,
             skill_source: None,
             route: None,
@@ -5688,6 +5781,7 @@ mod tests {
       container_name: None,
       container_runtime: None,
       cast_path,
+      transcript_path: None,
       diff_path: None,
       skill_source: None,
       route: None,
@@ -6234,6 +6328,7 @@ mod tests {
               container_name: None,
               container_runtime: None,
               cast_path: None,
+              transcript_path: None,
               diff_path: None,
               skill_source: None,
               route: None,
@@ -7066,6 +7161,7 @@ mod tests {
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: None,
       route: None,

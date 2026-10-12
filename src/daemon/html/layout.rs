@@ -1110,6 +1110,59 @@ pub(crate) const PAGE_CSS: &str = r#"
     width: 100%; min-width: 0; max-width: 100%;
   }
   .cast-placeholder { padding: 1.5rem 1rem; color: var(--text-muted); }
+
+  /* ── headless transcript ── one row per agent message, tool call, and result. Tool and
+     thinking rows are collapsed <details>; the tag column keeps every row's text aligned. */
+  .transcript {
+    margin: 0.5rem 0; border: 1px solid var(--border); background: #0b0f14;
+    width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box;
+  }
+  .tx-loading { padding: 0.8rem 0.9rem; }
+  .tx-counts { font-size: 0.78rem; }
+  .tx-list { list-style: none; margin: 0; padding: 0.3rem 0; font-size: 0.85rem; }
+  .tx { padding: 0.28rem 0.7rem; border-left: 3px solid transparent; min-width: 0; }
+  .tx > details > summary, .tx:not(:has(> details)) {
+    display: grid; grid-template-columns: 5.2rem auto minmax(0, 1fr) auto; gap: 0.15rem 0.6rem;
+    align-items: baseline;
+  }
+  .tx > details > summary { cursor: pointer; list-style: none; }
+  .tx > details > summary::-webkit-details-marker { display: none; }
+  .tx-tag {
+    grid-column: 1; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-muted); white-space: nowrap;
+  }
+  .tx-line { grid-column: 2 / 4; min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+  .tx-name { grid-column: 2; justify-self: start; color: var(--cyan); white-space: nowrap; }
+  .tx--tool .tx-line { grid-column: 3; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tx-mark { grid-column: 4; font-weight: 700; }
+  .tx-prose {
+    grid-column: 2 / 5; min-width: 0; overflow-wrap: anywhere; line-height: 1.45;
+  }
+  .tx-prose > :first-child { margin-top: 0; }
+  .tx-prose > :last-child { margin-bottom: 0; }
+  .tx-prose pre { overflow-x: auto; }
+  .tx-plain, .tx-io pre {
+    white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.3rem 0 0.2rem 5.8rem;
+    color: var(--text-muted); font-size: 0.8rem; max-height: 24rem; overflow-y: auto;
+  }
+  .tx-io-label { margin: 0.35rem 0 0 5.8rem; font-size: 0.68rem; text-transform: uppercase; color: var(--text-muted); }
+  .tx--text { border-left-color: var(--cyan); }
+  .tx--text .tx-tag { color: var(--cyan); }
+  .tx--thinking .tx-tag { color: var(--purple); }
+  .tx--ok .tx-mark, .tx--result.tx--ok .tx-tag { color: var(--green); }
+  .tx--fail { border-left-color: var(--red); }
+  .tx--fail .tx-mark, .tx--fail .tx-tag { color: var(--red); }
+  .tx--running .tx-mark { color: var(--orange); }
+  .tx--result { border-top: 1px solid var(--border); margin-top: 0.2rem; padding-top: 0.45rem; }
+  .tx--result.tx--ok { border-left-color: var(--green); }
+  .tx--working .tx-tag, .tx--working .tx-line { color: var(--orange); }
+  .tx--empty { padding: 0.6rem 0.9rem; }
+  @media (max-width: 640px) {
+    .tx > details > summary, .tx:not(:has(> details)) { grid-template-columns: 4.2rem minmax(0, 1fr) auto; }
+    .tx-line, .tx-prose { grid-column: 2 / 4; }
+    .tx--tool .tx-line { grid-column: 2 / 3; grid-row: 2; }
+    .tx-plain, .tx-io pre, .tx-io-label { margin-left: 0; }
+  }
   .cast .ap-player { width: 100%; height: 100%; }
 
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; color: var(--text-muted); }

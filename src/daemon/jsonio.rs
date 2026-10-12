@@ -86,6 +86,17 @@ pub fn cast_growth_json(session: &str, proc: usize, duration: f64, running: bool
   )
 }
 
+/// One `transcript_growth` WebSocket message: a headless proc's event stream grew (or, with
+/// `running: false`, stopped). It carries no content: the page re-fetches the rendered
+/// transcript (see `castprobe`).
+pub fn transcript_growth_json(session: &str, proc: usize, running: bool) -> String {
+  format!(
+    "{{ \"type\": \"transcript_growth\", \"session\": {}, \"proc\": {proc}, \"running\": {} }}",
+    quote(session),
+    if running { "true" } else { "false" },
+  )
+}
+
 fn session_json(s: &Session, effective_workflow: bool, lifecycle: Option<SessionLifecycle>) -> String {
   let profile = match &s.profile {
     Some(p) => quote(p),
@@ -225,6 +236,7 @@ fn proc_json(p: &ProcRecord) -> String {
   let container = opt_str(&p.container_name);
   let container_runtime = opt_str(&p.container_runtime);
   let cast = opt_str(&p.cast_path);
+  let transcript = opt_str(&p.transcript_path);
   let diff = opt_str(&p.diff_path);
   let lines: Vec<String> =
     p.lines.iter().map(|l| format!("{{ \"at\": {}, \"text\": {} }}", format_f64_json(l.at), quote(&l.text))).collect();
@@ -242,7 +254,7 @@ fn proc_json(p: &ProcRecord) -> String {
   format!(
     "{{ \"index\": {}, \"previous_attempt\": {previous_attempt}, \"order\": {order}, \"label\": {},\"kind\": {}, \"status\": {}, \"skill_name\": {}, \
 \"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \"suspected_cause\": {suspected_cause}, \
-\"elapsed\": {}, \"container_name\": {}, \"container_runtime\": {}, \"cast_path\": {}, \"diff_path\": {}, \
+\"elapsed\": {}, \"container_name\": {}, \"container_runtime\": {}, \"cast_path\": {}, \"transcript_path\": {transcript}, \"diff_path\": {}, \
 \"skill_source\": {}, \"route\": {}, \"result_path\": {}, \"annotate_target\": {}, \"phase\": {}, \
 \"phase_until\": {phase_until}, \"usage\": {}, \"lines\": [{}] }}",
     p.index,
@@ -381,6 +393,7 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
   let container_name = field_str(obj, "container_name");
   let container_runtime = field_str(obj, "container_runtime");
   let cast_path = field_str(obj, "cast_path");
+  let transcript_path = field_str(obj, "transcript_path"); // absent on sessions persisted by older builds
   let diff_path = field_str(obj, "diff_path"); // absent on sessions persisted by older builds
   let skill_source = field_str(obj, "skill_source");
   let route = field_str(obj, "route");
@@ -408,6 +421,7 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
     container_name,
     container_runtime,
     cast_path,
+    transcript_path,
     diff_path,
     skill_source,
     route,
@@ -582,6 +596,7 @@ mod tests {
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: None,
       route: None,
@@ -628,6 +643,7 @@ mod tests {
         container_name: None,
         container_runtime: Some("container".into()),
         cast_path: Some("/tmp/scsh-daemon/casts/abcdef-p0.cast".into()),
+        transcript_path: None,
         diff_path: Some("/tmp/scsh-home/sessions/abcdef/diffs/add.html".into()),
         skill_source: None,
         route: None,
@@ -769,6 +785,15 @@ mod tests {
     assert!(json.contains("\"shutdown_in_secs\""));
     assert!(json.contains("\"scsh_version\""));
     assert!(json.contains(crate::version::pkg_version()));
+  }
+
+  #[test]
+  fn transcript_growth_json_shape_matches_ws_schema() {
+    assert_eq!(
+      transcript_growth_json("abcdef", 2, true),
+      r#"{ "type": "transcript_growth", "session": "abcdef", "proc": 2, "running": true }"#
+    );
+    assert!(transcript_growth_json("a\"b", 0, false).contains(r#""session": "a\"b""#));
   }
 
   #[test]

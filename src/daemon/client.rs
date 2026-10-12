@@ -285,6 +285,20 @@ impl Client {
     }
   }
 
+  /// Tell the daemon where a headless proc's native event stream lives on the host: the live
+  /// run-dir file while the container runs, then the durable copy after the skill ends.
+  pub fn proc_transcript(&self, proc_index: usize, path: &str) {
+    let body = format!(
+      "{{ \"session\": {}, \"proc\": {}, \"path\": {} }}",
+      quote(&self.inner.session_id),
+      proc_index,
+      quote(path)
+    );
+    if !self.post_sync_after_flush("/api/v1/proc/transcript", &body) {
+      log_post_failure("/api/v1/proc/transcript", Some(proc_index));
+    }
+  }
+
   /// Tell the daemon where the packed commits-diff page for this step lives on the host
   /// (the packdiff HTML under `$SCSH_HOME/sessions/<session>/diffs/`). Posted after the
   /// run integrates the step's commits — i.e. after proc/finish — so it must be

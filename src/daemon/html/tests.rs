@@ -37,6 +37,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
         container_name: None,
         container_runtime: None,
         cast_path: Some("/tmp/x.cast".into()),
+        transcript_path: None,
         diff_path: None,
         skill_source: None,
         route: None,
@@ -143,6 +144,53 @@ const originalAttemptLinkHtml = () => '', procMetaHtml = () => '';
 "#,
         session = crate::daemon::jsonio::session_json_store(session),
         expected = crate::json::quote(&expected),
+      ));
+    }
+  }
+  let output = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
+  assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// `function name(...)` from the live client, whether written on one line or as a block.
+fn client_js_function(source: &str, name: &str) -> String {
+  let start = source.find(&format!("function {name}(")).unwrap_or_else(|| panic!("client js has no {name}"));
+  let line_end = source[start..].find('\n').unwrap() + start;
+  if source[start..line_end].trim_end().ends_with('}') {
+    return source[start..=line_end].to_string();
+  }
+  let end = source[start..].find("\n}\n").unwrap() + start + 3;
+  source[start..end].to_string()
+}
+
+#[test]
+fn transcript_box_matches_the_live_client() {
+  if crate::runtime::which("node").is_none() {
+    return;
+  }
+  let source = live_client_js();
+  let mut script = String::new();
+  for name in ["esc", "hasTranscript", "transcriptEmbedHtml"] {
+    script.push_str(&client_js_function(&source, name));
+  }
+  script.push_str("const SESSION_ID = 'castab';\n");
+  for status in [ProcStatus::Running, ProcStatus::Ok, ProcStatus::Fail] {
+    for transcript in [None, Some("logs/claude-headless.log.events.jsonl")] {
+      let mut store = store_with_cast_proc(status);
+      let session = store.sessions.get_mut("castab").unwrap();
+      session.procs[0].transcript_path = transcript.map(str::to_string);
+      let proc = &session.procs[0];
+      let has = super::proc::proc_has_transcript(proc);
+      let expected = super::proc::transcript_embed_html("castab", proc);
+      script.push_str(&format!(
+        r#"
+{{
+  const p = ({session}).procs[0];
+  if (hasTranscript(p) !== {has}) throw new Error('hasTranscript parity');
+  if ({has} && transcriptEmbedHtml(p) !== {expected}) throw new Error('transcript box parity: ' + transcriptEmbedHtml(p));
+}}
+"#,
+        session = crate::daemon::jsonio::session_json_store(session),
+        expected = crate::json::quote(expected.trim_end()),
       ));
     }
   }
@@ -739,6 +787,7 @@ fn a_retried_route_is_visibly_a_retry() {
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: Some("add".into()),
       route: Some(route.into()),
@@ -1094,6 +1143,7 @@ fn job_page_renders_the_loop_convergence_table() {
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: Some("collect".into()),
       route: None,
@@ -1412,6 +1462,7 @@ fn session_proc_html_has_no_stray_backslashes() {
         container_name: None,
         container_runtime: None,
         cast_path: None,
+        transcript_path: None,
         diff_path: None,
         skill_source: None,
         route: None,
@@ -1475,6 +1526,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           container_name: None,
           container_runtime: None,
           cast_path: None,
+          transcript_path: None,
           diff_path: Some("/tmp/scsh-home/sessions/difjob/diffs/add-p0.html".into()),
           skill_source: None,
           route: None,
@@ -1504,6 +1556,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           container_name: None,
           container_runtime: None,
           cast_path: None,
+          transcript_path: None,
           diff_path: None,
           skill_source: None,
           route: None,
@@ -1711,6 +1764,7 @@ fn the_lede_counts_image_builds_separately_from_tasks() {
     container_name: None,
     container_runtime: None,
     cast_path: None,
+    transcript_path: None,
     diff_path: None,
     skill_source: None,
     route: None,
@@ -1974,6 +2028,7 @@ fn offline_export_embeds_commits_diff_when_present() {
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: Some("/tmp/diff.html".into()),
       skill_source: None,
       route: None,
@@ -2068,6 +2123,7 @@ fn offline_export_renders_unrecorded_procs_as_note_rows() {
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: None,
       route: None,
@@ -2135,6 +2191,7 @@ fn offline_export_includes_workflow_graph() {
         container_name: None,
         container_runtime: None,
         cast_path: None,
+        transcript_path: None,
         diff_path: None,
         skill_source: Some("add".into()),
         route: None,
@@ -2164,6 +2221,7 @@ fn offline_export_includes_workflow_graph() {
         container_name: None,
         container_runtime: None,
         cast_path: None,
+        transcript_path: None,
         diff_path: None,
         skill_source: Some("summarize".into()),
         route: None,
@@ -2377,6 +2435,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           container_name: None,
           container_runtime: None,
           cast_path: None,
+          transcript_path: None,
           diff_path: None,
           skill_source: Some("add".into()),
           route: Some("opencode".into()),
@@ -2406,6 +2465,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           container_name: None,
           container_runtime: None,
           cast_path: None,
+          transcript_path: None,
           diff_path: None,
           skill_source: Some("add".into()),
           route: Some("claude".into()),
@@ -2497,6 +2557,7 @@ fn session_page_renders_job_level_fleet_verdict_across_skills() {
     container_name: None,
     container_runtime: None,
     cast_path: None,
+    transcript_path: None,
     diff_path: None,
     skill_source: Some(source.into()),
     route: Some(route_name.into()),
@@ -2591,6 +2652,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           container_name: None,
           container_runtime: None,
           cast_path: None,
+          transcript_path: None,
           diff_path: None,
           skill_source: Some("add".into()),
           route: Some("waiting-route".into()),
@@ -2620,6 +2682,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           container_name: None,
           container_runtime: None,
           cast_path: None,
+          transcript_path: None,
           diff_path: None,
           skill_source: Some("add".into()),
           route: Some("done-route".into()),
@@ -2649,6 +2712,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           container_name: None,
           container_runtime: None,
           cast_path: None,
+          transcript_path: None,
           diff_path: None,
           skill_source: Some("add".into()),
           route: Some("running-route".into()),
@@ -2864,6 +2928,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
         container_name: None,
         container_runtime: None,
         cast_path: Some("/tmp/x.cast".into()),
+        transcript_path: None,
         diff_path: None,
         skill_source: None,
         route: None,
@@ -2957,6 +3022,7 @@ fn session_proc_html_has_no_autoscroll_checkbox() {
         container_name: None,
         container_runtime: None,
         cast_path: None,
+        transcript_path: None,
         diff_path: None,
         skill_source: None,
         route: None,
@@ -3025,6 +3091,7 @@ fn store_with_annotate_proc(status: ProcStatus) -> Store {
         container_name: None,
         container_runtime: None,
         cast_path: None,
+        transcript_path: None,
         diff_path: None,
         skill_source: None,
         route: None,
@@ -3684,6 +3751,7 @@ fn workflow_graph_renders_builtin_shapes() {
       container_name: None,
       container_runtime: None,
       cast_path: None,
+      transcript_path: None,
       diff_path: None,
       skill_source: Some(id.into()),
       route: None,
@@ -4357,6 +4425,7 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
         container_name: None,
         container_runtime: None,
         cast_path: None,
+        transcript_path: None,
         diff_path: None,
         skill_source: Some("add".into()),
         route: None,

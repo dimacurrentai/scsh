@@ -6045,6 +6045,7 @@ fn build_and_run(
         container_name: None,
         container_runtime: None,
         cast_path: None,
+        transcript_path: None,
         diff_path: None,
         skill_source: Some(skill.skill_source.clone()),
         route: fleet_route_name(skill).map(str::to_string),
@@ -7214,8 +7215,9 @@ fn run_one_skill(
     c.container_event(spinner.index(), "start", &name, &rt.name);
     // The bind-mounted cast grows on the host while the harness runs; registering it now
     // lets the session browser download/replay the recording mid-run.
-    // A headless run records no cast; its event stream is preserved with the logs.
-    if !headless {
+    if headless {
+      c.proc_transcript(spinner.index(), &run_dir.join(runtime::RUN_EVENTS_REL).to_string_lossy());
+    } else {
       c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
     }
   }
@@ -7279,6 +7281,12 @@ fn run_one_skill(
     };
   if let (Some(c), Some(durable)) = (&daemon_client, &durable_cast) {
     c.proc_cast(spinner.index(), durable);
+  }
+  // The persisted event stream outlives the run dir; repoint the transcript at it.
+  let durable_events = runtime::session_logs_dir(session_id)
+    .join(format!("{}.events.jsonl", cleanup::artifact_stem(&run_dir, &skill.name)));
+  if let (Some(c), true) = (&daemon_client, headless && durable_events.is_file()) {
+    c.proc_transcript(spinner.index(), &durable_events.to_string_lossy());
   }
   if preserve_error.is_none() {
     log = runtime::session_logs_dir(session_id)
