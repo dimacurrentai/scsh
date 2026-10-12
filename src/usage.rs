@@ -70,6 +70,7 @@ pub enum Harness {
   Codex,
   Cursor,
   Grok,
+  Cline,
 }
 
 impl Harness {
@@ -79,6 +80,7 @@ impl Harness {
       Harness::Codex => "codex",
       Harness::Cursor => "cursor",
       Harness::Grok => "grok",
+      Harness::Cline => "cline",
     }
   }
 
@@ -88,6 +90,7 @@ impl Harness {
       Harness::Codex => "codex_session_jsonl",
       Harness::Cursor => "cursor_hooks",
       Harness::Grok => "grok_session_jsonl",
+      Harness::Cline => "cline_session_json",
     }
   }
 }
@@ -148,6 +151,7 @@ impl Summary {
       "codex" => Harness::Codex,
       "cursor" => Harness::Cursor,
       "grok" => Harness::Grok,
+      "cline" => Harness::Cline,
       _ => return None,
     };
     if string(payload, "source") != Some(harness.source()) {
@@ -654,6 +658,113 @@ pub fn grok_session_summary(stream: &str) -> Summary {
     // The primary transcript omits child tool calls; do not present a partial count as exact.
     tool_calls: None,
   }
+}
+
+/// One Cline session: its `<id>.json` document and, when present, `<id>.messages.json`.
+#[derive(Debug, Clone, Default)]
+pub struct ClineSession {
+  pub session: String,
+  pub messages: Option<String>,
+}
+
+/// One Cline session. Tokens come from the session document's `aggregateUsage` when the CLI
+/// wrote it, otherwise from `usage`. Round trips and tool calls come from the conversation:
+/// one assistant message with `metrics` per model response, one `tool_use` block per call —
+/// the same two counts Claude reports, so the routes compare directly.
+/// A session that has not finished is incomplete.
+pub fn cline_session_summary(session: &ClineSession) -> Summary {
+  let Ok(root) = json::parse(&session.session) else { return unavailable(Harness::Cline) };
+  let (llm_round_trips, tool_calls) = match session.messages.as_deref().map(cline_conversation_counts) {
+    Some(Some((trips, tools))) => (Some(trips), Some(tools)),
+    _ => (None, None),
+  };
+  let usage = field(&root, "metadata").and_then(|meta| field(meta, "aggregateUsage").or_else(|| field(meta, "usage")));
+  // A turn still on its first response has no counters yet: incomplete, never zero.
+  let tokens = match usage {
+    Some(usage) => match cline_tokens(usage) {
+      Some(tokens) => Some(tokens),
+      None => return unavailable(Harness::Cline),
+    },
+    None => None,
+  };
+  Summary {
+    harness: Harness::Cline,
+    // A finished task is `completed`. The TUI rests at `idle` with the counters already
+    // final; `/quit` only happens after the host has accepted those counters.
+    complete: tokens.is_some() && matches!(string(&root, "status"), Some("completed") | Some("idle")),
+    tokens,
+    llm_round_trips,
+    tool_calls,
+  }
+}
+
+/// Whether a Cline session document says a turn is under way (`status: running`). The
+/// session opens when the prompt is submitted, before the model answers, so this is native
+/// evidence that startup finished even while the first response is still thinking.
+pub fn cline_session_running(session: &str) -> bool {
+  json::parse(session).ok().is_some_and(|root| string(&root, "status") == Some("running"))
+}
+
+/// `(assistant responses, tool calls)` from a `messages.json`; `None` when it is unreadable.
+fn cline_conversation_counts(text: &str) -> Option<(u64, u64)> {
+  let root = json::parse(text).ok()?;
+  let Some(Value::Array(messages)) = field(&root, "messages") else { return None };
+  let mut trips = 0;
+  let mut tools = 0;
+  for message in messages.iter().filter(|m| string(m, "role") == Some("assistant")) {
+    if field(message, "metrics").is_some() {
+      trips += 1;
+    }
+    if let Some(Value::Array(blocks)) = field(message, "content") {
+      tools += blocks.iter().filter(|b| string(b, "type") == Some("tool_use")).count() as u64;
+    }
+  }
+  Some((trips, tools))
+}
+
+/// Sum every session from one attempt. Any unfinished session keeps the total incomplete;
+/// any session without counters keeps tokens unavailable rather than understated.
+pub fn cline_sessions_summary(sessions: &[ClineSession]) -> Summary {
+  if sessions.is_empty() {
+    return unavailable(Harness::Cline);
+  }
+  let mut total = Some(Tokens { input: 0, output: 0, cache_read: 0, cache_write: Some(0) });
+  let mut complete = true;
+  let mut trips = Some(0u64);
+  let mut tools = Some(0u64);
+  for session in sessions {
+    let summary = cline_session_summary(session);
+    complete &= summary.complete;
+    trips = trips.zip(summary.llm_round_trips).map(|(a, b)| a + b);
+    tools = tools.zip(summary.tool_calls).map(|(a, b)| a + b);
+    total = match (total, summary.tokens) {
+      (Some(mut sum), Some(tokens)) => add_tokens(&mut sum, &tokens).then_some(sum),
+      _ => None,
+    };
+  }
+  Summary {
+    harness: Harness::Cline,
+    complete: complete && total.is_some(),
+    tokens: total,
+    llm_round_trips: trips,
+    tool_calls: tools,
+  }
+}
+
+/// Cline's `inputTokens` is the whole prompt, cache included: across one session, each
+/// response's `cacheReadTokens` is the previous response's `inputTokens`. Subtract the cache
+/// buckets, as for Codex and Grok, so `input` means uncached input for every harness. Counters
+/// that cannot be split that way are refused rather than guessed.
+fn cline_tokens(usage: &Value) -> Option<Tokens> {
+  let input = count(usage, "inputTokens")?;
+  let cache_read = count(usage, "cacheReadTokens")?;
+  let cache_write = count(usage, "cacheWriteTokens")?;
+  Some(Tokens {
+    input: input.checked_sub(cache_read.checked_add(cache_write)?)?,
+    output: count(usage, "outputTokens")?,
+    cache_read,
+    cache_write: Some(cache_write),
+  })
 }
 
 fn grok_tokens(usage: &Value) -> Option<Tokens> {
@@ -1276,5 +1387,44 @@ mod tests {
       crate::config::Harness::Codex,
       &format!("{codex}{{\"payload\":{{\"type\":\"task_started\"}}}}")
     ));
+  }
+
+  #[test]
+  fn cline_session_subtracts_cache_from_input_and_waits_for_completion() {
+    // Real counters (cline 3.0.70, two responses): inputTokens includes the cache reads.
+    let text = r#"{"status":"completed","interactive":false,"metadata":{"usage":{"inputTokens":11348,"outputTokens":23,"cacheReadTokens":490,"cacheWriteTokens":0,"totalCost":0},"aggregateUsage":{"inputTokens":11348,"outputTokens":23,"cacheReadTokens":490,"cacheWriteTokens":0,"totalCost":0}}}"#;
+    let messages = r#"{"version":1,"messages":[
+      {"role":"user","content":[{"type":"text","text":"go"}]},
+      {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"run_commands","input":{}}],"metrics":{"inputTokens":60}},
+      {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[]}]},
+      {"role":"assistant","content":[{"type":"text","text":"done"}],"metrics":{"inputTokens":40}}
+    ]}"#;
+    let session = |s: &str| ClineSession { session: s.to_string(), messages: Some(messages.to_string()) };
+    let summary = cline_session_summary(&session(text));
+    assert!(summary.complete);
+    assert_eq!(
+      summary.tokens,
+      Some(Tokens { input: 10858, output: 23, cache_read: 490, cache_write: Some(0) }),
+      "input is uncached input, as for every other harness"
+    );
+    assert_eq!((summary.llm_round_trips, summary.tool_calls), (Some(2), Some(1)), "counted like Claude's");
+    assert!(!cline_session_summary(&session(&text.replace("completed", "running"))).complete);
+    assert!(
+      cline_session_summary(&session(&text.replace("completed", "idle"))).complete,
+      "a finished TUI turn rests at idle until /quit"
+    );
+    // An open turn with no counters yet: incomplete, no invented zero, and no invented work.
+    let open = ClineSession { session: r#"{"status":"running","metadata":{}}"#.into(), messages: None };
+    let open_summary = cline_session_summary(&open);
+    assert!(!open_summary.complete && open_summary.tokens.is_none() && !open_summary.has_started_work());
+    assert!(cline_session_running(&open.session), "the open session itself is the startup evidence");
+    assert!(
+      cline_sessions_summary(&[session(text), open]).tokens.is_none(),
+      "one session without counters keeps the total unavailable"
+    );
+    let saved = summary.to_json();
+    let parsed = Summary::from_json(&saved).unwrap();
+    assert_eq!(parsed.harness, Harness::Cline);
+    assert_eq!(parsed, summary);
   }
 }

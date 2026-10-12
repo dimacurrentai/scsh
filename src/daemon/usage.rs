@@ -142,6 +142,7 @@ fn accounting_bytes(harness: crate::config::Harness, dir: &Path) -> u64 {
       jsonl_files(&dir.join(crate::runtime::CODEX_FORWARD_REL).join("sessions")).unwrap_or_default()
     }
     crate::config::Harness::Grok => grok_transcript(dir).into_iter().collect(),
+    crate::config::Harness::Cline => cline_session_files(dir).into_iter().flat_map(|(s, m)| [s, m]).collect(),
     _ => return 0,
   };
   paths.iter().map(|path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)).sum()
@@ -160,6 +161,7 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
     }
     crate::config::Harness::Codex => jsonl_files(&dir.join(crate::runtime::CODEX_FORWARD_REL).join("sessions")).ok()?,
     crate::config::Harness::Grok => vec![grok_transcript(dir).ok()?],
+    crate::config::Harness::Cline => cline_session_files(dir).into_iter().map(|(session, _)| session).collect(),
     _ => return None,
   };
   let mut fresh = false;
@@ -174,7 +176,8 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
     fresh |= after.modified().ok()? >= result_time;
     // Cursor and Grok have no separate turn boundary: their one summary below already
     // reports whether the latest turn is terminal, so their stream is parsed once.
-    let summarized = matches!(harness, crate::config::Harness::Cursor | crate::config::Harness::Grok);
+    let summarized =
+      matches!(harness, crate::config::Harness::Cursor | crate::config::Harness::Grok | crate::config::Harness::Cline);
     if !summarized && !crate::usage::turn_finished(harness, &stream) {
       return None;
     }
@@ -185,6 +188,7 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
     crate::config::Harness::Claude => crate::usage::claude_session_summary(&streams)?,
     crate::config::Harness::Codex => crate::usage::codex_session_summary(&streams)?,
     crate::config::Harness::Grok => crate::usage::grok_session_summary(streams.first()?.as_deref()?),
+    crate::config::Harness::Cline => cline_summary(dir),
     _ => return None,
   };
   (fresh && summary.complete && summary.tokens.is_some()).then_some(summary)
@@ -218,8 +222,56 @@ pub fn from_run_dir(harness: crate::config::Harness, run_dir: &Path) -> Option<S
         .map(|stream| crate::usage::grok_session_summary(&stream))
         .unwrap_or_else(|| unavailable(Harness::Grok)),
     ),
+    crate::config::Harness::Cline => Some(cline_summary(run_dir)),
     crate::config::Harness::Opencode => None,
   }
+}
+
+/// Every Cline session of this attempt as `(<id>.json, <id>.messages.json)` paths, sorted.
+fn cline_session_files(run_dir: &Path) -> Vec<(PathBuf, PathBuf)> {
+  let root = run_dir.join(crate::runtime::CLINE_FORWARD_REL).join("data/sessions");
+  let mut files = Vec::new();
+  let Ok(sessions) = std::fs::read_dir(&root) else { return files };
+  for session in sessions.flatten() {
+    let Ok(kind) = session.file_type() else { continue };
+    if !kind.is_dir() {
+      continue;
+    }
+    let dir = session.path();
+    let Ok(name) = session.file_name().into_string() else { continue };
+    let path = dir.join(format!("{name}.json"));
+    if path.is_file() {
+      files.push((path, dir.join(format!("{name}.messages.json"))));
+    }
+  }
+  files.sort();
+  files
+}
+
+fn cline_summary(run_dir: &Path) -> Summary {
+  let sessions: Vec<crate::usage::ClineSession> = cline_session_files(run_dir)
+    .iter()
+    .filter_map(|(session, messages)| {
+      Some(crate::usage::ClineSession {
+        session: std::fs::read_to_string(session).ok()?,
+        messages: std::fs::read_to_string(messages).ok(),
+      })
+    })
+    .collect();
+  crate::usage::cline_sessions_summary(&sessions)
+}
+
+/// Native evidence that a run's agent has started work: counted model work in its usage
+/// files, or — for Cline, whose first response reports no counters until it ends — a session
+/// whose turn is open. Feeds the startup watchdog only; it never invents accounting.
+pub fn native_work_started(harness: crate::config::Harness, run_dir: &Path) -> bool {
+  if from_run_dir(harness, run_dir).is_some_and(|usage| usage.has_started_work()) {
+    return true;
+  }
+  harness.agent() == crate::config::Harness::Cline
+    && cline_session_files(run_dir)
+      .iter()
+      .any(|(session, _)| std::fs::read_to_string(session).is_ok_and(|text| crate::usage::cline_session_running(&text)))
 }
 
 /// Fresh GROK_HOME contains one primary session plus optional children. The primary
@@ -401,7 +453,7 @@ mod completion_tests {
 
   #[test]
   fn all_harnesses_obey_required_accounting_and_opt_out() {
-    for harness in [Agent::Cursor, Agent::Claude, Agent::Codex, Agent::Grok, Agent::Opencode] {
+    for harness in [Agent::Cursor, Agent::Claude, Agent::Codex, Agent::Grok, Agent::Cline, Agent::Opencode] {
       let run = Run::new();
       let mut state = Completion::new();
       state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs() + 1));

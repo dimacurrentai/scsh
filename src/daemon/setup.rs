@@ -40,6 +40,12 @@ pub fn catalog_models(harness: Harness) -> &'static [CatalogModel] {
     Harness::Cursor => {
       &[CatalogModel { id: "auto", kind: "primary" }, CatalogModel { id: "composer-2.5", kind: "builtin" }]
     }
+    Harness::Cline => &[
+      CatalogModel { id: "cline-pass/glm-5.3", kind: "primary" },
+      CatalogModel { id: "cline-pass/kimi-k3", kind: "builtin" },
+      CatalogModel { id: "cline-pass/qwen3.8-max", kind: "builtin" },
+      CatalogModel { id: "cline-pass/deepseek-v4-pro", kind: "builtin" },
+    ],
   }
 }
 
@@ -140,11 +146,19 @@ fn models_json(harness: Harness) -> String {
   let parts: Vec<String> = catalog_models(harness)
     .iter()
     .map(|m| {
+      let profile = (harness.agent() == Harness::Cline).then(|| crate::config::cline_model(m.id)).flatten();
+      let name = profile.map(|p| p.name).unwrap_or(m.id);
+      let efforts = profile.map(|p| p.efforts).unwrap_or(&[]);
+      let effort_json: Vec<String> = efforts.iter().copied().map(quote).collect();
+      let default_effort = profile.and_then(|p| p.probe).map(quote).unwrap_or_else(|| "null".into());
       format!(
-        "{{ \"id\": {}, \"kind\": {}, \"primary_smoke\": {}, \"status\": \"not_tested\" }}",
+        "{{ \"id\": {}, \"name\": {}, \"kind\": {}, \"primary_smoke\": {}, \"efforts\": [{}], \"default_effort\": {}, \"status\": \"not_tested\" }}",
         quote(m.id),
+        quote(name),
         quote(m.kind),
         m.id == primary,
+        effort_json.join(", "),
+        default_effort,
       )
     })
     .collect();
@@ -374,7 +388,10 @@ mod tests {
 
   #[test]
   fn setup_orders_native_harnesses_before_opencode() {
-    assert_eq!(Harness::ALL, [Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor, Harness::Opencode]);
+    assert_eq!(
+      Harness::ALL,
+      [Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor, Harness::Opencode, Harness::Cline,]
+    );
   }
 
   #[test]
@@ -385,6 +402,7 @@ mod tests {
       (Harness::Codex, "gpt-5.6-luna"),
       (Harness::Grok, "grok-build"),
       (Harness::Cursor, "auto"),
+      (Harness::Cline, "cline-pass/glm-5.3"),
     ];
     for (h, id) in expected {
       assert_eq!(primary_model_id(h), id, "{h:?}");
@@ -455,6 +473,30 @@ mod tests {
     assert!(yaml.contains("harness: grok"), "{yaml}");
     assert!(yaml.contains("model: grok-composer-2.5-fast"), "{yaml}");
   }
+
+  #[test]
+  fn cline_setup_effort_is_named_after_the_model() {
+    use crate::json::{parse, Value};
+    let Value::Object(obj) =
+      parse(r#"{"tests":[{"harness":"cline","model":"cline-pass/glm-5.3","effort":"medium"}]}"#).unwrap()
+    else {
+      panic!("object");
+    };
+    let err = parse_setup_tests(&obj).unwrap_err();
+    assert!(err.contains("Cline GLM-5.3"), "{err}");
+    assert!(err.contains("low, high, max"), "{err}");
+    let Value::Object(obj) =
+      parse(r#"{"tests":[{"harness":"cline","model":"cline-pass/glm-5.3","effort":"high"}]}"#).unwrap()
+    else {
+      panic!("object");
+    };
+    let tests = parse_setup_tests(&obj).unwrap();
+    assert_eq!(tests[0].effort.as_deref(), Some("high"));
+    let yaml = render_setup_batch_yaml(&tests);
+    assert!(yaml.contains("model: cline-pass/glm-5.3"), "{yaml}");
+    assert!(yaml.contains("effort: high"), "{yaml}");
+    assert!(yaml.contains("cline-cline-pass-glm-5-3-high:"), "{yaml}");
+  }
 }
 
 /// One requested model probe from `POST /api/v1/setup/tests`.
@@ -516,10 +558,17 @@ pub fn parse_setup_tests(obj: &[(String, crate::json::Value)]) -> Result<Vec<Set
       if !allowed.is_empty() && !allowed.contains(&e.as_str()) {
         return Err(format!("effort '{e}' is not valid for {}", harness.as_str()));
       }
+      if let Some(msg) = crate::config::model_effort_error(harness, Some(&model), Some(e)) {
+        return Err(format!("effort {msg}"));
+      }
     }
-    let key = format!("{}::{}", harness.as_str(), model);
+    let key = match &effort {
+      Some(e) => format!("{}::{model}::{e}", harness.as_str()),
+      None => format!("{}::{model}", harness.as_str()),
+    };
     if !seen.insert(key) {
-      return Err(format!("duplicate test for {} / {model}", harness.as_str()));
+      let effort = effort.as_deref().map(|e| format!(" / {e}")).unwrap_or_default();
+      return Err(format!("duplicate test for {} / {model}{effort}", harness.as_str()));
     }
     out.push(SetupTestRequest { harness, model, effort });
   }
@@ -596,7 +645,7 @@ invocations:
 "#,
   );
   for (i, t) in tests.iter().enumerate() {
-    let route = format!(
+    let mut route = format!(
       "{}-{}",
       t.harness.as_str(),
       t.model
@@ -604,6 +653,10 @@ invocations:
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect::<String>()
     );
+    if let Some(effort) = &t.effort {
+      route.push('-');
+      route.push_str(effort);
+    }
     let route = if route.is_empty() { format!("t{i}") } else { route };
     out.push_str(&format!(
       "  {route}:\n    harness: {}\n    model: {}\n",

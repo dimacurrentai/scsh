@@ -993,6 +993,11 @@ pub fn validate_in(
       }
       Some(node) => config::validate_invocations(name, node, &mut errors),
     };
+    for route in &invocations {
+      if let Some(msg) = config::model_effort_error(route.harness, route.model.as_deref(), route.effort.as_deref()) {
+        errors.push(format!("'invocations.{}.effort' {msg}", route.name));
+      }
+    }
     if top.contains_key("invocations") && invocations.is_empty() && errors.is_empty() {
       errors.push("'invocations' must list at least one agent route".into());
     }
@@ -1439,6 +1444,9 @@ fn validate_step_agent(id: &str, node: Option<&Node>, errors: &mut Vec<String>) 
   let effort = step_opt_scalar(&fm, id, "effort", errors);
   if let (Some(harness), Some(effort)) = (harness, &effort) {
     config::check_effort_for_harness(&format!("steps.{id}.agent.effort"), harness, effort, errors);
+    if let Some(msg) = config::model_effort_error(harness, model.as_deref(), Some(effort)) {
+      errors.push(format!("'steps.{id}.agent.effort' {msg}"));
+    }
   }
   harness.map(|harness| StepAgent {
     options: crate::invocation::Options::parse(&fm, &format!("steps.{id}.agent"), errors),
@@ -2844,10 +2852,10 @@ steps:
 
     let doctor = builtin("doctor");
     assert!(doctor.params.is_empty());
-    // doctor exercises every agent end to end — all five harnesses.
-    assert_eq!(doctor.invocations.len(), 5);
+    // doctor exercises every agent end to end.
+    assert_eq!(doctor.invocations.len(), 6);
     let doc_agents: std::collections::BTreeSet<&str> = doctor.invocations.iter().map(|r| r.harness.as_str()).collect();
-    assert_eq!(doc_agents, ["claude", "codex", "cursor", "grok", "opencode"].into_iter().collect());
+    assert_eq!(doc_agents, ["claude", "cline", "codex", "cursor", "grok", "opencode"].into_iter().collect());
   }
 
   /// A throwaway repo root whose `.skills/<name>/SKILL.md` is `body` — how a def's

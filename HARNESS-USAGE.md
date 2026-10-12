@@ -13,6 +13,11 @@ the attempt's forwarded credentials and temporary config are scrubbed:
   TUI hooks. The hooks append events; they never publish a persistent readiness marker.
   Resumed work invalidates the previous completed stop. Cursor emits a completed `stop` before the same generation's trailing `afterAgentResponse` and `sessionEnd`; those trailing records preserve the stop, while a later generation or tool call invalidates it. The hooks live in the forwarded
   config home, never in the skill repository.
+- Cline: sum `aggregateUsage` (or `usage`) from each fresh session document under the
+  forwarded data directory; its `inputTokens` includes the cache buckets, which are subtracted. Round trips are the assistant messages carrying `metrics` in the
+  session's `messages.json`, and tool calls are its `tool_use` blocks, so Cline reports the
+  same two counts as Claude Code. A session still on its first response has no counters and
+  stays incomplete.
 
 **Headless types count exactly like their agents.** `claude-headless` and `codex-headless`
 run the same CLI in print/exec mode, and that mode writes the same native session files as the
@@ -58,10 +63,10 @@ The same strict object is available at `procs[].usage` from
 }
 ```
 
-`harness` is exactly `claude_code`, `codex`, `cursor`, or `grok`; its corresponding `source` is exactly `claude_session_jsonl`, `codex_session_jsonl`, `cursor_hooks`, or `grok_session_jsonl`. Unknown fields,
+`harness` is exactly `claude_code`, `codex`, `cursor`, `grok`, or `cline`; its corresponding `source` is exactly `claude_session_jsonl`, `codex_session_jsonl`, `cursor_hooks`, `grok_session_jsonl`, or `cline_session_json`. Unknown fields,
 versions, harnesses, and harness/source combinations are rejected by the reader.
 
-`tokens.input` is uncached input. Claude already reports that bucket separately; Codex, Cursor, and Grok input counters include cached input, so `scsh` subtracts the cache buckets. Missing
+`tokens.input` is uncached input. Claude already reports that bucket separately; Codex, Cursor, Grok, and Cline input counters include cached input, so `scsh` subtracts the cache buckets. (Cline's per-response metrics show it: each response's `cacheReadTokens` equals the previous response's `inputTokens`.) Missing
 accounting is `tokens: null` with `complete: false`, never a fabricated zero. Counters are
 observable client records rather than a billing statement. Claude and Codex include local subagent transcripts; Grok uses the primary bill that already includes them.
 

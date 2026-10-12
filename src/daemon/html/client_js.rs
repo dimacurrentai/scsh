@@ -2975,15 +2975,30 @@ function setupLoginLayer(login) {
   const tip = login.hint ? ' data-tip="' + esc(login.hint) + '"' : '';
   return '<span class="' + cls + '"' + tip + '>' + esc(login.label || login.status) + '</span>';
 }
+function clineEffortLabel(level) {
+  if (level === 'xhigh') return 'Extra High';
+  if (level === 'minimal') return 'Minimal';
+  if (!level) return '';
+  return level.charAt(0).toUpperCase() + level.slice(1);
+}
+function clineChoiceLabel(modelName, effort) {
+  const name = modelName || '';
+  return effort ? ('Cline ' + name + ' ' + clineEffortLabel(effort)) : ('Cline ' + name);
+}
 function setupModelsHtml(h) {
   const harness = h.id;
-  const custom = (loadUiPrefs().setupCustomModels || {})[harness] || [];
-  const selected = (loadUiPrefs().setupSelectedModels || {})[harness];
+  const prefs = loadUiPrefs();
+  const custom = (prefs.setupCustomModels || {})[harness] || [];
+  const selected = (prefs.setupSelectedModels || {})[harness];
+  const savedEfforts = (prefs.setupSelectedEfforts || {})[harness] || {};
   const builtin = (h.models || []).map(m => ({
     id: m.id,
+    name: m.name,
     kind: m.kind || 'builtin',
     primary: !!(m.primary_smoke || m.kind === 'primary'),
     status: m.status || 'not_tested',
+    efforts: m.efforts || [],
+    default_effort: m.default_effort || '',
   }));
   const seen = new Set(builtin.map(m => m.id));
   custom.forEach(id => {
@@ -3002,14 +3017,32 @@ function setupModelsHtml(h) {
       ? ' <button type="button" class="setup-model-remove" data-setup-remove="' + esc(harness) +
         '" data-model="' + esc(m.id) + '" title="Remove custom model">✕</button>'
       : '';
+    const title = harness === 'cline' ? clineChoiceLabel(m.name || m.id, '') : m.id;
+    const idNote = harness === 'cline' ? '<code class="dim">' + esc(m.id) + '</code>' : '';
+    const efforts = harness === 'cline' ? (m.efforts || []) : [];
+    const saved = savedEfforts[m.id];
+    const picked = Array.isArray(saved) ? saved
+      : (saved ? [saved] : (m.default_effort ? [m.default_effort] : []));
+    const allEffortsOn = efforts.length > 0 && efforts.every(level => picked.indexOf(level) >= 0);
+    const effortHtml = efforts.length
+      ? '<div class="setup-efforts">' +
+        efforts.map(level => {
+          const on = picked.indexOf(level) >= 0;
+          return '<label><input type="checkbox" class="setup-effort" data-harness="' + esc(harness) +
+            '" data-model="' + esc(m.id) + '" value="' + esc(level) + '"' +
+            (on ? ' checked' : '') + '> ' + esc(clineChoiceLabel(m.name || m.id, level)) + '</label>';
+        }).join('') + '</div>'
+      : '';
+    const modelOn = efforts.length ? allEffortsOn : checked;
     return '<li><label class="setup-model-row">' +
       '<input type="checkbox" class="setup-model-check" data-harness="' + esc(harness) +
-      '" data-model="' + esc(m.id) + '"' + (checked ? ' checked' : '') + '>' +
-      '<code>' + esc(m.id) + '</code>' +
+      '" data-model="' + esc(m.id) + '"' + (modelOn ? ' checked' : '') + '>' +
+      '<code>' + esc(title) + '</code>' +
+      idNote +
       '<span class="dim">' + esc(kind) + '</span>' +
       setupModelStatusHtml(m.status) +
       remove +
-      '</label></li>';
+      '</label>' + effortHtml + '</li>';
   }).join('');
   const hint = (h.overall === 'not_tested' || (h.action && h.action.kind === 'test'))
     ? '<p class="setup-models-hint dim">Check the models above, then click <strong>Test selected</strong> below.</p>'
@@ -3185,8 +3218,17 @@ function collectSetupTests(harnessFilter) {
   cards.querySelectorAll('.setup-card').forEach(card => {
     const harness = card.getAttribute('data-harness');
     if (harnessFilter && harness !== harnessFilter) return;
-    card.querySelectorAll('.setup-model-check:checked').forEach(cb => {
-      tests.push({ harness, model: cb.getAttribute('data-model') });
+    card.querySelectorAll('.setup-model-check').forEach(cb => {
+      const model = cb.getAttribute('data-model');
+      const li = cb.closest('li');
+      const group = li && li.querySelector('.setup-efforts');
+      if (!group) {
+        if (cb.checked) tests.push({ harness, model });
+        return;
+      }
+      li.querySelectorAll('.setup-effort:checked').forEach(box => {
+        tests.push({ harness, model, effort: box.value });
+      });
     });
   });
   return tests;
@@ -3198,7 +3240,11 @@ function collectPrimarySetupTests() {
   (window.__SETUP_HARNESSES || []).forEach(h => {
     if (h.overall === 'needs_build' || h.overall === 'needs_login') return;
     const primary = (h.models || []).find(m => m.primary_smoke || m.kind === 'primary');
-    if (primary) tests.push({ harness: h.id, model: primary.id });
+    if (primary) {
+      const test = { harness: h.id, model: primary.id };
+      if (h.id === 'cline' && primary.default_effort) test.effort = primary.default_effort;
+      tests.push(test);
+    }
   });
   return tests;
 }
@@ -3226,11 +3272,55 @@ function startSetupTests(tests, btn) {
     showToast(String(e));
   });
 }
+function persistSetupEfforts(harness, model, values) {
+  const prefs = loadUiPrefs();
+  const map = Object.assign({}, prefs.setupSelectedEfforts || {});
+  const cur = Object.assign({}, map[harness] || {});
+  cur[model] = values;
+  map[harness] = cur;
+  saveUiPrefs({ setupSelectedEfforts: map });
+}
+function syncSetupEffortParent(cb) {
+  const li = cb.closest('li');
+  if (!li) return;
+  const boxes = li.querySelectorAll('.setup-effort');
+  if (!boxes.length) return;
+  const on = li.querySelectorAll('.setup-effort:checked').length;
+  cb.checked = on > 0 && on === boxes.length;
+  cb.indeterminate = on > 0 && on < boxes.length;
+}
 function wireSetupModelControls(root) {
   const scope = root || document;
   scope.querySelectorAll('.setup-model-check').forEach(cb => {
+    syncSetupEffortParent(cb);
     cb.addEventListener('change', () => {
-      persistSetupSelection(cb.getAttribute('data-harness'), cb.getAttribute('data-model'), cb.checked);
+      const li = cb.closest('li');
+      const boxes = li ? li.querySelectorAll('.setup-effort') : [];
+      const values = [];
+      if (boxes.length) {
+        cb.indeterminate = false;
+        boxes.forEach(el => {
+          el.checked = cb.checked;
+          if (el.checked) values.push(el.value);
+        });
+        persistSetupEfforts(cb.getAttribute('data-harness'), cb.getAttribute('data-model'), values);
+      }
+      persistSetupSelection(cb.getAttribute('data-harness'), cb.getAttribute('data-model'), cb.checked || values.length > 0);
+    });
+  });
+  scope.querySelectorAll('.setup-effort').forEach(box => {
+    box.addEventListener('change', () => {
+      const harness = box.getAttribute('data-harness');
+      const model = box.getAttribute('data-model');
+      const li = box.closest('li');
+      const values = [];
+      if (li) li.querySelectorAll('.setup-effort:checked').forEach(el => values.push(el.value));
+      persistSetupEfforts(harness, model, values);
+      const parent = li && li.querySelector('.setup-model-check');
+      if (parent) {
+        syncSetupEffortParent(parent);
+        persistSetupSelection(harness, model, values.length > 0);
+      }
     });
   });
   scope.querySelectorAll('button[data-setup-add]').forEach(btn => {

@@ -24,3 +24,7 @@ invocations:
   grok-build:
     harness: grok
     model: grok-build
+  cline-glm-5.3:
+    harness: cline
+    model: cline-pass/glm-5.3
+    effort: high

@@ -208,6 +208,7 @@ pub fn image_tag(harness: Harness) -> String {
     Harness::Codex | Harness::CodexHeadless => "scsh-codex:latest".to_string(),
     Harness::Grok => "scsh-grok:latest".to_string(),
     Harness::Cursor => "scsh-cursor:latest".to_string(),
+    Harness::Cline => "scsh-cline:latest".to_string(),
   }
 }
 
@@ -219,6 +220,7 @@ pub fn image_target(harness: Harness) -> &'static str {
     Harness::Codex | Harness::CodexHeadless => "scsh-codex",
     Harness::Grok => "scsh-grok",
     Harness::Cursor => "scsh-cursor",
+    Harness::Cline => "scsh-cline",
   }
 }
 
@@ -300,6 +302,13 @@ pub fn codex_container_auth_ready() -> bool {
 /// [`AGENT_REPO`]`/`this, so forwarding host credentials is just copying files here.
 pub const GROK_FORWARD_REL: &str = "tmp/.grok";
 
+/// Run-dir-relative Cline home. The image is pointed at this tree with `--config` and
+/// `--data-dir`, so the API key and the session that carries token usage ride the repo mount.
+pub const CLINE_FORWARD_REL: &str = "tmp/.cline";
+
+/// Host env var for a Cline API key (`cline.bot`). Also read from `~/.cline` and `~/.env`.
+pub const CLINE_API_KEY_ENV: &str = "CLINE_API_KEY";
+
 /// Host env var for API-key Grok auth (xAI API key from console.x.ai; works headless).
 pub const XAI_API_KEY_ENV: &str = "XAI_API_KEY";
 
@@ -319,6 +328,65 @@ pub fn grok_auth_file_on_host() -> Option<PathBuf> {
 /// Whether the host has credentials grok containers can use: `auth.json` or `XAI_API_KEY`.
 pub fn grok_container_auth_ready() -> bool {
   grok_auth_file_on_host().is_some() || std::env::var(XAI_API_KEY_ENV).map(|v| !v.is_empty()).unwrap_or(false)
+}
+
+/// Host `providers.json` written by `cline auth`.
+pub fn cline_providers_file_on_host() -> Option<PathBuf> {
+  let home = std::env::var_os("HOME")?;
+  let path = PathBuf::from(home).join(".cline/data/settings/providers.json");
+  path.is_file().then_some(path)
+}
+
+/// Cline API key, never logged. Order: `CLINE_API_KEY`, then `~/.cline` providers.json,
+/// then a `CLINE_API_KEY=` line in `~/.env`.
+pub fn cline_api_key() -> Option<String> {
+  if let Ok(key) = std::env::var(CLINE_API_KEY_ENV) {
+    let key = key.trim().trim_matches('"').trim_matches('\'').to_string();
+    if !key.is_empty() {
+      return Some(key);
+    }
+  }
+  if let Some(key) = cline_providers_file_on_host()
+    .and_then(|path| cline_key_in_providers(&std::fs::read_to_string(path).unwrap_or_default()))
+  {
+    return Some(key);
+  }
+  let home = std::env::var_os("HOME")?;
+  let text = std::fs::read_to_string(PathBuf::from(home).join(".env")).ok()?;
+  cline_key_in_dotenv(&text)
+}
+
+fn cline_key_in_providers(text: &str) -> Option<String> {
+  let crate::json::Value::Object(root) = crate::json::parse(text).ok()? else {
+    return None;
+  };
+  let providers = get_json_obj(&root, "providers")?;
+  let cline = get_json_obj(providers, "cline")?;
+  let settings = get_json_obj(cline, "settings")?;
+  match settings.iter().find(|(k, _)| k == "apiKey").map(|(_, v)| v) {
+    Some(crate::json::Value::String(key)) if !key.is_empty() => Some(key.clone()),
+    _ => None,
+  }
+}
+
+fn cline_key_in_dotenv(text: &str) -> Option<String> {
+  for line in text.lines() {
+    let line = line.trim();
+    let line = line.strip_prefix("export ").unwrap_or(line);
+    let Some(rest) = line.strip_prefix("CLINE_API_KEY=") else { continue };
+    let key = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+    if !key.is_empty() {
+      return Some(key);
+    }
+  }
+  None
+}
+
+fn get_json_obj<'a>(obj: &'a [(String, crate::json::Value)], key: &str) -> Option<&'a [(String, crate::json::Value)]> {
+  match obj.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
+    Some(crate::json::Value::Object(fields)) => Some(fields),
+    _ => None,
+  }
 }
 
 /// Whether grok's stored OAuth login has lapsed: `~/.grok/auth.json` carries an `expires_at`
@@ -536,6 +604,8 @@ fn harness_container_env_verbose(harness: Harness, verbose: bool) -> Vec<(String
     Harness::Codex | Harness::CodexHeadless => Vec::new(),
     // Grok's verbosity comes from --debug/--debug-file flags; no env needed.
     Harness::Grok => Vec::new(),
+    // Cline's verbosity is the CLI default; quota snapshots use CLINE_API_KEY, forwarded separately.
+    Harness::Cline => Vec::new(),
     // Point cursor-agent at forwarded config + auth under the repo's gitignored tmp/.
     Harness::Cursor => vec![
       (CURSOR_CONFIG_DIR_ENV.to_string(), format!("{AGENT_REPO}/{CURSOR_FORWARD_REL}")),
@@ -642,6 +712,54 @@ pub fn agent_task_prompt(
   }
 }
 
+/// The shell body a Cline run executes: quota snapshots for every window around the TUI
+/// (`cline -i`).
+pub(crate) fn cline_inner_command(model: Option<&str>, effort: Option<&str>, prompt: &str) -> String {
+  let mut cline = String::from("cline -i");
+  cline.push_str(" --auto-approve true --config ");
+  cline.push_str(&shell_quote(&format!("{AGENT_REPO}/{CLINE_FORWARD_REL}")));
+  cline.push_str(" --data-dir ");
+  cline.push_str(&shell_quote(&format!("{AGENT_REPO}/{CLINE_FORWARD_REL}/data")));
+  if let Some(m) = model {
+    cline.push_str(" -m ");
+    cline.push_str(&shell_quote(m));
+  }
+  if let Some(e) = effort {
+    cline.push_str(" --thinking ");
+    cline.push_str(&shell_quote(e));
+  }
+  cline.push_str(" -- ");
+  cline.push_str(&shell_quote(prompt));
+  format!(
+    "{}\n{cline}\nrc=$?\n{}\nexit $rc\n",
+    cline_quota_snapshot_shell("before"),
+    cline_quota_snapshot_shell("after")
+  )
+}
+
+/// Shell that writes the plan and usage-limit documents for one side of a Cline run.
+/// The API key stays in the environment; curl reads it from a config on stdin.
+fn cline_quota_snapshot_shell(when: &str) -> String {
+  format!(
+    r#"curl --config - <<SCSH_CURL || echo "scsh: cline quota {when} limits failed" >&2
+url = "https://api.cline.bot/api/v1/users/me/plan/usage-limits"
+header = "Authorization: Bearer ${{CLINE_API_KEY}}"
+header = "Accept: application/json"
+silent
+show-error
+output = "${{SCSH_RUN_LOG}}.cline-quota-{when}.limits.json"
+SCSH_CURL
+curl --config - <<SCSH_CURL || echo "scsh: cline quota {when} plan failed" >&2
+url = "https://api.cline.bot/api/v1/users/me/plan"
+header = "Authorization: Bearer ${{CLINE_API_KEY}}"
+header = "Accept: application/json"
+silent
+show-error
+output = "${{SCSH_RUN_LOG}}.cline-quota-{when}.plan.json"
+SCSH_CURL"#
+  )
+}
+
 #[cfg(test)]
 pub fn harness_command(
   harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, result: &str,
@@ -736,6 +854,14 @@ pub fn harness_command_with_options(
       tui.push_str(" -- ");
       tui.push_str(&shell_quote(&prompt));
       wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, TuiSubmit::Auto, result, term)
+    }
+    Harness::Cline => {
+      // `-i` is the TUI. Every Cline Pass quota window (5h, weekly, monthly) is snapshotted
+      // before the task and after it.
+      let body = cline_inner_command(model, effort, &prompt);
+      let recorded = format!("sh -c {}", shell_quote(&body));
+      // `/quit` leaves the Cline TUI. `/exit` is a connector command and does not close it.
+      wrap_tui_shell(harness, skill_source, model, &recorded, TuiQuit::SlashQuit, TuiSubmit::Auto, result, term)
     }
     Harness::ClaudeHeadless => {
       // Print mode with the native event stream: the same argument vector as the TUI plus
@@ -1764,6 +1890,7 @@ pub fn auth_forwarding_enabled(harness: Harness) -> bool {
     Harness::Codex | Harness::CodexHeadless => "SCSH_NO_CODEX_AUTH",
     Harness::Grok => "SCSH_NO_GROK_AUTH",
     Harness::Cursor => "SCSH_NO_CURSOR_AUTH",
+    Harness::Cline => "SCSH_NO_CLINE_AUTH",
   };
   !matches!(std::env::var(env).ok().as_deref(), Some("1") | Some("true"))
 }
@@ -1804,6 +1931,7 @@ pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
       Harness::Codex | Harness::CodexHeadless => "SCSH_NO_CODEX_AUTH",
       Harness::Grok => "SCSH_NO_GROK_AUTH",
       Harness::Cursor => "SCSH_NO_CURSOR_AUTH",
+      Harness::Cline => "SCSH_NO_CLINE_AUTH",
     };
     return LoginPreflight {
       status: "disabled",
@@ -1872,6 +2000,25 @@ pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
         LoginPreflight { status: "found", label: "Found via XAI_API_KEY".into(), hint: String::new() }
       }
     }
+    Harness::Cline => {
+      if std::env::var(CLINE_API_KEY_ENV).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+        LoginPreflight { status: "found", label: "Found via CLINE_API_KEY".into(), hint: String::new() }
+      } else if cline_providers_file_on_host().is_some() && cline_api_key().is_some() {
+        LoginPreflight {
+          status: "found",
+          label: "Found via ~/.cline/data/settings/providers.json".into(),
+          hint: String::new(),
+        }
+      } else if cline_api_key().is_some() {
+        LoginPreflight { status: "found", label: "Found via ~/.env".into(), hint: String::new() }
+      } else {
+        LoginPreflight {
+          status: "missing",
+          label: "Missing".into(),
+          hint: "Export CLINE_API_KEY, or run `cline auth`".into(),
+        }
+      }
+    }
     Harness::Cursor => {
       if cursor_api_key().is_some() {
         LoginPreflight { status: "found", label: "Found via CURSOR_API_KEY".into(), hint: String::new() }
@@ -1938,6 +2085,17 @@ pub fn check_harness_host(harness: Harness) -> Result<(), String> {
         )
       } else {
         Ok(())
+      }
+    }
+    Harness::Cline => {
+      if cline_api_key().is_some() {
+        Ok(())
+      } else {
+        Err(
+          "cline harness unavailable (no CLINE_API_KEY, no ~/.cline/data/settings/providers.json key, \
+           and no CLINE_API_KEY in ~/.env — export CLINE_API_KEY, or run `cline auth`)"
+            .into(),
+        )
       }
     }
     Harness::Cursor => {
@@ -2759,6 +2917,7 @@ mod tests {
     assert_eq!(image_tag(Harness::Codex), "scsh-codex:latest");
     assert_eq!(image_tag(Harness::Grok), "scsh-grok:latest");
     assert_eq!(image_tag(Harness::Cursor), "scsh-cursor:latest");
+    assert_eq!(image_tag(Harness::Cline), "scsh-cline:latest");
   }
 
   #[test]
@@ -2890,6 +3049,18 @@ TAG
     assert!(df.contains("npm install -g @xai-official/grok"));
     assert!(df.contains("ENV GROK_HOME=/home/agent/repo/tmp/.grok"));
     assert!(df.contains("grok --version"));
+  }
+
+  #[test]
+  fn dockerfile_cline_stage_is_pinned_on_node_22() {
+    let df = dockerfile();
+    // Pinned like claude: the image fingerprint is the Dockerfile text, so bumping the ARG is
+    // the only way a machine picks up a newer cline.
+    assert!(df.contains("ARG CLINE_VERSION=3.0.70"));
+    let stage = df.split("FROM scsh-base AS scsh-cline").nth(1).unwrap().split("\nFROM ").next().unwrap();
+    assert!(stage.contains("npm install -g \"cline@${CLINE_VERSION}\""));
+    // Node 20 makes cline print a trust-store warning into every recording.
+    assert!(stage.contains("https://deb.nodesource.com/setup_22.x"), "{stage}");
   }
 
   #[test]
@@ -3089,9 +3260,9 @@ TAG
   fn dockerfile_reclaims_agent_home_after_harness_installs() {
     let df = dockerfile();
     let chowns = df.matches("chown -R agent:agent /home/agent").count();
-    assert!(chowns >= 5, "each harness stage must chown /home/agent after its install (found {chowns})");
+    assert!(chowns >= 6, "each harness stage must chown /home/agent after its install (found {chowns})");
     // Version probes must not write into the real agent home as root.
-    for cli in ["opencode", "claude", "codex", "grok", "cursor-agent"] {
+    for cli in ["opencode", "claude", "codex", "grok", "cursor-agent", "cline"] {
       assert!(df.contains(&format!("HOME=/tmp {cli} --version")), "{cli} --version must run with HOME=/tmp");
     }
   }
@@ -3108,7 +3279,7 @@ TAG
     let cursor = skill_prompt_clause(Harness::Cursor, "code-review", true);
     assert!(cursor.contains("globally installed skill named 'code-review'"), "got: {cursor}");
     // Global install elsewhere: referenced by its container path (under the mounted tmp/).
-    for h in [Harness::Opencode, Harness::Codex, Harness::Grok] {
+    for h in [Harness::Opencode, Harness::Codex, Harness::Grok, Harness::Cline] {
       let clause = skill_prompt_clause(h, "greet", true);
       assert_eq!(clause, "Run the skill defined in tmp/.scsh-skills/greet/SKILL.md.", "harness {h:?}");
     }
@@ -3395,6 +3566,35 @@ TAG
   }
 
   #[test]
+  fn cline_key_is_found_on_any_dotenv_line() {
+    let text = "# keys\nOPENAI_API_KEY=sk-x\n\nexport CLINE_API_KEY=\"ck-1\"\nCLINE_API_KEY=later\n";
+    assert_eq!(cline_key_in_dotenv(text).as_deref(), Some("ck-1"), "the first CLINE_API_KEY line wins");
+    assert_eq!(cline_key_in_dotenv("CLINE_API_KEY=\nCLINE_API_KEY=ck-2").as_deref(), Some("ck-2"));
+    assert_eq!(cline_key_in_dotenv("OPENAI_API_KEY=sk-x\n"), None);
+    let providers = r#"{"version":1,"providers":{"openai":{"settings":{"apiKey":"sk-x"}},"cline":{"settings":{"provider":"cline","apiKey":"ck-3"}}}}"#;
+    assert_eq!(cline_key_in_providers(providers).as_deref(), Some("ck-3"));
+  }
+
+  #[test]
+  fn harness_command_builds_the_cline_tui_with_every_quota_window() {
+    let term = crate::config::Terminal::default();
+    let delivery = crate::config::SkillDelivery::Repo;
+    let tui =
+      harness_command(Harness::Cline, Some("cline-pass/glm-5.3"), Some("high"), "add", "tmp/add.json", term, &delivery);
+    assert!(tui.contains("cline -i "), "the TUI: {tui}");
+    assert!(tui.contains("slash-quit"), "Cline's TUI closes with /quit, not /exit: {tui}");
+    assert!(tui.contains("--thinking high"), "got: {tui}");
+    let model_at = tui.find("-m ").expect("model flag");
+    let effort_at = tui.find("--thinking ").expect("effort flag");
+    assert!(model_at < effort_at, "model is selected before its effort: {tui}");
+    assert!(tui.contains("cline-quota-before.limits.json"), "got: {tui}");
+    assert!(tui.contains("cline-quota-before.plan.json"), "got: {tui}");
+    assert!(tui.contains("cline-quota-after.limits.json"), "got: {tui}");
+    assert!(tui.contains("cline-quota-after.plan.json"), "got: {tui}");
+    assert!(tui.contains("/api/v1/users/me/plan/usage-limits"), "got: {tui}");
+  }
+
+  #[test]
   fn headless_types_stream_native_events_without_a_recorder() {
     let term = crate::config::Terminal::default();
     let delivery = crate::config::SkillDelivery::Repo;
@@ -3506,7 +3706,7 @@ TAG
     // Every TUI harness records via scsh-tui-record with the PTY size as its first two args;
     // the recording path is always ${SCSH_RUN_LOG}.cast. Headless types record nothing.
     let term = crate::config::Terminal { cols: 120, rows: 30 };
-    for h in [Harness::Claude, Harness::Codex, Harness::Cursor, Harness::Opencode, Harness::Grok] {
+    for h in [Harness::Claude, Harness::Codex, Harness::Cursor, Harness::Opencode, Harness::Grok, Harness::Cline] {
       let cmd = harness_command(h, Some("m"), None, "add", "tmp/add.json", term, &crate::config::SkillDelivery::Repo);
       assert!(cmd.contains("scsh-tui-record 120 30 "), "harness {h:?} got: {cmd}");
       assert!(cmd.contains("cast=${SCSH_RUN_LOG}.cast"), "harness {h:?} got: {cmd}");

@@ -22,7 +22,7 @@ use crate::config::Harness;
 use crate::json::{self, Value};
 
 /// The harnesses `scsh quota` can actually query, in the canonical UI order.
-pub const SUPPORTED: [Harness; 4] = [Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor];
+pub const SUPPORTED: [Harness; 5] = [Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor, Harness::Cline];
 
 /// The synthetic `repo` label quota sessions register under — like `(image builds)`, it
 /// never matches a real path, so quota jobs neither trip the one-job-per-repo guard nor
@@ -493,6 +493,7 @@ pub fn fetch(harness: Harness) -> HarnessQuota {
     Harness::Codex | Harness::CodexHeadless => codex_quota(),
     Harness::Grok => grok_quota(),
     Harness::Cursor => cursor_quota(),
+    Harness::Cline => cline_quota(),
     Harness::Opencode => HarnessQuota::down(
       harness,
       "unsupported",
@@ -514,6 +515,105 @@ fn rate_limited(h: Harness, what: &str) -> HarnessQuota {
     &format!("{what} rate-limited the check (HTTP 429)"),
     "wait a minute and re-run — the endpoint throttles bursts",
   )
+}
+
+/// Cline Pass caps are integer micro-units: divide by 100_000_000 to get USD.
+/// `1000000000` is the $10 five-hour window.
+const CLINE_CAP_MICRO_PER_USD: f64 = 100_000_000.0;
+
+/// Every Cline Pass window the usage-limits endpoint reports, in a stable order.
+const CLINE_WINDOWS: [(&str, &str, &str); 3] = [
+  ("five_hour", "5h", "last5HoursUsageCostUSDPerUser"),
+  ("weekly", "weekly", "last7daysUsageCostUSDPerUser"),
+  ("monthly", "monthly", "last30daysUsageCostUSDPerUser"),
+];
+
+fn cline_quota() -> HarnessQuota {
+  let h = Harness::Cline;
+  let Some(key) = crate::runtime::cline_api_key() else {
+    return HarnessQuota::down(h, "missing", "no Cline API key", "export CLINE_API_KEY, or run `cline auth`");
+  };
+  let headers = [format!("Authorization: Bearer {key}"), "Accept: application/json".to_string()];
+  let limits = match curl("https://api.cline.bot/api/v1/users/me/plan/usage-limits", &headers, None) {
+    Ok(response) => response,
+    Err(error) => {
+      return HarnessQuota::down(h, "error", &error, "retry; the Cline usage-limits endpoint did not answer")
+    }
+  };
+  if limits.status == 401 || limits.status == 403 {
+    return HarnessQuota::down(h, "expired", "the Cline API key was rejected", "export a current CLINE_API_KEY");
+  }
+  if limits.status == 429 {
+    return rate_limited(h, "Cline");
+  }
+  if limits.status != 200 {
+    return HarnessQuota::down(h, "error", &format!("Cline usage-limits returned HTTP {}", limits.status), "retry");
+  }
+  let plan = match curl("https://api.cline.bot/api/v1/users/me/plan", &headers, None) {
+    Ok(response) => response,
+    Err(error) => return HarnessQuota::down(h, "error", &error, "retry; the Cline plan endpoint did not answer"),
+  };
+  if plan.status != 200 {
+    return HarnessQuota::down(h, "error", &format!("Cline plan returned HTTP {}", plan.status), "retry");
+  }
+  match cline_windows(&limits.body, &plan.body) {
+    Ok((name, windows)) => HarnessQuota::ok(h, name, windows),
+    Err(error) => HarnessQuota::down(h, "error", &error, "the Cline plan response did not include every quota window"),
+  }
+}
+
+/// Normalize a usage-limits body and a plan body into the three Cline windows.
+/// A missing window or a missing dollar cap is an error: both interfaces record all of them.
+pub fn cline_windows(limits_json: &str, plan_json: &str) -> Result<(Option<String>, Vec<QuotaWindow>), String> {
+  let limits_root = object(limits_json).map_err(|e| format!("usage-limits: {e}"))?;
+  let plan_root = object(plan_json).map_err(|e| format!("plan: {e}"))?;
+  let limits = get_arr(get_obj(&limits_root, "data").ok_or("usage-limits has no data")?, "limits")
+    .ok_or("usage-limits has no limits array")?;
+  let plan = get_obj(get_obj(&plan_root, "data").ok_or("plan has no data")?, "plan").ok_or("plan has no plan")?;
+  let name = get_str(plan, "displayName").map(str::to_string);
+  let caps = get_obj(
+    get_obj(get_obj(plan, "entitlements").ok_or("plan has no entitlements")?, "cline_pass")
+      .ok_or("plan has no cline_pass entitlement")?,
+    "inferenceCapThreshold",
+  )
+  .ok_or("plan has no inference cap")?;
+  let mut windows = Vec::with_capacity(CLINE_WINDOWS.len());
+  for (id, label, cap_key) in CLINE_WINDOWS {
+    let row = limits
+      .iter()
+      .find_map(|item| match item {
+        Value::Object(fields) if get_str(fields, "type") == Some(id) => Some(fields),
+        _ => None,
+      })
+      .ok_or_else(|| format!("usage-limits is missing the {id} window"))?;
+    let used = get_num(row, "percentUsed").ok_or_else(|| format!("{id} has no percentUsed"))?;
+    let cap = get_num(caps, cap_key).ok_or_else(|| format!("plan is missing {cap_key}"))?;
+    let resets_at = get_str(row, "resetsAt").map(str::to_string);
+    windows.push(QuotaWindow {
+      id: id.to_string(),
+      label: format!("{label} ({})", cline_cap_usd(cap)),
+      used_percent: used,
+      resets_at,
+    });
+  }
+  Ok((name, windows))
+}
+
+fn object(text: &str) -> Result<Vec<(String, Value)>, String> {
+  match json::parse(text) {
+    Ok(Value::Object(fields)) => Ok(fields),
+    Ok(_) => Err("expected a JSON object".into()),
+    Err(error) => Err(error),
+  }
+}
+
+fn cline_cap_usd(micro: f64) -> String {
+  let usd = micro / CLINE_CAP_MICRO_PER_USD;
+  if (usd - usd.round()).abs() < 0.001 {
+    format!("${:.0}", usd.round())
+  } else {
+    format!("${usd:.2}")
+  }
 }
 
 fn claude_quota() -> HarnessQuota {
@@ -1135,6 +1235,33 @@ pub fn render_table(rows: &[HarnessQuota]) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn cline_quota_requires_every_window_and_its_dollar_cap() {
+    let limits = r#"{"data":{"limits":[
+      {"type":"weekly","percentUsed":1},
+      {"type":"five_hour","percentUsed":0},
+      {"type":"monthly","percentUsed":2,"resetsAt":"2026-10-21T01:59:26Z"}
+    ]}}"#;
+    let plan = r#"{"data":{"plan":{"displayName":"Cline Pass (Monthly)","entitlements":{"cline_pass":{"inferenceCapThreshold":{
+      "last5HoursUsageCostUSDPerUser":1000000000,
+      "last7daysUsageCostUSDPerUser":2500000000,
+      "last30daysUsageCostUSDPerUser":5000000000
+    }}}}}}"#;
+    let (name, windows) = cline_windows(limits, plan).unwrap();
+    assert_eq!(name.as_deref(), Some("Cline Pass (Monthly)"));
+    assert_eq!(windows.len(), 3);
+    assert_eq!(windows[0].id, "five_hour");
+    assert_eq!(windows[0].label, "5h ($10)");
+    assert_eq!(windows[0].used_percent, 0.0);
+    assert_eq!(windows[1].id, "weekly");
+    assert_eq!(windows[1].label, "weekly ($25)");
+    assert_eq!(windows[2].id, "monthly");
+    assert_eq!(windows[2].label, "monthly ($50)");
+    assert_eq!(windows[2].resets_at.as_deref(), Some("2026-10-21T01:59:26Z"));
+    let missing = r#"{"data":{"limits":[{"type":"five_hour","percentUsed":0},{"type":"weekly","percentUsed":0}]}}"#;
+    assert!(cline_windows(missing, plan).is_err());
+  }
 
   /// Trimmed live response from `api.anthropic.com/api/oauth/usage` (values anonymized).
   const CLAUDE_USAGE: &str = r#"{

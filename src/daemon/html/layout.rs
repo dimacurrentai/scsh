@@ -902,6 +902,11 @@ pub(crate) const PAGE_CSS: &str = r#"
     list-style: none; margin: 0 0 0.55rem; padding: 0; font-size: 0.8rem;
   }
   .setup-models li { margin: 0.15rem 0; }
+  .setup-efforts {
+    display: flex; flex-direction: column; gap: 0.15rem;
+    margin: 0.15rem 0 0.35rem 1.4rem; font-size: 0.78rem;
+  }
+  .setup-efforts label { display: flex; gap: 0.35rem; align-items: center; cursor: pointer; }
   .setup-model-row {
     display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.5rem;
     cursor: pointer;
