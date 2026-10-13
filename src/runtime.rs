@@ -1893,17 +1893,33 @@ pub fn claude_container_auth_ready() -> bool {
     || claude_keychain_credentials_json().is_some()
 }
 
-/// Whether credential forwarding for `harness` is enabled (on unless `SCSH_NO_<HARNESS>_AUTH`).
-pub fn auth_forwarding_enabled(harness: Harness) -> bool {
-  let env = match harness {
+/// The `SCSH_NO_<HARNESS>_AUTH` variable that withholds `harness`'s host login from containers.
+fn auth_opt_out_env(harness: Harness) -> &'static str {
+  match harness {
     Harness::Opencode => "SCSH_NO_OPENCODE_AUTH",
     Harness::Claude | Harness::ClaudeHeadless => "SCSH_NO_CLAUDE_AUTH",
     Harness::Codex | Harness::CodexHeadless => "SCSH_NO_CODEX_AUTH",
     Harness::Grok => "SCSH_NO_GROK_AUTH",
     Harness::Cursor => "SCSH_NO_CURSOR_AUTH",
     Harness::Cline | Harness::ClineHeadless => "SCSH_NO_CLINE_AUTH",
-  };
-  !matches!(std::env::var(env).ok().as_deref(), Some("1") | Some("true"))
+  }
+}
+
+/// Whether credential forwarding for `harness` is enabled (on unless `SCSH_NO_<HARNESS>_AUTH`).
+pub fn auth_forwarding_enabled(harness: Harness) -> bool {
+  !matches!(std::env::var(auth_opt_out_env(harness)).ok().as_deref(), Some("1") | Some("true"))
+}
+
+/// The environment key that still reaches `harness`'s containers when its opt-out withholds the
+/// host login files. Cline's opt-out withholds its key too, and opencode has no key.
+fn key_despite_opt_out(harness: Harness) -> Option<&'static str> {
+  match harness {
+    Harness::Claude | Harness::ClaudeHeadless => Some(CLAUDE_OAUTH_TOKEN_ENV),
+    Harness::Codex | Harness::CodexHeadless => Some(OPENAI_API_KEY_ENV),
+    Harness::Grok => Some(XAI_API_KEY_ENV),
+    Harness::Cursor => Some(CURSOR_API_KEY_ENV),
+    Harness::Opencode | Harness::Cline | Harness::ClineHeadless => None,
+  }
 }
 
 /// Local login preflight for the Setup tab — never includes secret values, only safe labels.
@@ -1936,14 +1952,7 @@ fn found_via_file_label(path: &Path) -> String {
 /// Host credential detection for Setup: presence/expiry/opt-out only — not proof of model access.
 pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
   if !auth_forwarding_enabled(harness) {
-    let env = match harness {
-      Harness::Opencode => "SCSH_NO_OPENCODE_AUTH",
-      Harness::Claude | Harness::ClaudeHeadless => "SCSH_NO_CLAUDE_AUTH",
-      Harness::Codex | Harness::CodexHeadless => "SCSH_NO_CODEX_AUTH",
-      Harness::Grok => "SCSH_NO_GROK_AUTH",
-      Harness::Cursor => "SCSH_NO_CURSOR_AUTH",
-      Harness::Cline | Harness::ClineHeadless => "SCSH_NO_CLINE_AUTH",
-    };
+    let env = auth_opt_out_env(harness);
     return LoginPreflight {
       status: "disabled",
       label: "Disabled".into(),
@@ -2049,6 +2058,22 @@ pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
 }
 
 pub fn check_harness_host(harness: Harness) -> Result<(), String> {
+  // The opt-out withholds the login files, so only an environment key can still reach the
+  // container. Without one, the harness would start logged out; report it unavailable here.
+  if !auth_forwarding_enabled(harness) {
+    let opt_out = auth_opt_out_env(harness);
+    let name = harness.agent().as_str();
+    return match key_despite_opt_out(harness) {
+      Some(key) if std::env::var(key).is_ok_and(|value| !value.is_empty()) => Ok(()),
+      Some(key) => Err(format!("{name} harness unavailable ({opt_out} withholds its host login and {key} is not set)")),
+      None => Err(format!("{name} harness unavailable ({opt_out} withholds its credentials from containers)")),
+    };
+  }
+  check_harness_login(harness)
+}
+
+/// The host login check proper: whether forwarding would give the container a usable login.
+fn check_harness_login(harness: Harness) -> Result<(), String> {
   match harness {
     Harness::Opencode => {
       if opencode_auth_ready() {
@@ -4594,6 +4619,31 @@ TAG
       None => std::env::remove_var("HOME"),
     }
     let _ = std::fs::remove_dir_all(&empty_home);
+  }
+
+  #[test]
+  fn an_auth_opt_out_leaves_a_harness_available_only_through_a_forwarded_key() {
+    let _env = test_env_lock();
+    let names = ["SCSH_NO_GROK_AUTH", XAI_API_KEY_ENV, "SCSH_NO_CLINE_AUTH", CLINE_API_KEY_ENV];
+    let saved: Vec<_> = names.iter().map(|name| (name, std::env::var_os(name))).collect();
+    std::env::set_var("SCSH_NO_GROK_AUTH", "1");
+    std::env::remove_var(XAI_API_KEY_ENV);
+    // Whatever ~/.grok holds, the opt-out keeps it out of the container.
+    let err = check_harness_host(Harness::Grok).unwrap_err();
+    assert!(err.contains("SCSH_NO_GROK_AUTH") && err.contains("XAI_API_KEY"), "{err}");
+    std::env::set_var(XAI_API_KEY_ENV, "xai-test");
+    assert_eq!(check_harness_host(Harness::Grok), Ok(()), "the API key is still forwarded");
+    // Cline's opt-out withholds the key as well, so no key can make it available.
+    std::env::set_var("SCSH_NO_CLINE_AUTH", "1");
+    std::env::set_var(CLINE_API_KEY_ENV, "cline-test");
+    let err = check_harness_host(Harness::ClineHeadless).unwrap_err();
+    assert!(err.starts_with("cline harness unavailable (SCSH_NO_CLINE_AUTH"), "{err}");
+    for (name, value) in saved {
+      match value {
+        Some(value) => std::env::set_var(name, value),
+        None => std::env::remove_var(name),
+      }
+    }
   }
 
   #[test]

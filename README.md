@@ -641,7 +641,7 @@ The one place they are all listed. Host-side knobs, all optional:
 | `SCSH_REAP_CONTAINERS` | on | `0` disables the daemon's zombie-container reaper: it destroys `scsh-*-run-*` containers that stay unclaimed by any live job for ~30 consecutive minutes of once-a-minute sweeps — orphans left by a killed `scsh run`. |
 | `SCSH_NO_RETRY` | off | `1` disables the single automatic retry of transient failures. |
 | `SCSH_QUIET` | off | `1` runs harnesses at their default log level (output is still teed to the run log). |
-| `SCSH_NO_CLAUDE_AUTH` / `SCSH_NO_OPENCODE_AUTH` / `SCSH_NO_CODEX_AUTH` / `SCSH_NO_GROK_AUTH` / `SCSH_NO_CURSOR_AUTH` / `SCSH_NO_CLINE_AUTH` | off | `1` skips forwarding that harness's host credentials into containers. |
+| `SCSH_NO_CLAUDE_AUTH` / `SCSH_NO_OPENCODE_AUTH` / `SCSH_NO_CODEX_AUTH` / `SCSH_NO_GROK_AUTH` / `SCSH_NO_CURSOR_AUTH` / `SCSH_NO_CLINE_AUTH` | off | `1` skips forwarding that harness's host login files into containers. Its environment key (`CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY`) is still forwarded, so the harness stays available only while that key is set; Cline's opt-out withholds `CLINE_API_KEY` too, and opencode has no key. |
 | `SCSH_NO_GH_AUTH` | off | `1` skips forwarding `GH_TOKEN`/`GITHUB_TOKEN` and the host GitHub CLI `hosts.yml` into containers. |
 | `SCSH_ANNOTATE_MODEL` | `gpt-5.6-luna` | Model `scsh annotate-cast` drives via Codex. |
 | `SCSH_STATS_FILE` | `~/.scsh/stats.jsonl` | Where run statistics are journaled. |
