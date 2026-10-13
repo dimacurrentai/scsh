@@ -2048,21 +2048,17 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   cmd.env("NO_COLOR", "1"); // plain stderr, so a captured startup failure reads cleanly
   cmd.stdin(std::process::Stdio::null());
   cmd.stdout(std::process::Stdio::null());
-  cmd.stderr(std::process::Stdio::piped()); // captured, so a failure before registration is not silent
+  let (stderr_sink, stderr_log) = runner_stderr(&session_id);
+  cmd.stderr(stderr_sink);
   match cmd.spawn() {
-    Ok(mut child) => {
+    Ok(child) => {
       let run_pid = Some(child.id());
-      // Same fate-binding as jobs/start: drain stderr, wait, reconcile — so a build that dies
-      // before it registers becomes a *failed* session (with the error), never a hidden "running".
+      // Same fate-binding as jobs/start: wait, then reconcile with the stderr log's tail — so a
+      // build that dies before it registers becomes a *failed* session, never a hidden "running".
       let store_reap = Arc::clone(store);
       let sid = session_id.clone();
-      let stderr = child.stderr.take();
       std::thread::spawn(move || {
-        let mut tail = String::new();
-        if let Some(mut e) = stderr {
-          let _ = e.read_to_string(&mut tail);
-        }
-        let code = child.wait().ok().and_then(|s| s.code());
+        let (code, tail) = reap_runner(child, stderr_log.as_deref());
         reconcile_finished_job(&store_reap, &sid, code, &tail);
       });
       let mut store = lock_store(store);
@@ -2099,8 +2095,8 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
 
 /// `POST /api/v1/setup/quota` — spawn a detached `scsh quota --session <id>` job (one run
 /// per harness, each with its own result file and proc row) and pre-create its session so
-/// the response deep-links to a live page. Same fate-binding as `images/build`: stderr is
-/// captured and the session reconciled on exit. One quota job at a time; concurrent → 409.
+/// the response deep-links to a live page. Same fate-binding as `images/build`: stderr goes to
+/// the session's log and the session is reconciled on exit. One quota job at a time; concurrent → 409.
 fn setup_quota_response(store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
   let now = now_unix_secs();
   let port = {
@@ -2128,19 +2124,15 @@ fn setup_quota_response(store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
   cmd.env("NO_COLOR", "1");
   cmd.stdin(std::process::Stdio::null());
   cmd.stdout(std::process::Stdio::null());
-  cmd.stderr(std::process::Stdio::piped());
+  let (stderr_sink, stderr_log) = runner_stderr(&session_id);
+  cmd.stderr(stderr_sink);
   match cmd.spawn() {
-    Ok(mut child) => {
+    Ok(child) => {
       let run_pid = Some(child.id());
       let store_reap = Arc::clone(store);
       let sid = session_id.clone();
-      let stderr = child.stderr.take();
       std::thread::spawn(move || {
-        let mut tail = String::new();
-        if let Some(mut e) = stderr {
-          let _ = e.read_to_string(&mut tail);
-        }
-        let code = child.wait().ok().and_then(|s| s.code());
+        let (code, tail) = reap_runner(child, stderr_log.as_deref());
         reconcile_finished_job(&store_reap, &sid, code, &tail);
       });
       let mut store = lock_store(store);
@@ -2483,19 +2475,15 @@ fn setup_tests_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, 
   }
   cmd.stdin(std::process::Stdio::null());
   cmd.stdout(std::process::Stdio::null());
-  cmd.stderr(std::process::Stdio::piped());
+  let (stderr_sink, stderr_log) = runner_stderr(&session_id);
+  cmd.stderr(stderr_sink);
   match cmd.spawn() {
-    Ok(mut child) => {
+    Ok(child) => {
       let run_pid = Some(child.id());
       let store_reap = Arc::clone(store);
       let sid = session_id.clone();
-      let stderr = child.stderr.take();
       std::thread::spawn(move || {
-        let mut tail = String::new();
-        if let Some(mut e) = stderr {
-          let _ = e.read_to_string(&mut tail);
-        }
-        let code = child.wait().ok().and_then(|s| s.code());
+        let (code, tail) = reap_runner(child, stderr_log.as_deref());
         reconcile_finished_job(&store_reap, &sid, code, &tail);
       });
       let mut store = lock_store(store);
@@ -2722,26 +2710,22 @@ fn start_job_in_repo(
   cmd.env("NO_COLOR", "1"); // plain stderr, so a captured error reads cleanly on the session page
   cmd.stdin(std::process::Stdio::null());
   cmd.stdout(std::process::Stdio::null());
-  cmd.stderr(std::process::Stdio::piped()); // captured, so a failure before registration is not silent
+  let (stderr_sink, stderr_log) = runner_stderr(&session_id);
+  cmd.stderr(stderr_sink);
   match cmd.spawn() {
-    Ok(mut child) => {
+    Ok(child) => {
       let run_pid = Some(child.id());
-      // Bind the session's fate to the process: drain its stderr, wait, then reconcile — so a job
-      // that dies before it ever registers becomes a *failed* session (with the error), never a
-      // hidden "running" one.
+      // Bind the session's fate to the process: wait, then reconcile with the tail of its stderr
+      // log (see `runner_stderr`) — so a job that dies before it ever registers becomes a
+      // *failed* session (with the error), never a hidden "running" one.
       let store_reap = Arc::clone(store);
       let sid = session_id.clone();
-      let stderr = child.stderr.take();
       if let Some(review) = &browser_review {
         super::github::write_browser_receipt(&root, &review.pull_request, &session_id, "running");
       }
       let review_root = root.clone();
       std::thread::spawn(move || {
-        let mut tail = String::new();
-        if let Some(mut e) = stderr {
-          let _ = e.read_to_string(&mut tail);
-        }
-        let code = child.wait().ok().and_then(|s| s.code());
+        let (code, tail) = reap_runner(child, stderr_log.as_deref());
         if let Some(review) = browser_review {
           // The workflow's own publish host step already wrote the terminal receipt (published /
           // publication_failed) and — because it runs as a normal daemon-tracked proc — it
@@ -2794,6 +2778,32 @@ fn start_job_in_repo(
 /// that deregistered normally already has an end time and is left alone; one that died without
 /// finishing is ended, and — if it never produced a single proc (a refusal/crash before it
 /// registered) — the captured error is surfaced as a failed row instead of a silent "running".
+/// Where a daemon-spawned runner's stderr goes: a file in the job's session logs, never a pipe
+/// back to the daemon. With a pipe the runner's stderr died with the daemon, so a daemon that
+/// exited (crashed, restarted, killed at login) took every job it had started down with it
+/// on the runner's next write. A file outlives the daemon and keeps the stream as a log.
+fn runner_stderr(session_id: &str) -> (std::process::Stdio, Option<std::path::PathBuf>) {
+  let dir = crate::runtime::session_logs_dir(session_id);
+  let path = dir.join(RUNNER_STDERR_LOG);
+  match std::fs::create_dir_all(&dir).and_then(|_| std::fs::File::create(&path)) {
+    Ok(file) => (std::process::Stdio::from(file), Some(path)),
+    Err(_) => (std::process::Stdio::null(), None),
+  }
+}
+
+/// The file name of a daemon-spawned runner's stderr under the session's logs.
+const RUNNER_STDERR_LOG: &str = "runner.stderr.log";
+
+/// Wait for a daemon-spawned runner and return its exit code with the tail of its stderr,
+/// which names the failure when the run died before it registered.
+fn reap_runner(mut child: std::process::Child, stderr: Option<&std::path::Path>) -> (Option<i32>, String) {
+  const TAIL_BYTES: usize = 16 * 1024;
+  let code = child.wait().ok().and_then(|s| s.code());
+  let bytes = stderr.and_then(|path| std::fs::read(path).ok()).unwrap_or_default();
+  let tail = &bytes[bytes.len().saturating_sub(TAIL_BYTES)..];
+  (code, String::from_utf8_lossy(tail).into_owned())
+}
+
 fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Option<i32>, stderr_tail: &str) {
   let now = now_unix_secs();
   // The run process is gone, so nothing will poll its cancel marker again. The runner clears
@@ -6622,6 +6632,35 @@ mod tests {
     std::fs::remove_file(&stub).ok();
     std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn a_runner_writes_its_stderr_to_the_session_log_not_to_the_daemon() {
+    // A pipe back to the daemon died with the daemon, and the runner died on its next write.
+    // A file outlives the daemon; the reaper still reads the failure from its tail.
+    let _env = crate::runtime::test_env_lock();
+    let home = std::env::temp_dir().join(format!("scsh-runner-stderr-{}", crate::runtime::random_nonce_6()));
+    let previous = std::env::var_os("SCSH_HOME");
+    std::env::set_var("SCSH_HOME", &home);
+    let (sink, path) = runner_stderr("abcdef");
+    let path = path.expect("the stderr log is created under the session");
+    assert!(path.ends_with(format!("sessions/abcdef/logs/{RUNNER_STDERR_LOG}")), "{}", path.display());
+    let child = std::process::Command::new("sh")
+      .args(["-c", "echo 'scsh: profile not found' >&2; exit 3"])
+      .stdin(std::process::Stdio::null())
+      .stdout(std::process::Stdio::null())
+      .stderr(sink)
+      .spawn()
+      .unwrap();
+    let (code, tail) = reap_runner(child, Some(&path));
+    match previous {
+      Some(value) => std::env::set_var("SCSH_HOME", value),
+      None => std::env::remove_var("SCSH_HOME"),
+    }
+    assert_eq!(code, Some(3));
+    assert!(tail.contains("profile not found"), "{tail}");
+    assert!(std::fs::read_to_string(&path).unwrap().contains("profile not found"), "kept as the job's log");
+    let _ = std::fs::remove_dir_all(home);
   }
 
   #[test]

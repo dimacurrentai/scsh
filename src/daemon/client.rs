@@ -457,8 +457,13 @@ impl Client {
     }
   }
 
+  /// A lifecycle POST (proc start/result/finish, deregister). When the persistent daemon has
+  /// gone away mid-run, the update would otherwise be lost and the finished job would read as
+  /// cancelled once a daemon came back; instead bring the daemon back and send it again. The
+  /// daemon reloads every job from its store, so the run simply continues on the new one.
   fn post_sync(&self, path: &str, body: &str) -> bool {
     send_post(self.inner.port, path, body)
+      || (revive_persistent_daemon(self.inner.port) && send_post(self.inner.port, path, body))
   }
 
   /// Drain buffered proc lines in the poster before a synchronous lifecycle POST.
@@ -539,6 +544,32 @@ fn parse_launch_grant(body: &str) -> Option<LaunchGrant> {
 
 fn log_daemon_warn(msg: &str) {
   eprintln!("session browser: {msg}");
+}
+
+/// How often one runner may try to bring a vanished daemon back.
+const DAEMON_REVIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Restart the daemon on `port` when it stopped answering and was the persistent one (its mode
+/// marker outlives it). An ephemeral daemon belongs to one CLI run and is never revived. At most
+/// one attempt per [`DAEMON_REVIVE_INTERVAL`] per process; a daemon that is merely slow keeps
+/// its exclusive store lock, so a redundant start exits without touching it.
+fn revive_persistent_daemon(port: u16) -> bool {
+  static LAST_ATTEMPT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+  if super::paths::daemon_api_responds(port) {
+    return true;
+  }
+  if super::paths::read_persisted_mode(port) != Some(super::model::DaemonMode::Persistent) {
+    return false;
+  }
+  {
+    let mut last = LAST_ATTEMPT.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|at| at.elapsed() < DAEMON_REVIVE_INTERVAL) {
+      return false;
+    }
+    *last = Some(std::time::Instant::now());
+  }
+  log_daemon_warn(&format!("the session browser daemon on port {port} stopped answering; starting it again"));
+  spawn_daemon(super::model::DaemonMode::Persistent).is_ok()
 }
 
 fn log_post_failure(path: &str, proc: Option<usize>) {
