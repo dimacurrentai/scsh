@@ -5,7 +5,9 @@ making another provider request. Collection happens before
 the attempt's forwarded credentials and temporary config are scrubbed:
 
 - Claude Code: sum the `usage` object on each unique assistant response in the fresh
-  transcript tree, including subagent transcripts.
+  transcript tree, including subagent transcripts. Every transcript must end on a finished
+  turn, except a subagent the main turn left behind mid-turn: once its transcript has been
+  untouched for two minutes, its counters are final and it no longer holds the wait.
 - Codex: keep the last cumulative `total_token_usage` record in each fresh session file,
   then sum independent parent and subagent sessions. Forked sessions with inherited
   accounting are marked unavailable rather than double-counting the parent.
