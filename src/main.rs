@@ -11453,7 +11453,7 @@ the run fails only when every selected skill is skipped.",
   );
   help_row(
     "SCSH_USAGE_ACCOUNTING_TIMEOUT",
-    "Seconds to wait for native counters after the turn goes quiet (default 30; Cursor 90).",
+    "Seconds to wait for native counters after the turn goes quiet (default 600, every harness).",
   );
   help_row("SCSH_NO_CACHE=1", "Run every skill fresh instead of replaying cached results (= run --no-cache).");
   help_row(
