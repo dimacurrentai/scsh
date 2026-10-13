@@ -2,14 +2,14 @@
 //!
 //! The workflow (`harness_defs/gh-gorgeous-review.yml`) reviews a GitHub pull request with
 //! eligible harnesses on this machine, then publishes one review. Cursor and Grok
-//! share one Grok 4.5 lane; only the better-funded route runs. Three of its
+//! share one Grok 4.5 lane; Cursor runs it, and Grok only when Cursor cannot. Three of its
 //! steps run on the host, because they need the operator's credentials rather than a model:
 //!
 //! - `plan`: which harnesses run. Credentials first ([`crate::runtime::check_harness_host`]),
 //!   then quota ([`crate::quota::fetch`]): a harness sits out when its long window (weekly,
 //!   monthly, billing cycle) has under 10% left or its 5-hour window under 25%.
 //!   Cursor checks only its native-model pool; Grok checks shared credits and GrokBuild.
-//!   Selection prefers spendable quota per day until reset. Fewer than
+//!   Cursor takes the lane whenever it is cleared; Grok is the fallback. Fewer than
 //!   [`MIN_HARNESSES`] runnable harnesses fails the plan — and with it the job — up front.
 //! - `publish`: post the review the in-container `prepare_review` step wrote, through `gh`,
 //!   with the head-unchanged and duplicate checks in [`crate::daemon::github_publish`].
@@ -228,8 +228,7 @@ pub fn plan_cmd() -> i32 {
       decide(h, credentials, quota.as_ref())
     })
     .collect();
-  let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-  selection::select(&mut plans, &quotas, now);
+  selection::select(&mut plans);
   for p in &plans {
     println!("{} {}: {}", if p.runs() { "✓" } else { "⊘" }, p.harness.as_str(), p.note);
   }
