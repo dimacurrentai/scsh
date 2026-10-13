@@ -197,6 +197,40 @@ fn cline_setup_labels_match_the_live_client() {
 }
 
 #[test]
+fn the_graph_hands_a_vertical_wheel_to_the_page_only_at_its_edge() {
+  let view = super::workflow_view_js::WORKFLOW_VIEW_JS;
+  assert!(
+    view.contains("!workflowExpanded && wfWheelScrollsPage(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight, ev.deltaX, ev.deltaY)"),
+    "the wheel handler consults the edge check, except in the large view"
+  );
+  assert!(view.contains("window.scrollBy(0, ev.deltaY * unit)"), "the page scrolls by the wheel's own distance");
+  if crate::runtime::which("node").is_none() {
+    return;
+  }
+  let mut script = client_js_function(view, "wfWheelScrollsPage");
+  // (top, view, content, dx, dy) -> page scrolls?
+  for (args, expected) in [
+    ("0, 100, 400, 0, -10", true),    // at the top, wheel up
+    ("0, 100, 400, 0, 10", false),    // at the top, wheel down: the graph scrolls
+    ("150, 100, 400, 0, -10", false), // mid-graph, either way: the graph scrolls
+    ("150, 100, 400, 0, 10", false),
+    ("300, 100, 400, 0, 10", true),   // at the bottom, wheel down
+    ("300, 100, 400, 0, -10", false), // at the bottom, wheel up: the graph scrolls
+    ("0, 100, 100, 0, 10", true),     // fitted: nothing to scroll in either direction
+    ("0, 100, 100, 0, -10", true),
+    ("0, 100, 100, 20, 10", false),   // mostly horizontal stays with the graph
+    ("0, 100, 100, 5, 0", false),
+    ("299.5, 100, 400, 0, 10", true), // subpixel bottom
+  ] {
+    script.push_str(&format!(
+      "if (wfWheelScrollsPage({args}) !== {expected}) throw new Error('wfWheelScrollsPage({args})');\n"
+    ));
+  }
+  let output = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
+  assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
 fn transcript_box_matches_the_live_client() {
   if crate::runtime::which("node").is_none() {
     return;
@@ -4380,7 +4414,11 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(!js.contains("requestFullscreen"), "large view deliberately avoids the browser Fullscreen API");
   assert!(js.contains("stage.style.transform"), "zoom scales the graph as one surface in every browser");
   assert!(js.contains("let workflowZoom = 1"), "zoom survives dynamic graph remounts");
-  assert!(!js.contains("window.scrollBy"), "the page viewport never moves except on direct human input");
+  assert_eq!(
+    js.matches("window.scrollBy").count(),
+    js.matches("window.scrollBy(0, ev.deltaY * unit)").count(),
+    "the page viewport never moves except on direct human input: a wheel the graph cannot follow"
+  );
   assert!(!js.contains("scroller.style.height"), "zoom scales inside the fixed viewport, never resizing the card");
   assert!(js.contains("scroll !== false"), "data-driven panel activation opens without scrolling the page");
   assert!(js.contains("function wfNodeTip"), "useful node tooltips");

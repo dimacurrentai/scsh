@@ -25,6 +25,14 @@ function wfWheelZoom(current, deltaY, deltaMode, pageHeight) {
   const pixels = Math.max(-50, Math.min(50, deltaY * unit));
   return current * Math.exp(-pixels * 0.002);
 }
+function wfWheelScrollsPage(top, viewHeight, contentHeight, deltaX, deltaY) {
+  // A mostly vertical wheel that the graph cannot follow any further belongs to the page:
+  // scrolled to its top going up, or to its bottom going down (or fitted, with nothing to
+  // scroll). Horizontal wheels always stay with the graph.
+  if (deltaY === 0 || Math.abs(deltaY) < Math.abs(deltaX)) return false;
+  const edge = 1;
+  return deltaY < 0 ? top <= edge : top + viewHeight >= contentHeight - edge;
+}
 function initWorkflowGraphView(activateTask) {
   const root = document.querySelector('[data-workflow-graph]');
   // The bound flag is a JS property, never a DOM attribute. A snapshot re-saved from the
@@ -235,6 +243,13 @@ function initWorkflowGraphView(activateTask) {
       // Trackpad pinch arrives as ctrlKey wheel events: zoom toward the fingers, not the
       // viewport center.
       zoomAt(wfWheelZoom(workflowZoom, ev.deltaY, ev.deltaMode, scroller.clientHeight), ev.clientX, ev.clientY);
+      return;
+    }
+    // `overscroll-behavior: contain` stops native scroll chaining, so hand the page its wheel
+    // here. Not in the large view, which locks the page behind it.
+    if (!workflowExpanded && wfWheelScrollsPage(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight, ev.deltaX, ev.deltaY)) {
+      const unit = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? window.innerHeight : 1;
+      window.scrollBy(0, ev.deltaY * unit);
       return;
     }
     scroller.scrollLeft += ev.deltaX;
