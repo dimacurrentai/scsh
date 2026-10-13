@@ -178,7 +178,7 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
     // reports whether the latest turn is terminal, so their stream is parsed once.
     let summarized =
       matches!(harness, crate::config::Harness::Cursor | crate::config::Harness::Grok | crate::config::Harness::Cline);
-    if !summarized && !crate::usage::turn_finished(harness, &stream) {
+    if !summarized && !crate::usage::turn_finished(harness, &stream) && !abandoned_subagent(harness, path, &after) {
       return None;
     }
     streams.push(Some(stream));
@@ -192,6 +192,20 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
     _ => return None,
   };
   (fresh && summary.complete && summary.tokens.is_some()).then_some(summary)
+}
+
+/// How long a Claude subagent transcript must sit untouched, without a finished turn, before it
+/// counts as abandoned. Longer than Claude's default two-minute Bash timeout, so a subagent
+/// waiting on a slow command still holds the accounting wait.
+const ABANDONED_SUBAGENT_IDLE: Duration = Duration::from_secs(120);
+
+/// A Claude subagent the main turn left behind mid-turn: its transcript under `subagents/` ends
+/// on a tool call and has not changed for [`ABANDONED_SUBAGENT_IDLE`]. Its counters are final, so
+/// it must not hold the main session's accounting until the deadline.
+fn abandoned_subagent(harness: crate::config::Harness, path: &Path, meta: &std::fs::Metadata) -> bool {
+  harness == crate::config::Harness::Claude
+    && path.parent().and_then(Path::file_name).is_some_and(|dir| dir == "subagents")
+    && meta.modified().ok().and_then(|at| at.elapsed().ok()).is_some_and(|idle| idle >= ABANDONED_SUBAGENT_IDLE)
 }
 
 /// Read the native, local accounting artifacts written by one interactive harness run.
@@ -449,6 +463,47 @@ mod completion_tests {
       assert!(saved.complete);
       assert!(!run.artifact("usage-error").exists());
     }
+  }
+
+  #[test]
+  fn an_abandoned_claude_subagent_does_not_hold_finished_accounting() {
+    let run = Run::new();
+    let projects = run.0.join(crate::runtime::CLAUDE_AUTH_REL).join(".claude/projects/p");
+    std::fs::create_dir_all(projects.join("s/subagents")).unwrap();
+    let usage =
+      r#""usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":0}"#;
+    std::fs::write(
+      projects.join("s.jsonl"),
+      format!(r#"{{"type":"assistant","message":{{"id":"main","stop_reason":"end_turn",{usage}}}}}"#),
+    )
+    .unwrap();
+    // The subagent's last response is a tool call that never got an answer.
+    let subagent = projects.join("s/subagents/agent-a.jsonl");
+    std::fs::write(
+      &subagent,
+      format!(r#"{{"type":"assistant","message":{{"id":"sub","stop_reason":"tool_use",{usage}}}}}"#),
+    )
+    .unwrap();
+    let result = run.0.join("tmp/result.json");
+    let age = |path: &Path, secs: u64| {
+      let at = std::time::SystemTime::now() - Duration::from_secs(secs);
+      std::fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
+    };
+    age(&result, 300);
+    age(&subagent, 60);
+    assert!(
+      completed_usage(Agent::Claude, &run.0, &result).is_none(),
+      "a recently active subagent may still be working"
+    );
+    age(&subagent, ABANDONED_SUBAGENT_IDLE.as_secs());
+    let summary =
+      completed_usage(Agent::Claude, &run.0, &result).expect("the main turn finished; the subagent was left behind");
+    assert!(summary.complete);
+    assert_eq!(summary.llm_round_trips, Some(2), "the abandoned subagent's spend still counts");
+    // The main transcript gets no such allowance: an unfinished main turn always holds the wait.
+    std::fs::rename(&subagent, projects.join("s.jsonl")).unwrap();
+    age(&projects.join("s.jsonl"), 600);
+    assert!(completed_usage(Agent::Claude, &run.0, &result).is_none());
   }
 
   #[test]
