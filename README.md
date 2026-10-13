@@ -357,19 +357,12 @@ shared weekly credits and GrokBuild, not unrelated voice/chat gauges. Cursor's
 [usage documentation](https://prod.cursor.com/help/models-and-usage/usage-limits)
 distinguishes native models from Auto, which can draw from either pool.
 
-Cursor and Grok provide one Grok 4.5 lane: at most one runs. Among eligible routes,
-the planner prefers the larger **spendable percentage per day until reset**:
-`max(0, 90 - used_percent) / days_until_reset`, taking the minimum across applicable
-limits and clamping the reset horizon to at least one hour. This favors allowance
-that would expire sooner while keeping the reserve; it is a scheduling heuristic,
-not a claim that the subscriptions buy equal token capacity. Monthly versus weekly
-periods use their actual reset dates, not assumed cycle lengths. If either reset is
-missing, invalid, unsupported, or elapsed, compare spendable percentages instead.
-Prefer a known quota over an unavailable one; ties and two unavailable readings
-prefer Cursor. Missing quota retains the existing run-anyway behavior, with an
-explicit note. The unselected route reports `alternative_selected`; selection reasons
-and raw quota readings remain in the plan. The two-lane minimum is checked afterward,
-so Cursor plus Grok alone cannot count as two independent opinions.
+Cursor and Grok provide one Grok 4.5 lane: at most one runs. Cursor takes it whenever
+the plan clears Cursor, however much quota either has left. Grok runs only when Cursor
+sits out for missing credentials or low quota. Missing quota keeps the run-anyway behavior,
+with an explicit note. The unselected route reports `alternative_selected`, and the raw
+quota readings remain in the plan. The two-lane minimum is checked afterward, so Cursor
+plus Grok alone cannot count as two independent opinions.
 
 Globally installed skill profiles may also declare required environment inputs. The Run page renders those inputs as form fields and forwards their values to the spawned profile.
 

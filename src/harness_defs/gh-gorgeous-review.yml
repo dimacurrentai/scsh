@@ -7,7 +7,7 @@
 # left (a long window — weekly/monthly/billing — under 10% left benches it, a 5-hour window
 # under 25% left benches it). Fewer than two runnable harnesses fails the plan, and the job,
 # up front. Cursor uses its native-model pool; Grok uses shared credits and GrokBuild.
-# Only one runs: prefer spendable quota per day until reset (see README). Each of the five
+# Only one runs: Cursor when it is cleared, otherwise Grok (see README). Each of the five
 # reviewer skills runs on every harness the plan cleared; a benched harness shows every one of its reviewer nodes skipped, with the plan reason on the
 # node. `prepare_<harness>` runs on the first runnable harness the plan chose as publisher,
 # reads the reviewer grades and comments, and writes the review payload (one human-voiced
