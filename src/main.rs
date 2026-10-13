@@ -6588,6 +6588,18 @@ keeps its original environment"
   )
 }
 
+/// Whether a run that otherwise succeeded failed only on token accounting. The task must have
+/// written its result: a harness that exited before doing the work (a CLI that could not load
+/// its models, say) is a missing result with its own screen diagnosis, never "finished the task
+/// but did not produce complete token accounting".
+fn accounting_is_what_failed(
+  container_ok: bool, result_written: bool, usage_error_marker: bool, usage: Option<&usage::Summary>,
+) -> bool {
+  container_ok
+    && result_written
+    && (usage_error_marker || usage.is_none_or(|summary| !summary.complete || summary.tokens.is_none()))
+}
+
 /// Add an uncertain screen diagnosis only after the run has already failed.
 /// Keep the observed failure reason intact: hints never choose a retry policy.
 fn finish_harness_failure(
@@ -7387,10 +7399,12 @@ fn run_one_skill(
     }
   }
   let usage_failure = if usage_accounting_required()
-    && matches!(&result, Ok((true, _, _)))
-    && (run_dir.join(format!("{}.usage-error", runtime::RUN_LOG_REL)).is_file()
-      || usage.as_ref().is_none_or(|summary| !summary.complete || summary.tokens.is_none()))
-  {
+    && accounting_is_what_failed(
+      matches!(&result, Ok((true, _, _))),
+      run_dir.join(&skill.result).is_file(),
+      run_dir.join(format!("{}.usage-error", runtime::RUN_LOG_REL)).is_file(),
+      usage.as_ref(),
+    ) {
     let marker = run_dir.join(format!("{}.usage-error", runtime::RUN_LOG_REL));
     let marker_detail = std::fs::read_to_string(&marker).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let timed_out = marker_detail.as_deref().is_some_and(|detail| detail.starts_with("timeout:"));
@@ -12021,6 +12035,20 @@ mod tests {
     assert!(!harness_came_up_logged_out(config::Harness::Claude, &limited));
     assert!(auth_rejected_why(false).contains("refresh the login on the host"));
     assert!(auth_rejected_why(true).contains("claude setup-token"));
+  }
+
+  #[test]
+  fn a_harness_that_never_wrote_its_result_is_not_an_accounting_failure() {
+    let incomplete = usage::unavailable(usage::Harness::Cursor);
+    // Observed live: cursor-agent could not load its models, exited, and wrote no result.
+    assert!(!accounting_is_what_failed(true, false, false, Some(&incomplete)));
+    assert!(!accounting_is_what_failed(true, false, true, None));
+    // The task finished and only the counters are missing: that IS an accounting failure.
+    assert!(accounting_is_what_failed(true, true, false, Some(&incomplete)));
+    assert!(accounting_is_what_failed(true, true, false, None));
+    assert!(accounting_is_what_failed(true, true, true, None));
+    // A failed container keeps its own verdict.
+    assert!(!accounting_is_what_failed(false, true, false, Some(&incomplete)));
   }
 
   #[test]
