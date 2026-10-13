@@ -63,6 +63,9 @@ fn run(args: &[String]) -> i32 {
     // One process-wide answer: the daemon client reads SCSH_RETRIES at registration.
     std::env::set_var("SCSH_RETRIES", n.to_string());
   }
+  if cli.no_cache {
+    std::env::set_var(NO_CACHE_ENV, "1");
+  }
   match cli.mode {
     Mode::Help(topic) => {
       print_help(topic);
@@ -989,6 +992,9 @@ struct Cli {
   /// `run --retries N`: this job's daemon-restart budget (default 25; 0 = never
   /// restarted). Propagated as `SCSH_RETRIES` so the session registers it.
   retries: Option<u32>,
+  /// `run --no-cache`: run every skill fresh instead of replaying a cached result. Propagated
+  /// as `SCSH_NO_CACHE=1`, which also works on its own (and for a daemon's jobs).
+  no_cache: bool,
   /// `run`/`list`/`check-profile --override-dot-scsh-yml <path>`: use this `.scsh.yml` (and its
   /// sibling `.skills/`) instead of the repo's, so a global skill can drive a fleet without
   /// installing into the target tree. The bundle's skills are installed GLOBALLY inside each
@@ -1050,6 +1056,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut def: Option<String> = None;
   let mut resume_from: Option<String> = None;
   let mut retries: Option<u32> = None;
+  let mut no_cache = false;
   let mut override_dot_scsh_yml: Option<PathBuf> = None;
   let mut global = false;
   let mut base: Option<String> = None;
@@ -1410,6 +1417,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         retries = Some(n.parse().map_err(|_| format!("bad --retries value '{n}'"))?);
         None
       }
+      // `run --no-cache`: skip cache lookups, so every skill runs fresh (and refreshes its entry).
+      "--no-cache" => {
+        no_cache = true;
+        None
+      }
       // `run --def <name> --resume-from <session>`: reuse the named prior session's completed
       // step results and run only what never completed.
       "--resume-from" => {
@@ -1604,6 +1616,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if retries.is_some() && !matches!(mode, Mode::Run) {
     return Err("--retries only applies to 'run' (e.g. `scsh run --def greet --retries 3`)".into());
   }
+  if no_cache && !matches!(mode, Mode::Run) {
+    return Err("--no-cache only applies to 'run' (e.g. `scsh run matrix --no-cache`)".into());
+  }
   if override_dot_scsh_yml.is_some()
     && !matches!(mode, Mode::Run | Mode::List | Mode::CheckProfile | Mode::Probe | Mode::InspectPrompt)
   {
@@ -1635,6 +1650,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     def,
     resume_from,
     retries,
+    no_cache,
     override_dot_scsh_yml,
     global,
     base,
@@ -6863,7 +6879,7 @@ fn run_one_skill(
   // is computed from the caller's committed state, which is what the clone would be.)
   let key = cache_allowed.then(|| cache_key_at(root, skill, &env, source_revision, base)).flatten();
   if let Some(key) = &key {
-    if let Some(entry) = cache_lookup(root, key) {
+    if let Some(entry) = cache_replay(root, key) {
       let workflow_outputs = result_contract.and_then(|contract| extract_step_outputs(&entry.result, contract).ok());
       let valid = result_contract.is_none() || workflow_outputs.is_some();
       if valid && restore_cached_result(root, &skill.result, &entry.result).is_ok() {
@@ -8958,6 +8974,21 @@ fn incoming_branch_name(skill: &str, stamp: &str, tip: &str) -> String {
 // ---------------------------------------------------------------------------
 // Result cache (content-addressed, under the repo's gitignored tmp/.sccache/)
 // ---------------------------------------------------------------------------
+
+/// `SCSH_NO_CACHE=1` (or `run --no-cache`) runs every skill fresh instead of replaying its cached
+/// result. The fresh result still replaces the cache entry.
+const NO_CACHE_ENV: &str = "SCSH_NO_CACHE";
+
+/// The cache entry a run replays instead of running: none under `SCSH_NO_CACHE`, which skips only
+/// the lookup, so the fresh result still replaces the entry under the same key.
+fn cache_replay(root: &Path, key: &str) -> Option<CacheEntry> {
+  let fresh = matches!(std::env::var(NO_CACHE_ENV).ok().as_deref(), Some("1") | Some("true"));
+  if fresh {
+    None
+  } else {
+    cache_lookup(root, key)
+  }
+}
 
 /// Where cached results live: `.sccache/` under the repo's gitignored scratch root (`tmp/`, or
 /// `.harness/tmp` when that is the gitignored one).
@@ -11309,6 +11340,7 @@ fn print_help_overview() {
   println!();
   println!("{}", h_head("Options:"));
   help_row("--profile <names>", "With `run`: only these profiles (`default` = no-profile skills).");
+  help_row("--no-cache", "With `run`: run every skill fresh instead of replaying cached results.");
   help_row("--override-dot-scsh-yml <path>", "With `run`/`list`/`check-profile`: use this `.scsh.yml`");
   help_cont("(+ sibling `.skills/`) instead of the repo's — no install into the target tree.");
   help_row("--verbose", "With list: also print the Dockerfile and exact commands.");
@@ -11423,6 +11455,7 @@ the run fails only when every selected skill is skipped.",
     "SCSH_USAGE_ACCOUNTING_TIMEOUT",
     "Seconds to wait for native counters after the turn goes quiet (default 30; Cursor 90).",
   );
+  help_row("SCSH_NO_CACHE=1", "Run every skill fresh instead of replaying cached results (= run --no-cache).");
   help_row(
     "SCSH_REPAIR_RESULT_JSON=0",
     "Require strict result JSON (default repairs undefined escapes; =1 enables repair).",
@@ -11923,7 +11956,8 @@ fn print_help_cache() {
   duration and recording, chapters once annotation finishes, AND — for a commit-enabled skill —
   the commits it made (journaled as a git patch). On a hit scsh restores the result file, prints
   it with "(cached · <when>)", restores the cast + chapters, and replays any journaled commits;
-  on a miss it runs and stores them.
+  on a miss it runs and stores them. `scsh run --no-cache` (or SCSH_NO_CACHE=1) skips the
+  lookup and runs every skill fresh; each fresh result still replaces its entry.
 "#
   );
   println!();
@@ -12945,6 +12979,14 @@ mod tests {
   }
 
   #[test]
+  fn no_cache_parses_on_run_only() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    assert!(cli(&["run", "matrix", "--no-cache"]).unwrap().no_cache);
+    assert!(!cli(&["run", "matrix"]).unwrap().no_cache);
+    assert!(cli(&["list", "--no-cache"]).is_err(), "run-only flag");
+  }
+
+  #[test]
   fn resume_from_parses_on_def_runs_only() {
     let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
     let c = cli(&["run", "--def", "greet", "--resume-from", "qtsiuf"]).unwrap();
@@ -13732,6 +13774,26 @@ Subject: [PATCH] add: 2 + 3 = 5
     assert_eq!(e2.commits.as_deref(), Some(patch));
     assert!(e2.elapsed.is_none() && e2.cast.is_none(), "optional fields absent when not stored");
     assert!(e2.cached_at.is_some(), "cached_at still stamped without a cast");
+  }
+
+  #[test]
+  fn no_cache_runs_fresh_but_still_refreshes_the_entry() {
+    let _env = runtime::test_env_lock();
+    let saved = std::env::var_os(NO_CACHE_ENV);
+    let caller = mt_dir("nocache");
+    cache_store(&caller, "k", r#"{"old":1}"#, None, None, None);
+    std::env::remove_var(NO_CACHE_ENV);
+    assert!(cache_replay(&caller, "k").is_some(), "an ordinary run replays the hit");
+    std::env::set_var(NO_CACHE_ENV, "1");
+    assert!(cache_replay(&caller, "k").is_none(), "--no-cache runs the skill");
+    // The fresh run's store still lands, so the next ordinary run replays the new result.
+    cache_store(&caller, "k", r#"{"new":2}"#, None, None, None);
+    std::env::remove_var(NO_CACHE_ENV);
+    assert_eq!(cache_replay(&caller, "k").unwrap().result, r#"{"new":2}"#);
+    if let Some(value) = saved {
+      std::env::set_var(NO_CACHE_ENV, value);
+    }
+    let _ = std::fs::remove_dir_all(&caller);
   }
 
   #[test]
