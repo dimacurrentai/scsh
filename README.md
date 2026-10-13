@@ -516,7 +516,9 @@ a deterministic blob of:
 Same content + same skill + same env → same key → a **cache hit**: `scsh` restores the
 result instantly and prints `(cached)` — no clone, no container, no model call. A miss
 runs the skill and stores its result. The cache lives in the repo's gitignored
-**`tmp/.sccache/<sha256>.json`**, and nowhere else.
+**`tmp/.sccache/<sha256>.json`**, and nowhere else. `scsh run --no-cache` (or
+`SCSH_NO_CACHE=1`) runs every skill fresh, for example to measure a model again; each fresh
+result still replaces its cache entry.
 
 A commit-enabled skill's run **also journals the commits it made** into that cache entry.
 When it commits, the repo's tree changes, so the *next* run is a miss (it runs again). But
@@ -639,6 +641,7 @@ The one place they are all listed. Host-side knobs, all optional:
 | `SCSH_USAGE_ACCOUNTING_TIMEOUT` | `600` | Maximum seconds to wait for native counters after the turn goes quiet; proceeds as soon as accounting completes. |
 | `SCSH_REPAIR_RESULT_JSON` | on | `0` requires strict result JSON. Default (or `1`) repairs undefined escapes before schema validation — the same rescue used for agent-authored writes. |
 | `SCSH_REAP_CONTAINERS` | on | `0` disables the daemon's zombie-container reaper: it destroys `scsh-*-run-*` containers that stay unclaimed by any live job for ~30 consecutive minutes of once-a-minute sweeps — orphans left by a killed `scsh run`. |
+| `SCSH_NO_CACHE` | off | `1` runs every skill fresh instead of replaying a cached result (same as `scsh run --no-cache`); fresh results still refresh the cache. |
 | `SCSH_NO_RETRY` | off | `1` disables the single automatic retry of transient failures. |
 | `SCSH_QUIET` | off | `1` runs harnesses at their default log level (output is still teed to the run log). |
 | `SCSH_NO_CLAUDE_AUTH` / `SCSH_NO_OPENCODE_AUTH` / `SCSH_NO_CODEX_AUTH` / `SCSH_NO_GROK_AUTH` / `SCSH_NO_CURSOR_AUTH` / `SCSH_NO_CLINE_AUTH` | off | `1` skips forwarding that harness's host login files into containers. Its environment key (`CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY`) is still forwarded, so the harness stays available only while that key is set; Cline's opt-out withholds `CLINE_API_KEY` too, and opencode has no key. |
