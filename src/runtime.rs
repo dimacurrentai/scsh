@@ -309,6 +309,9 @@ pub const CLINE_FORWARD_REL: &str = "tmp/.cline";
 /// Host env var for a Cline API key (`cline.bot`). Also read from `~/.cline` and `~/.env`.
 pub const CLINE_API_KEY_ENV: &str = "CLINE_API_KEY";
 
+/// Grok's feature switch for its `ask_user_question` tool, set to `false` in every container.
+pub const GROK_ASK_USER_QUESTION_ENV: &str = "GROK_ASK_USER_QUESTION";
+
 /// Host env var for API-key Grok auth (xAI API key from console.x.ai; works headless).
 pub const XAI_API_KEY_ENV: &str = "XAI_API_KEY";
 
@@ -602,8 +605,10 @@ fn harness_container_env_verbose(harness: Harness, verbose: bool) -> Vec<(String
       vec![("RUST_LOG".to_string(), "codex_core=info,codex_exec=info".to_string())]
     }
     Harness::Codex | Harness::CodexHeadless => Vec::new(),
-    // Grok's verbosity comes from --debug/--debug-file flags; no env needed.
-    Harness::Grok => Vec::new(),
+    // Grok's verbosity comes from --debug/--debug-file flags. Its feature switch removes the
+    // `ask_user_question` tool: a question card blocks the TUI on an answer nobody in the
+    // container will give. The TUI ignores `--disallowed-tools`, which is headless-only.
+    Harness::Grok => vec![(GROK_ASK_USER_QUESTION_ENV.to_string(), "false".to_string())],
     // Cline's verbosity is the CLI default; quota snapshots use CLINE_API_KEY, forwarded separately.
     Harness::Cline | Harness::ClineHeadless => Vec::new(),
     // Point cursor-agent at forwarded config + auth under the repo's gitignored tmp/.
@@ -840,8 +845,9 @@ pub fn harness_command_with_options(
       // the interactive session (`grok "fix the bug"`) — vs the old headless `grok -p`, which
       // recorded no real terminal. `--always-approve` approves tools, but folder trust is
       // separate: `--trust` grants it before startup loads project instructions and skills.
-      // Both apply to the ephemeral container, which is the sandbox.
-      let mut tui = String::from("grok --always-approve --trust");
+      // Both apply to the ephemeral container, which is the sandbox. `--no-plan` removes plan
+      // mode, whose exit waits for a human to approve the plan.
+      let mut tui = String::from("grok --always-approve --trust --no-plan");
       if let Some(m) = model {
         tui.push_str(" -m ");
         tui.push_str(&shell_quote(m));
@@ -3535,7 +3541,7 @@ TAG
     );
     assert!(cmd.contains("scsh: harness=grok"));
     assert!(cmd.contains("scsh-tui-record 200 50 slash-exit none tmp/add_grok.json "), "got: {cmd}");
-    assert!(cmd.contains("grok --always-approve --trust -m grok-build"), "got: {cmd}");
+    assert!(cmd.contains("grok --always-approve --trust --no-plan -m grok-build"), "got: {cmd}");
     assert!(!cmd.contains("grok -p "), "no headless -p: {cmd}");
     assert!(cmd.contains(" -m grok-build"));
     assert!(cmd.contains(" --effort high"));
@@ -3551,7 +3557,7 @@ TAG
       crate::config::Terminal::default(),
       &crate::config::SkillDelivery::Repo,
     );
-    assert!(bare.contains("grok --always-approve --trust -- "), "got: {bare}");
+    assert!(bare.contains("grok --always-approve --trust --no-plan -- "), "got: {bare}");
     assert!(!bare.contains(" --effort "));
     assert!(!bare.contains(" -m "));
 
@@ -3565,7 +3571,7 @@ TAG
       &crate::config::SkillDelivery::DirectPrompt("---\nname: build\n---\nDo the work.".into()),
     );
     assert!(
-      frontmatter.contains("grok --always-approve --trust -- ") && frontmatter.contains("name: build"),
+      frontmatter.contains("grok --always-approve --trust --no-plan -- ") && frontmatter.contains("name: build"),
       "frontmatter must be positional, never parsed as an option: {frontmatter}"
     );
   }
@@ -3771,6 +3777,11 @@ TAG
     assert_eq!(cursor[1].0, "XDG_CONFIG_HOME");
     assert_eq!(cursor[2].0, "SCSH_CURSOR_HOOKS_LOG");
     assert!(cursor[2].1.ends_with(".cursor-hooks.jsonl"));
+    // Grok never gets its question tool, whatever the verbosity: nobody answers in a container.
+    for verbose in [true, false] {
+      let grok = harness_container_env_verbose(Harness::Grok, verbose);
+      assert_eq!(grok, vec![("GROK_ASK_USER_QUESTION".to_string(), "false".to_string())]);
+    }
   }
 
   #[test]

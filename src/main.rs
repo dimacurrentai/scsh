@@ -11543,7 +11543,7 @@ fn print_help_config() {
   println!(
     "{}",
     h_dim(
-      "  grok:     grok --always-approve --trust -m <model> --effort <level> \"Run the skill defined in .skills/<source>/…\" \
+      "  grok:     grok --always-approve --trust --no-plan -m <model> --effort <level> \"Run the skill defined in .skills/<source>/…\" \
 (~/.grok/auth.json or XAI_API_KEY)",
     )
   );
