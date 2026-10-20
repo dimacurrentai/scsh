@@ -160,6 +160,19 @@ Claude routes accept `prompt_contract: standard|compact|verbatim` while retainin
 
   Startup watchdogs check native model-usage records and completed tool calls before killing a quiet agent. Once those confirm work has started, the short startup timeout is permanently disabled for that attempt; the configured `inactivity_timeout` still applies. This also works with `SCSH_NO_USAGE=1`: proving that work started does not require complete token accounting. Without native evidence (including OpenCode, which has no adapter), the existing startup watchdog remains in effect.
 
+  The session browser shows the runner's next recovery action and deadline beside each
+  attempt: startup checks, inactivity stops, quota waits, result/accounting waits,
+  cleanup, and retry backoff. These are backend-owned deadlines; screen activity,
+  quota pauses, and resumed generation update or cancel them. A recording's playback
+  clock still measures recorded output, so it can stop while these wall-clock countdowns continue.
+
+  A fresh Claude terminal snapshot showing “Connection lost mid-response” followed by
+  its completed-turn marker and empty input prompt gets a 15-second grace period.
+  Continued work cancels that grace; provider retries and quota waits keep their own
+  policies. A disconnect on the first attempt retries immediately after cleanup;
+  subsequent failures retain exponential backoff, retry budgets, and the repeated-failure
+  breaker. A valid result still follows the normal completion and validation path.
+
 - **`result`** *(required)* — a **repo-relative** path the skill must create (keep it
   under the gitignored `tmp/`). A missing result fails the skill. When it appears,
   `scsh` parses it as JSON and prints the message — a `result`/`message` field, or a

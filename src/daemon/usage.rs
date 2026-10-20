@@ -43,6 +43,19 @@ pub struct Completion {
 }
 
 impl Completion {
+  /// Display the same monotonic budget enforced by `poll`, including cancellation
+  /// while generation resumes and the separate graceful-exit allowance.
+  pub fn recovery(&self) -> crate::recovery::Recovery {
+    use crate::recovery::{deadline, Recovery};
+    if let Some(released) = self.released {
+      Recovery::Exit(deadline(released, Duration::from_secs(15)))
+    } else if let Some(started) = self.started {
+      Recovery::Accounting(deadline(started, Duration::from_secs(accounting_timeout_secs())))
+    } else {
+      Recovery::Finishing
+    }
+  }
+
   pub fn new() -> Self {
     Self { started: None, released: None, next_poll: Instant::now(), native_bytes: None }
   }
@@ -603,11 +616,24 @@ mod completion_tests {
     assert!(run.poll_live(&mut state, Agent::Cursor, true, true));
     assert!(!run.artifact("shutdown").exists());
     assert!(state.started.is_none(), "screen activity means the generation is still running");
+    assert_eq!(state.recovery(), crate::recovery::Recovery::Finishing);
     state.started = Some(Instant::now() - Duration::from_secs(accounting_timeout_secs() + 1));
     assert!(run.poll_live(&mut state, Agent::Cursor, true, true));
     assert!(!run.artifact("usage-error").exists(), "a live turn must not expire the quiet-turn budget");
     assert!(!run.artifact("shutdown").exists());
     assert!(state.started.is_none());
+    assert_eq!(state.recovery(), crate::recovery::Recovery::Finishing);
+  }
+
+  #[test]
+  fn completion_reports_the_accounting_and_exit_budgets_it_enforces() {
+    use crate::recovery::Recovery;
+    let mut state = Completion::new();
+    state.started = Some(Instant::now());
+    let now = crate::daemon::now_unix_secs();
+    assert!(matches!(state.recovery(), Recovery::Accounting(at) if at >= now + accounting_timeout_secs() - 1));
+    state.released = Some(Instant::now());
+    assert!(matches!(state.recovery(), Recovery::Exit(at) if (now + 14..=now + 16).contains(&at)));
   }
 
   #[test]

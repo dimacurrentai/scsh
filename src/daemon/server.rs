@@ -431,6 +431,7 @@ fn settle_loaded_incomplete_procs(session: &mut Session) {
   for proc in &mut session.procs {
     if let Some(pending) = pending_browser_kill(proc.fail_reason.as_deref()) {
       proc.status = ProcStatus::Fail;
+      proc.recovery = None;
       proc.fail_reason = Some(pending.settled_reason.into());
       proc.detail = Some(pending.settled_detail.into());
       if proc.elapsed.is_none() {
@@ -442,6 +443,7 @@ fn settle_loaded_incomplete_procs(session: &mut Session) {
       continue;
     }
     proc.status = ProcStatus::Fail;
+    proc.recovery = None;
     if proc.kind == ProcKind::Annotate {
       proc.fail_reason = Some(crate::failure::reason::ANNOTATION_INTERRUPTED.into());
       proc.detail =
@@ -1560,12 +1562,14 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
             for p in &mut s.procs {
               if let Some(pending) = pending_browser_kill(p.fail_reason.as_deref()) {
                 p.status = ProcStatus::Fail;
+                p.recovery = None;
                 p.fail_reason = Some(pending.settled_reason.into());
                 p.detail = Some(pending.settled_detail.into());
                 continue;
               }
               if p.status == ProcStatus::Running || p.status == ProcStatus::Waiting {
                 p.status = ProcStatus::Fail;
+                p.recovery = None;
                 p.fail_reason = Some(crate::failure::reason::SESSION_END_INCOMPLETE.into());
                 if p.detail.is_none() {
                   p.detail = Some(deregister_incomplete_detail(p));
@@ -1672,6 +1676,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           annotate_target,
           phase: None,
           phase_until: None,
+          recovery: None,
           lines: Vec::new(),
           usage: None,
         });
@@ -1680,6 +1685,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         if let Some(p) = s.procs.iter_mut().find(|p| p.index == previous) {
           if p.fail_reason.as_deref() == Some(crate::failure::reason::RESTART_REQUESTED) {
             p.status = ProcStatus::Fail;
+            p.recovery = None;
             p.fail_reason = Some(crate::failure::reason::FORCE_RESTARTED.into());
             p.detail = Some("restarted from the session browser; superseded by the linked attempt".into());
           }
@@ -1696,6 +1702,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let proc_index = field_num(&obj, "proc").unwrap_or(0.0) as usize;
       if let Some(p) = store.proc_mut(&session, proc_index) {
         p.status = ProcStatus::Running;
+        p.recovery = None;
         if p.started_at.is_none() {
           p.started_at = Some(now);
         }
@@ -1731,9 +1738,30 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         None => false,
       }
     }
-    // A live sub-state of a running proc (a usage-limit wait). Kept out of `status` on purpose:
-    // the proc IS still running, and every dependency and job-outcome rule that reads `status`
-    // must keep seeing that. This only changes how it is drawn and sorted.
+    // Recovery is orthogonal to lifecycle: waiting for a deadline does not finish a step.
+    "/api/v1/proc/recovery" => {
+      let session = field_str(&obj, "session").unwrap_or_default();
+      let proc_index = field_num(&obj, "proc").unwrap_or(0.0) as usize;
+      let recovery = match obj.iter().find(|(key, _)| key == "recovery").map(|(_, value)| value) {
+        Some(Value::Null) => None,
+        Some(value) => match crate::recovery::Recovery::parse(value) {
+          Some(state) => Some(state),
+          None => return false,
+        },
+        None => return false,
+      };
+      if let Some(p) = store.proc_mut(&session, proc_index) {
+        if matches!(p.status, ProcStatus::Running | ProcStatus::Waiting)
+          && pending_browser_kill(p.fail_reason.as_deref()).is_none()
+        {
+          p.recovery = recovery;
+        }
+        true
+      } else {
+        false
+      }
+    }
+    // A quota sub-state changes presentation without finishing the running proc.
     "/api/v1/proc/phase" => {
       let session = field_str(&obj, "session").unwrap_or_default();
       touch_session_liveness(&mut store, &session, now);
@@ -1878,6 +1906,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           return true;
         }
         p.status = status;
+        p.recovery = None;
         p.detail = detail;
         p.fail_reason = fail_reason;
         p.suspected_cause = if status == ProcStatus::Fail {
@@ -2863,6 +2892,7 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       usage: None,
     });
   }
@@ -3129,6 +3159,7 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
     for p in &mut s.procs {
       if p.status == ProcStatus::Running || p.status == ProcStatus::Waiting {
         p.status = ProcStatus::Fail;
+        p.recovery = None;
         p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
         if p.detail.is_none() {
           p.detail = Some("stopped from the session browser".into());
@@ -3205,6 +3236,7 @@ fn proc_stop_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>>, 
       ProcKind::Build => None,
     };
     p.fail_reason = Some(crate::failure::reason::STOP_REQUESTED.into());
+    p.recovery = Some(crate::recovery::Recovery::Cleanup);
     p.detail = Some(if p.kind == ProcKind::Annotate {
       "stopping annotation; the recording will remain unchanged".into()
     } else {
@@ -3235,6 +3267,7 @@ fn proc_stop_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>>, 
       false
     } else {
       p.status = ProcStatus::Fail;
+      p.recovery = None;
       p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
       p.detail = Some(if p.kind == ProcKind::Annotate {
         "annotation stopped from the session browser; the recording is unchanged".into()
@@ -3315,6 +3348,7 @@ fn proc_restart_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>
     }
     let container = p.container_name.take();
     p.fail_reason = Some(crate::failure::reason::RESTART_REQUESTED.into());
+    p.recovery = Some(crate::recovery::Recovery::Cleanup);
     p.detail = Some("terminating container from the session browser; a fresh attempt follows".into());
     let label = p.label.clone();
     s.last_seen_at = now_unix_secs();
@@ -3397,6 +3431,7 @@ fn harness_stop_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>
         }
         stopped.push((sid.clone(), p.index, p.label.clone(), p.container_name.take()));
         p.fail_reason = Some(crate::failure::reason::STOP_REQUESTED.into());
+        p.recovery = Some(crate::recovery::Recovery::Cleanup);
         p.detail = Some(format!("terminating all {harness} containers from the session browser"));
         touched = true;
       }
@@ -3420,6 +3455,7 @@ fn harness_stop_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>
         false
       } else {
         p.status = ProcStatus::Fail;
+        p.recovery = None;
         p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
         p.detail = Some(format!("all {harness} containers stopped from the session browser"));
         true
@@ -4031,6 +4067,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       harness: Some("claude".into()),
       skill_name: Some("skill".into()),
       model: None,
@@ -4108,6 +4145,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       harness: Some("claude".into()),
       skill_name: Some(format!("{source}-{route}")),
       model: None,
@@ -4223,6 +4261,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       harness: Some("claude".into()),
       skill_name: Some("old-skill".into()),
       model: None,
@@ -4386,6 +4425,7 @@ mod tests {
             annotate_target: None,
             phase: None,
             phase_until: None,
+            recovery: None,
             usage: None,
           }],
           last_seen_at: 50,
@@ -4517,6 +4557,7 @@ mod tests {
             annotate_target: None,
             phase: None,
             phase_until: None,
+            recovery: None,
             usage: None,
           }],
           last_seen_at: 1,
@@ -4582,6 +4623,7 @@ mod tests {
             annotate_target: None,
             phase: None,
             phase_until: None,
+            recovery: None,
             usage: None,
           }],
           last_seen_at: 10,
@@ -4710,6 +4752,7 @@ mod tests {
             annotate_target: None,
             phase: None,
             phase_until: None,
+            recovery: None,
             usage: None,
           }],
           last_seen_at: 50,
@@ -4781,6 +4824,7 @@ mod tests {
             annotate_target: None,
             phase: None,
             phase_until: None,
+            recovery: None,
             usage: None,
           }],
           last_seen_at: 50,
@@ -4868,6 +4912,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       usage: None,
     };
     {
@@ -4984,6 +5029,7 @@ mod tests {
             annotate_target: Some(cast.to_string_lossy().into_owned()),
             phase: None,
             phase_until: None,
+            recovery: None,
             usage: None,
           }],
           last_seen_at: 50,
@@ -5041,6 +5087,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       usage: None,
     };
     {
@@ -5272,6 +5319,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       usage: None,
     };
     let now = now_unix_secs();
@@ -5424,6 +5472,52 @@ mod tests {
     assert_eq!(session.kind.as_deref(), Some("github-review"));
     assert_eq!(session.run_pid, Some(4242));
     assert_eq!(session.skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["reviewer"]);
+  }
+
+  #[test]
+  fn recovery_updates_clear_at_finish_and_late_updates_cannot_revive_them() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 0, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    for (path, body) in [
+      ("/api/v1/session/start", r#"{"session":"recov","repo":"/r","branch":"main","skills":[]}"#),
+      ("/api/v1/proc/add", r#"{"session":"recov","proc":0,"label":"claude","kind":"skill"}"#),
+      ("/api/v1/proc/recovery", r#"{"session":"recov","proc":0,"recovery":{"Retry":{"at":100}}}"#),
+    ] {
+      assert!(handle_api_post(path, body, &store, &prune));
+    }
+    assert_eq!(store.lock().unwrap().sessions["recov"].procs[0].recovery, Some(crate::recovery::Recovery::Retry(100)));
+    assert!(!handle_api_post(
+      "/api/v1/proc/recovery",
+      r#"{"session":"recov","proc":0,"recovery":{"Retry":{"at":100,"typo":1}}}"#,
+      &store,
+      &prune
+    ));
+    {
+      let mut guard = store.lock().unwrap();
+      let proc = &mut guard.sessions.get_mut("recov").unwrap().procs[0];
+      proc.fail_reason = Some(crate::failure::reason::RESTART_REQUESTED.into());
+      proc.recovery = Some(crate::recovery::Recovery::Cleanup);
+    }
+    assert!(handle_api_post(
+      "/api/v1/proc/recovery",
+      r#"{"session":"recov","proc":0,"recovery":{"Retry":{"at":200}}}"#,
+      &store,
+      &prune
+    ));
+    assert_eq!(store.lock().unwrap().sessions["recov"].procs[0].recovery, Some(crate::recovery::Recovery::Cleanup));
+    assert!(handle_api_post(
+      "/api/v1/proc/finish",
+      r#"{"session":"recov","proc":0,"status":"ok","elapsed":10}"#,
+      &store,
+      &prune
+    ));
+    assert!(handle_api_post(
+      "/api/v1/proc/recovery",
+      r#"{"session":"recov","proc":0,"recovery":{"Retry":{"at":200}}}"#,
+      &store,
+      &prune
+    ));
+    assert_eq!(store.lock().unwrap().sessions["recov"].procs[0].recovery, None);
   }
 
   #[test]
@@ -5619,6 +5713,7 @@ mod tests {
             annotate_target: None,
             phase: None,
             phase_until: None,
+            recovery: None,
             usage: None,
           }],
           last_seen_at: 50,
@@ -5734,6 +5829,7 @@ mod tests {
             annotate_target: None,
             phase: None,
             phase_until: None,
+            recovery: None,
             usage: None,
           }],
           last_seen_at: 50,
@@ -5812,6 +5908,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       usage: None,
     }
   }
@@ -6359,6 +6456,7 @@ mod tests {
               annotate_target: None,
               phase: None,
               phase_until: None,
+              recovery: None,
               usage: None,
             }],
             last_seen_at: 20,
@@ -7221,6 +7319,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       usage: None,
     };
     let mut done = live(2, ProcStatus::Ok);

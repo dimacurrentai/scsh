@@ -172,7 +172,24 @@ fn idle_since_line(proc: &ProcRecord, now: u64) -> Option<f64> {
   Some((elapsed - last_line_at(proc)).max(0.0))
 }
 
+pub(crate) fn recovery_label(state: crate::recovery::Recovery, now: u64) -> String {
+  let (_, label, at) = state.parts();
+  match at {
+    Some(at) => format!("{label} {}", format_elapsed_clock(at.saturating_sub(now) as f64)),
+    None => label.into(),
+  }
+}
+
 pub(crate) fn proc_elapsed_phrase(proc: &ProcRecord, now: u64) -> String {
+  if matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting) {
+    if let Some(state) = proc.recovery {
+      return format!(
+        "{} · {}",
+        elapsed_phrase(proc.status, proc_elapsed_secs(proc, now), proc.fail_reason.as_deref()),
+        recovery_label(state, now)
+      );
+    }
+  }
   if proc_is_cache_hit(proc) {
     return match proc_elapsed_secs(proc, now).map(format_elapsed_clock) {
       Some(clock) => format!("cache hit in {clock}"),

@@ -179,6 +179,7 @@ RUN printf '%s\n' \
   '' \
   '{' \
   '  while tmux has-session -t scsh 2>/dev/null; do' \
+  '    tmux capture-pane -p -t scsh > "$SCSH_RUN_LOG.screen.new" 2>/dev/null && mv "$SCSH_RUN_LOG.screen.new" "$SCSH_RUN_LOG.screen"' \
   '    if [ -f "$keys" ]; then' \
   '      current="$(cat "$keys" 2>/dev/null || true)"' \
   '      if [ -n "$current" ] && [ "$current" != "$last_keys" ]; then' \

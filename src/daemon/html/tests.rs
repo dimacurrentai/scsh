@@ -45,6 +45,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -160,6 +161,51 @@ fn client_js_function(source: &str, name: &str) -> String {
   }
   let end = source[start..].find("\n}\n").unwrap() + start + 3;
   source[start..end].to_string()
+}
+
+#[test]
+fn recovery_countdowns_match_live_client_and_survive_reload() {
+  use crate::recovery::Recovery;
+  let source = live_client_js();
+  let mut script = client_js_function(&source, "formatElapsedClock");
+  script.push_str(&client_js_function(&source, "recoveryLabel"));
+  for state in [
+    Recovery::Inactivity(3800),
+    Recovery::Startup(120),
+    Recovery::ConnectionError(115),
+    Recovery::Timeout(170),
+    Recovery::ResultQuiet(130),
+    Recovery::Accounting(700),
+    Recovery::Finishing,
+    Recovery::Exit(115),
+    Recovery::Quota(10000),
+    Recovery::Retry(170),
+    Recovery::Cleanup,
+  ] {
+    for now in [100, 114, 115, 10001] {
+      let expected = super::proc::recovery_label(state, now);
+      script.push_str(&format!(
+        "if (recoveryLabel({}, {now}) !== {}) throw new Error('recovery parity');\n",
+        state.json(),
+        crate::json::quote(&expected)
+      ));
+      let mut store = store_with_cast_proc(ProcStatus::Running);
+      let session = store.sessions.get_mut("castab").unwrap();
+      session.procs[0].recovery = Some(state);
+      let saved = crate::daemon::jsonio::session_json_store(session);
+      let restored = crate::daemon::jsonio::parse_session_json(&saved).unwrap();
+      assert_eq!(restored.procs[0].recovery, Some(state));
+      assert!(super::proc::proc_elapsed_phrase(&session.procs[0], now).contains(&expected));
+      session.procs[0].status = ProcStatus::Waiting;
+      assert!(super::proc::proc_elapsed_phrase(&session.procs[0], now).contains(&expected));
+      session.procs[0].status = ProcStatus::Fail;
+      assert!(!super::proc::proc_elapsed_phrase(&session.procs[0], now).contains(&expected));
+    }
+  }
+  if crate::runtime::which("node").is_some() {
+    let output = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+  }
 }
 
 #[test]
@@ -863,6 +909,7 @@ fn a_retried_route_is_visibly_a_retry() {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       harness: Some("claude".into()),
       skill_name: Some(name.into()),
       model: None,
@@ -1219,6 +1266,7 @@ fn job_page_renders_the_loop_convergence_table() {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       harness: Some("codex".into()),
       skill_name: Some(format!("collect-while-collect-{iteration}")),
       model: None,
@@ -1545,6 +1593,7 @@ fn session_proc_html_has_no_stray_backslashes() {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         harness: Some("opencode".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -1609,6 +1658,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           harness: Some("opencode".into()),
           skill_name: Some("add".into()),
           model: None,
@@ -1639,6 +1689,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           harness: Some("claude".into()),
           skill_name: Some("add".into()),
           model: None,
@@ -1847,6 +1898,7 @@ fn the_lede_counts_image_builds_separately_from_tasks() {
     annotate_target: None,
     phase: None,
     phase_until: None,
+    recovery: None,
     usage: None,
   };
   for (index, label) in ["build base", "build claude", "build codex", "build cursor"].iter().enumerate() {
@@ -2111,6 +2163,7 @@ fn offline_export_embeds_commits_diff_when_present() {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       harness: Some("opencode".into()),
       skill_name: Some("add".into()),
       model: None,
@@ -2206,6 +2259,7 @@ fn offline_export_renders_unrecorded_procs_as_note_rows() {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       harness: Some("claude".into()),
       skill_name: None,
       model: None,
@@ -2274,6 +2328,7 @@ fn offline_export_includes_workflow_graph() {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -2304,6 +2359,7 @@ fn offline_export_includes_workflow_graph() {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         harness: Some("codex".into()),
         skill_name: Some("summarize".into()),
         model: None,
@@ -2518,6 +2574,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           harness: Some("opencode".into()),
           skill_name: Some("add-opencode".into()),
           model: None,
@@ -2548,6 +2605,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           harness: Some("claude".into()),
           skill_name: Some("add-claude".into()),
           model: None,
@@ -2640,6 +2698,7 @@ fn session_page_renders_job_level_fleet_verdict_across_skills() {
     annotate_target: None,
     phase: None,
     phase_until: None,
+    recovery: None,
     harness: Some("claude".into()),
     skill_name: Some(format!("{source}-{route_name}")),
     model: None,
@@ -2735,6 +2794,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           harness: Some("claude".into()),
           skill_name: Some("add-waiting-route".into()),
           model: None,
@@ -2765,6 +2825,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           harness: Some("claude".into()),
           skill_name: Some("add-done-route".into()),
           model: None,
@@ -2795,6 +2856,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           harness: Some("claude".into()),
           skill_name: Some("add-running-route".into()),
           model: None,
@@ -3011,6 +3073,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -3105,6 +3168,7 @@ fn session_proc_html_has_no_autoscroll_checkbox() {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         harness: Some("opencode".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -3174,6 +3238,7 @@ fn store_with_annotate_proc(status: ProcStatus) -> Store {
         annotate_target: Some("/tmp/casts/add-20260711-114749-utc-ufakca.cast".into()),
         phase: None,
         phase_until: None,
+        recovery: None,
         harness: Some("cursor".into()),
         skill_name: None,
         model: Some("composer".into()),
@@ -3834,6 +3899,7 @@ fn workflow_graph_renders_builtin_shapes() {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       harness: Some(harness.into()),
       skill_name: Some(id.into()),
       model: None,
@@ -4512,6 +4578,7 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,

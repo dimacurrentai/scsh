@@ -246,6 +246,8 @@ pub struct ProcRecord {
   /// When the current [`Self::phase`] is expected to end (unix seconds), when that is known —
   /// the provider's own reset instant for a usage-limit wait.
   pub phase_until: Option<u64>,
+  /// Authoritative runner recovery state; deadlines are never inferred by the browser.
+  pub recovery: Option<crate::recovery::Recovery>,
   /// Strict normalized `TokenUsage` JSON for the attempt, including an explicit unavailable
   /// record when a supported harness stopped before it emitted counters.
   pub usage: Option<crate::usage::Summary>,
@@ -1050,6 +1052,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       usage: None,
     }
   }
@@ -1350,6 +1353,7 @@ mod tests {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         usage: None,
       }],
       last_seen_at: 200,
@@ -1537,6 +1541,7 @@ mod tests {
       annotate_target: Some("/r/casts/add.cast".into()),
       phase: None,
       phase_until: None,
+      recovery: None,
       usage: None,
     };
     let session = |id: &str, parent: Option<&str>, ended_at: Option<u64>, procs: Vec<ProcRecord>| Session {
@@ -1647,6 +1652,7 @@ mod tests {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         usage: None,
       }],
       last_seen_at: 50,
@@ -1700,6 +1706,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1730,6 +1737,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
       ],
