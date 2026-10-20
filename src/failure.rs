@@ -35,8 +35,8 @@ pub mod reason {
   /// [`HARNESS_OVERLOADED`] because that reason's backoff tops out in minutes, while a limit
   /// resets hours away — the retry for this one is scheduled for the reset instant instead.
   pub const HARNESS_USAGE_LIMIT: &str = "harness_usage_limit";
-  /// The harness lost its backend connection (its output says so) and exited non-zero —
-  /// e.g. cursor's "Reconnecting to …" giving up after half an hour. Always retryable.
+  /// The harness lost its backend connection and exited non-zero or returned to an idle
+  /// prompt without a result. Retryable within the route's budgets.
   pub const HARNESS_DISCONNECTED: &str = "harness_disconnected";
   /// The harness came up logged out: the credentials scsh forwarded were refused (see
   /// [`super::claude_logged_out`]). Retrying with the SAME credentials is refused the same way,

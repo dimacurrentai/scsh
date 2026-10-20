@@ -174,6 +174,7 @@ mod tests {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,

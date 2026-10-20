@@ -23,6 +23,7 @@ mod licenses;
 mod limitwait;
 mod ptyrec;
 mod quota;
+mod recovery;
 mod report;
 mod runtime;
 mod sha1;
@@ -2868,9 +2869,14 @@ impl RouteRetryState {
     self.limit_waited += waited;
   }
 
-  /// The delay before the next automatic retry, advancing the backoff exponent.
-  fn next_backoff_secs(&mut self) -> u64 {
-    let delay = self.policy.backoff_delay_secs(self.retries_used, self.salt);
+  /// A first disconnect gets one immediate retry; repeated failures retain exponential
+  /// backoff and spend the same count, wall-clock, and identical-signature budgets.
+  fn next_backoff_secs(&mut self, reason: &str) -> u64 {
+    let delay = if reason == failure::reason::HARNESS_DISCONNECTED && self.retries_used == 0 {
+      0
+    } else {
+      self.policy.backoff_delay_secs(self.retries_used, self.salt)
+    };
     self.retries_used += 1;
     delay
   }
@@ -2939,7 +2945,7 @@ fn limit_wait_for_reset(
     c.proc_phase(proc_index, Some(daemon::PROC_PHASE_AWAITING_LIMITS), resume_at, &note);
   }
   let started = Instant::now();
-  let wake = backoff_sleep_interruptible(delay, session_id, proc_index);
+  let wake = backoff_sleep_interruptible(delay, session_id, proc_index, client);
   retry.record_limit_wait(started.elapsed());
   if let Some(c) = client {
     c.proc_phase(proc_index, None, None, "the usage limit window reopened");
@@ -2965,15 +2971,30 @@ enum BackoffWake {
 /// session and settles its procs, but it cannot reach into this process; without this the
 /// sleeping route would wake up and register a fresh attempt against a session that is
 /// already over.
-fn backoff_sleep_interruptible(delay_secs: u64, session_id: &str, proc_index: usize) -> BackoffWake {
-  for _ in 0..delay_secs {
+fn backoff_sleep_interruptible(
+  delay_secs: u64, session_id: &str, proc_index: usize, client: Option<&std::sync::Arc<daemon::Client>>,
+) -> BackoffWake {
+  let started = Instant::now();
+  let budget = Duration::from_secs(delay_secs);
+  if let Some(client) = client {
+    client.proc_recovery(proc_index, Some(recovery::Recovery::Retry(recovery::deadline(started, budget))));
+  }
+  let wake = backoff_wait(started + budget, session_id, proc_index);
+  if let Some(client) = client {
+    client.proc_recovery(proc_index, None);
+  }
+  wake
+}
+
+fn backoff_wait(until: Instant, session_id: &str, proc_index: usize) -> BackoffWake {
+  while Instant::now() < until {
     if daemon::consume_proc_restart(session_id, proc_index) {
       return BackoffWake::Restart;
     }
     if daemon::session_cancelled(session_id) {
       return BackoffWake::Cancelled;
     }
-    std::thread::sleep(Duration::from_secs(1));
+    std::thread::sleep(until.saturating_duration_since(Instant::now()).min(Duration::from_secs(1)));
   }
   // A zero-length or fully elapsed wait still must not step over a stop.
   if daemon::session_cancelled(session_id) {
@@ -3119,7 +3140,7 @@ fn run_workflow_step_with_retries(
     // off so a fleet does not hammer a provider mid-incident. The wait is visible on the
     // pending row and a browser Force restart on it cuts the wait short.
     if decision == RetryDecision::Automatic {
-      let delay = retry.next_backoff_secs();
+      let delay = retry.next_backoff_secs(&reason);
       proc.note(&format!(
         "retrying in ~{} after {reason} (retry {} of {}, {} and {} retries left)",
         ui::clock::format_elapsed(delay as f64),
@@ -3128,7 +3149,7 @@ fn run_workflow_step_with_retries(
         ui::clock::format_elapsed(retry.budget_left_secs() as f64),
         retry.retries_left(),
       ));
-      match backoff_sleep_interruptible(delay, session_id, proc_index) {
+      match backoff_sleep_interruptible(delay, session_id, proc_index, daemon_client.as_ref()) {
         BackoffWake::Restart => proc.note("retrying now (browser restart)"),
         BackoffWake::Cancelled => {
           proc.note("job stopped — not retrying");
@@ -6000,7 +6021,7 @@ fn build_and_run(
             proc_index = next.index();
             proc = next;
             if decision == RetryDecision::Automatic {
-              let delay = retry.next_backoff_secs();
+              let delay = retry.next_backoff_secs(&reason);
               proc.note(&format!(
                 "retrying in ~{} after {reason} (retry {} of {}, {} and {} retries left)",
                 ui::clock::format_elapsed(delay as f64),
@@ -6009,7 +6030,7 @@ fn build_and_run(
                 ui::clock::format_elapsed(retry.budget_left_secs() as f64),
                 retry.retries_left(),
               ));
-              match backoff_sleep_interruptible(delay, session_ref, proc_index) {
+              match backoff_sleep_interruptible(delay, session_ref, proc_index, dc.as_ref()) {
                 BackoffWake::Restart => proc.note("retrying now (browser restart)"),
                 BackoffWake::Cancelled => {
                   proc.note("job stopped — not retrying");
@@ -6110,6 +6131,7 @@ fn build_and_run(
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         usage: o.usage.clone(),
       });
     }
@@ -7257,7 +7279,16 @@ fn run_one_skill(
   // The startup-stall budgets exist for TUIs that can wedge behind a spinner or a dialog; a
   // headless CLI either streams or exits, and its first model turn may legitimately think in
   // silence past those budgets, so only the ordinary inactivity limit applies.
+  let recovery = std::sync::Arc::new(recovery::Reporter::new(daemon_client.clone(), spinner.index()));
   let watch = ui::screen::ActivityWatch {
+    terminal_error: (skill.harness == config::Harness::Claude).then(|| {
+      let screen = run_dir.join(format!("{}.screen", runtime::RUN_LOG_REL));
+      ui::screen::TerminalErrorWatch {
+        idle: Box::new(move || recovery::idle_connection_error_file(&screen)),
+        grace: Duration::from_secs(15),
+      }
+    }),
+    recovery: Some(Box::new(|state| recovery.report(state))),
     file: run_dir.join(if headless { runtime::RUN_EVENTS_REL } else { runtime::RUN_CAST_REL }),
     limit: Duration::from_secs(inactivity_secs),
     startup: (!headless).then(|| ui::screen::StartupStall::jittered(startup_seed)),
@@ -7277,7 +7308,15 @@ fn run_one_skill(
       let result = dir.join(&skill.result);
       let harness = skill.harness;
       let required = usage_accounting_required();
-      Box::new(move |live| state.lock().unwrap().poll(harness, &dir, &result, required, live))
+      let recovery = std::sync::Arc::clone(&recovery);
+      Box::new(move |live| {
+        let mut state = state.lock().unwrap();
+        let settling = state.poll(harness, &dir, &result, required, live);
+        if settling {
+          recovery.report(state.recovery());
+        }
+        settling
+      })
     }),
     file: run_dir.join(&skill.result),
     quiet_for: Duration::from_secs(RESULT_QUIESCENCE_SECS),
@@ -7328,6 +7367,7 @@ fn run_one_skill(
       // TUI exit does not erase work already written there; collection and schema validation below
       // remain authoritative, and only a result that survives them becomes graceful success.
       graceful_shutdown_reason = Some(match killed {
+        ui::screen::Killed::ConnectionError => "accepted the valid result after a terminal connection error",
         ui::screen::Killed::Inactive => "accepted the valid result after the inactivity watchdog stopped the harness",
         ui::screen::Killed::StartupStalled { .. } => {
           "accepted the valid result after the startup watchdog stopped the harness"
@@ -7490,6 +7530,15 @@ fn run_one_skill(
       finish_harness_failure(&spinner, failure::reason::CONTAINER_TIMEOUT, &detail, &run_dir, skill.harness);
       return SkillRun::failed(failure::reason::CONTAINER_TIMEOUT, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why)
+        .with_usage(usage)
+        .preserve(preserve_error.as_deref());
+    }
+    Ok((false, ui::screen::Killed::ConnectionError, _)) => {
+      let why = "connection lost mid-response; harness remained at an idle prompt for 15s";
+      let detail = skill_fail_detail(why, skill.harness, Some(&run_dir_str), Some(&log));
+      finish_harness_failure(&spinner, failure::reason::HARNESS_DISCONNECTED, &detail, &run_dir, skill.harness);
+      return SkillRun::failed(failure::reason::HARNESS_DISCONNECTED, Some(run_dir_str), Some(log), clone_dir)
+        .with_fail_detail(why)
         .with_usage(usage)
         .preserve(preserve_error.as_deref());
     }
@@ -11928,7 +11977,11 @@ fn print_help_defs() {
   (default 30m). Retryable:
   container/runtime trouble, provider overload/disconnects, and non-zero harness exits (a
   harness dying at startup is infrastructure). Retries back off exponentially with jitter;
-  a route failing the SAME way 5 times in a row trips a circuit breaker instead of burning
+  a first-attempt disconnect retries immediately after cleanup. A confirmed Claude connection
+  error at an idle prompt stops after 15s; renewed activity cancels that short grace.
+  The browser shows backend-owned countdowns for watchdogs, quota/accounting waits, and
+  retry backoff; stopping an attempt and starting its retry are separate actions.
+  A route failing the SAME way 5 times in a row trips a circuit breaker instead of burning
   tokens until dawn. A result whose only fault is an escape JSON does not define (`\_`, a
   `\u` without four hex digits) is repaired in place — the stored file is rewritten as strict
   JSON and the row logs it — so a hand-written string costs no re-run. Anything else invalid
@@ -12552,6 +12605,17 @@ mod tests {
   }
 
   #[test]
+  fn first_disconnect_retries_without_backoff_but_repeated_failures_do_not() {
+    let mut retry = RouteRetryState::new(None, None, "job", "route");
+    assert_eq!(retry.next_backoff_secs(failure::reason::HARNESS_DISCONNECTED), 0);
+    assert_eq!(retry.retries_used, 1);
+    assert!(retry.next_backoff_secs(failure::reason::HARNESS_DISCONNECTED) > 0);
+    assert_eq!(retry.retries_used, 2);
+    let mut retry = RouteRetryState::new(None, None, "job", "other");
+    assert!(retry.next_backoff_secs(failure::reason::CONTAINER_INACTIVE) > 0);
+  }
+
+  #[test]
   fn retry_decision_is_budgeted_breaker_capped_and_browser_restarts_always_win() {
     use RetryDecision::{Automatic, Browser, Schema, Startup, Stop, StopBreaker};
     let policy = failure::RetryPolicy {
@@ -12627,6 +12691,10 @@ mod tests {
     assert_eq!(decide(failure::reason::STARTUP_STALLED, 5, 0, 1), Stop);
     assert_eq!(decide(failure::reason::STARTUP_STALLED, 0, 0, 6), StopBreaker);
     assert_eq!(decide(failure::reason::STARTUP_STALLED, 0, 30 * 60, 1), Stop);
+    assert_eq!(decide(failure::reason::HARNESS_DISCONNECTED, 0, 0, 1), Automatic);
+    assert_eq!(decide(failure::reason::HARNESS_DISCONNECTED, 5, 0, 1), Stop);
+    assert_eq!(decide(failure::reason::HARNESS_DISCONNECTED, 0, 0, 6), StopBreaker);
+    assert_eq!(decide(failure::reason::HARNESS_DISCONNECTED, 0, 30 * 60, 1), Stop);
     // A usage limit is retried AT the reset, not on the backoff — and, unlike every other
     // reason, is not refused once the wall-clock budget is spent. The budget is minutes and a
     // quota window is hours, so charging it would guarantee the one retry that could work is

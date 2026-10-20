@@ -766,10 +766,34 @@ function syncProcElapsed(meta, p, nowUnix, liveClock) {
 }
 function procElapsedPhrase(p, nowUnix) {
   const elapsed = procElapsed(p, nowUnix);
+  if ((p.status === 'running' || p.status === 'waiting') && p.recovery) {
+    return elapsedPhrase(p.status, elapsed, p.fail_reason) + ' · ' + recoveryLabel(p.recovery, nowUnix);
+  }
   if (isCacheHit(p)) return elapsed == null ? 'cache hit' : 'cache hit in ' + formatElapsedClock(elapsed);
   const phrase = elapsedPhrase(p.status, elapsed, p.fail_reason);
   return p.status === 'fail' && p.suspected_cause === 'expired_credentials'
     ? phrase + ' · likely expired credentials' : phrase;
+}
+// Mirrors recovery::Recovery::parts. Policy and deadlines come exclusively from the runner.
+function recoveryLabel(state, nowUnix) {
+  const labels = {
+    Inactivity: 'Inactivity limit: stopping in',
+    Startup: 'Checking startup in',
+    ConnectionError: 'Connection interrupted: stopping in',
+    Timeout: 'Time limit: stopping in',
+    ResultQuiet: 'Result settling: checking in',
+    Accounting: 'Waiting for accounting: deadline in',
+    Finishing: 'Result written: waiting for generation to finish',
+    Exit: 'Finishing: cleanup in',
+    Quota: 'Quota wait limit: stopping in',
+    Retry: 'Next attempt in',
+    Cleanup: 'Cleaning up attempt',
+  };
+  const [kind, payload] = Object.entries(state)[0] || [];
+  const label = labels[kind] || 'Waiting for runner';
+  return payload && payload.at != null
+    ? label + ' ' + formatElapsedClock(Math.max(0, payload.at - Math.floor(nowUnix)))
+    : label;
 }
 function updateProcClocks(nowUnixSec) {
   if (nowUnixSec === lastProcClockSec) return;
@@ -779,7 +803,7 @@ function updateProcClocks(nowUnixSec) {
   if (!session) return;
   syncSessionDuration(session, nowUnixSec);
   (session.procs || []).forEach(p => {
-    if (p.status !== 'running') return;
+    if (p.status !== 'running' && !(p.status === 'waiting' && p.recovery)) return;
     const det = document.querySelector('details.proc[data-index="' + CSS.escape(String(p.index)) + '"]');
     if (!det) return;
     const stat = det.querySelector('[data-proc-stat="' + CSS.escape(String(p.index)) + '"]');

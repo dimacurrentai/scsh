@@ -765,6 +765,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       usage: None,
     };
     let procs = vec![
@@ -841,6 +842,7 @@ mod tests {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         usage: None,
       },
       ProcRecord {
@@ -871,6 +873,7 @@ mod tests {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         usage: None,
       },
     ];

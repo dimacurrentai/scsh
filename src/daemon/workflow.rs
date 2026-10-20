@@ -966,6 +966,7 @@ mod tests {
         annotate_target: None,
         phase: None,
         phase_until: None,
+        recovery: None,
         usage: None,
       }],
       last_seen_at: 60, // running-idle timeout elapses at 60 + 30 minutes
@@ -1030,6 +1031,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1060,6 +1062,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
       ],
@@ -1138,6 +1141,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1168,6 +1172,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1198,6 +1203,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1228,6 +1234,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1258,6 +1265,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
       ],
@@ -1323,6 +1331,7 @@ mod tests {
       annotate_target: None,
       phase: None,
       phase_until: None,
+      recovery: None,
       usage: None,
     };
     let session = Session {
@@ -1402,6 +1411,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1432,6 +1442,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1462,6 +1473,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1492,6 +1504,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
       ],
@@ -1556,6 +1569,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1586,6 +1600,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1616,6 +1631,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
       ],
@@ -1703,6 +1719,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1733,6 +1750,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
         ProcRecord {
@@ -1763,6 +1781,7 @@ mod tests {
           annotate_target: None,
           phase: None,
           phase_until: None,
+          recovery: None,
           usage: None,
         },
       ],

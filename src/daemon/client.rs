@@ -269,6 +269,18 @@ impl Client {
     self.post("/api/v1/proc/phase", &body);
   }
 
+  /// Publish a watchdog/backoff transition without changing the proc's lifecycle or note.
+  pub fn proc_recovery(&self, proc_index: usize, state: Option<crate::recovery::Recovery>) {
+    self.post(
+      "/api/v1/proc/recovery",
+      &format!(
+        "{{\"session\":{},\"proc\":{proc_index},\"recovery\":{}}}",
+        quote(&self.inner.session_id),
+        state.map(|state| state.json()).unwrap_or_else(|| "null".into())
+      ),
+    );
+  }
+
   /// Tell the daemon where this proc's asciinema `.cast` lives on the host: the live
   /// run-dir file while the container runs, then the durable copy after the skill ends.
   pub fn proc_cast(&self, proc_index: usize, path: &str) {

@@ -77,6 +77,20 @@ class TuiLauncherTest(unittest.TestCase):
   def test_short_prompt(self):
     self.assert_prompt_survives("Review this code.")
 
+  def test_recorder_publishes_the_current_screen_atomically(self):
+    self.fake.write_text(
+      "import json,sys,time\nfrom pathlib import Path\n"
+      'print("Connection lost mid-response", flush=True)\n'
+      "time.sleep(3)\n"
+      "Path(sys.argv[1]).write_text(json.dumps(sys.argv[2]))\n"
+      "time.sleep(1)\n"
+    )
+    run = self.launch("screen snapshot")
+    self.assertEqual(run.returncode, 0, run.stderr)
+    screen = self.root / "run.log.screen"
+    self.assertIn("Connection lost mid-response", screen.read_text())
+    self.assertFalse((self.root / "run.log.screen.new").exists())
+
   def test_long_prompt_preserves_quotes_newlines_and_literal_shell_syntax(self):
     prompt = 'Quotes: "double", \'single\'; $HOME; $(echo literal); `literal`; é\n' * 800
     self.assertGreater(len(prompt.encode()), 40_000)

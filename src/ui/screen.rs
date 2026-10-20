@@ -185,6 +185,10 @@ impl Drop for LiveUi {
 /// counter) stops registering once every frame has been seen, while genuine agent output
 /// keeps producing never-seen lines.
 pub struct ActivityWatch<'a> {
+  /// Fresh terminal snapshot check; only known terminal errors qualify for a short grace.
+  pub terminal_error: Option<TerminalErrorWatch<'a>>,
+  /// Publish the next action chosen by this watchdog, never a browser-side estimate.
+  pub recovery: Option<Box<dyn Fn(crate::recovery::Recovery) + 'a>>,
   /// Polled (`~100ms`) for new content; a file that never appears counts as never active.
   pub file: std::path::PathBuf,
   /// Silence budget: kill the child when `file` has shown nothing novel for this long.
@@ -197,6 +201,22 @@ pub struct ActivityWatch<'a> {
   /// Read the screen for a usage-limit banner and hold the clocks while one is up. `None`
   /// leaves every watchdog exactly as it was.
   pub limit_wait: Option<LimitWait<'a>>,
+}
+
+/// A known terminal error must remain at an idle prompt throughout this grace.
+pub struct TerminalErrorWatch<'a> {
+  /// Checks fresh current-screen evidence, never historical cast text.
+  pub idle: Box<dyn Fn() -> bool + 'a>,
+  /// Short recovery budget, independent of the ordinary inactivity window.
+  pub grace: Duration,
+}
+
+impl ActivityWatch<'_> {
+  fn report(&self, state: crate::recovery::Recovery) {
+    if let Some(report) = &self.recovery {
+      report(state);
+    }
+  }
 }
 
 /// What to do when the harness stops because the account hit a usage limit.
@@ -673,6 +693,8 @@ pub enum Killed {
   Timeout,
   /// The watched file showed no activity for the watchdog's limit.
   Inactive,
+  /// A confirmed terminal connection error stayed idle through the short grace.
+  ConnectionError,
   /// The run stalled during its launch phase (see [`StartupStall`]): `silent` runs never
   /// produced a single novel frame, the rest went quiet mid-boot. Either way nothing of
   /// value was in flight, so the caller force-restarts immediately instead of backing off.
@@ -909,6 +931,7 @@ impl Proc {
       let mut saw_novelty = false;
       let mut startup_complete = false;
       let mut settling_started = false;
+      let mut error_grace = crate::recovery::ErrorGrace::default();
       loop {
         if let Some(s) = child.try_wait()? {
           break s;
@@ -1007,6 +1030,8 @@ impl Proc {
         let parked = limits.as_ref().map(LimitWatch::open_stretch).unwrap_or_default();
         let limit_stopped =
           limits.as_ref().and_then(|lw| lw.state).is_some_and(crate::limitwait::LimitState::is_stopped);
+        use crate::recovery::{deadline, Recovery};
+        let mut recovery = timeout.map(|limit| Recovery::Timeout(deadline(started, limit.saturating_add(frozen))));
         if let Some(limit) = timeout {
           if started.elapsed().saturating_sub(frozen) >= limit {
             kill_child_tree(&mut child);
@@ -1030,9 +1055,26 @@ impl Proc {
           // until the first novel frame, then the stall budget for any silence that BEGINS
           // while the startup window is still open.
           let silent_for = last_activity.elapsed().saturating_sub(parked);
+          let mut next = Recovery::Inactivity(deadline(last_activity, w.limit.saturating_add(parked)));
+          if let (Some(lw), Some(policy)) = (limits.as_ref(), w.limit_wait.as_ref()) {
+            if let Some(since) = lw.parked_since {
+              let ceiling = deadline(since, policy.max);
+              let until =
+                lw.resets_at.map(|at| at.saturating_add(LIMIT_RESET_GRACE.as_secs()).min(ceiling)).unwrap_or(ceiling);
+              next = Recovery::Quota(until);
+              // Paused ordinary budgets must not compete with the quota deadline.
+              recovery = None;
+            }
+          }
           if let Some(su) = &w.startup {
             let limit = if saw_novelty { su.stall } else { su.silence };
             let stall_began_in_window = last_activity.duration_since(watch_started) < su.window;
+            if !startup_complete && !limit_stopped && stall_began_in_window {
+              let startup = Recovery::Startup(deadline(last_activity, limit));
+              if startup.parts().2 < next.parts().2 {
+                next = startup;
+              }
+            }
             // A confirmed limit screen still has to pass the quiet gate before clocks freeze,
             // but a shorter jittered startup threshold must not kill it during that guard.
             if !startup_complete && !limit_stopped && stall_began_in_window && silent_for >= limit {
@@ -1041,6 +1083,9 @@ impl Proc {
               // if later transcript reads are temporarily incomplete. Ordinary inactivity
               // below remains armed and retains its original deadline.
               startup_complete = w.startup_complete.as_ref().is_some_and(|complete| complete());
+              if startup_complete {
+                next = Recovery::Inactivity(deadline(last_activity, w.limit));
+              }
               if !startup_complete {
                 kill_child_tree(&mut child);
                 killed = Killed::StartupStalled { silent: !saw_novelty };
@@ -1053,10 +1098,43 @@ impl Proc {
             killed = Killed::Inactive;
             break child.wait()?;
           }
+          // Completion and quota handling above own their waits. Only a fresh idle error
+          // screen may arm this shorter budget; activity or a changed screen cancels it.
+          let idle_error = !limit_stopped && w.terminal_error.as_ref().is_some_and(|error| (error.idle)());
+          if let Some(since) = error_grace.observe(Instant::now(), idle_error, novel_activity) {
+            let grace = w.terminal_error.as_ref().expect("idle_error requires a terminal error policy").grace;
+            let error = Recovery::ConnectionError(deadline(since, grace));
+            if error.parts().2 < next.parts().2 {
+              next = error;
+            }
+            if since.elapsed() >= grace {
+              w.report(Recovery::Cleanup);
+              kill_child_tree(&mut child);
+              killed = Killed::ConnectionError;
+              break child.wait()?;
+            }
+          }
+          if let (Some(d), Some(q)) = (done, quiescence.as_ref()) {
+            if q.stamp.is_some() && q.since.elapsed() < d.quiet_for {
+              let result = Recovery::ResultQuiet(deadline(q.since, d.quiet_for));
+              if result.parts().2 < next.parts().2 {
+                next = result;
+              }
+            }
+          }
+          if recovery.is_none_or(|current| next.parts().2 < current.parts().2) {
+            recovery = Some(next);
+          }
+          if let Some(state) = recovery {
+            w.report(state);
+          }
         }
         thread::sleep(Duration::from_millis(100));
       }
     };
+    if let Some(w) = watch {
+      w.report(crate::recovery::Recovery::Cleanup);
+    }
     let drained = drain_pumps(pumps, drain_deadline(killed, timeout, started.elapsed()));
     // Both sweeps run after the leader was reaped, so both ask [`orphaned_child_group`] whether
     // the group is still ours before signalling it — a recycled pid must not cost a stranger a
@@ -1721,6 +1799,8 @@ mod tests {
     p.start();
     // The watched file never appears, so the watchdog fires long before the 5s sleep ends.
     let watch = ActivityWatch {
+      terminal_error: None,
+      recovery: None,
       file: std::env::temp_dir().join(format!("scsh-watch-never-{}", std::process::id())),
       limit: Duration::from_millis(200),
       startup: None,
@@ -1791,6 +1871,8 @@ mod tests {
   #[cfg(unix)]
   fn limit_watch(file: &std::path::Path, keys: &std::path::Path, max: Duration) -> ActivityWatch<'static> {
     ActivityWatch {
+      terminal_error: None,
+      recovery: None,
       file: file.to_path_buf(),
       // Deliberately tiny: without the limit wait this alone would kill the child at once, so
       // a passing test proves the clock really is frozen rather than merely generous.
@@ -1844,7 +1926,10 @@ mod tests {
       &["working…", "Usage limit reached \u{b7} continuing automatically at 8:50am \u{b7} esc to cancel"],
     );
 
-    let watch = limit_watch(&file, &keys, Duration::from_secs(2));
+    let reports = std::sync::Mutex::new(Vec::new());
+    let mut watch = limit_watch(&file, &keys, Duration::from_secs(2));
+    watch.recovery = Some(Box::new(|state| reports.lock().unwrap().push(state)));
+    watch.terminal_error = Some(TerminalErrorWatch { idle: Box::new(|| true), grace: Duration::from_millis(200) });
     let started = Instant::now();
     let (ok, killed, _) = p.run_watched("sleep", &["30".to_string()], None, Some(&watch), None).unwrap();
     let _ = std::fs::remove_file(&file);
@@ -1856,6 +1941,9 @@ mod tests {
     assert!(!ok);
     assert!(started.elapsed() >= Duration::from_secs(2), "the inactivity clock was frozen, not merely widened");
     assert!(started.elapsed() < Duration::from_secs(10), "the wait is bounded by `max`");
+    let reports = reports.lock().unwrap();
+    assert!(reports.iter().any(|state| matches!(state, crate::recovery::Recovery::Quota(_))));
+    assert!(!reports.iter().any(|state| matches!(state, crate::recovery::Recovery::ConnectionError(_))));
   }
 
   #[cfg(unix)]
@@ -2073,6 +2161,8 @@ mod tests {
         let file = std::env::temp_dir().join(format!("scsh-diagnosis-{}.cast", crate::runtime::random_nonce_6()));
         write_cast(&file, &[banner]);
         let watch = ActivityWatch {
+          terminal_error: None,
+          recovery: None,
           file: file.clone(),
           limit: Duration::from_secs(1),
           startup: None,
@@ -2145,6 +2235,82 @@ mod tests {
   }
 
   #[test]
+  fn idle_connection_error_stops_promptly_and_reports_its_deadline() {
+    use crate::recovery::Recovery;
+    let ui = LiveUi::new(false, None);
+    let proc = ui.proc("idle connection error", false);
+    proc.start();
+    let reports = std::sync::Mutex::new(Vec::new());
+    let watch = ActivityWatch {
+      terminal_error: Some(TerminalErrorWatch { idle: Box::new(|| true), grace: Duration::from_millis(200) }),
+      recovery: Some(Box::new(|state| reports.lock().unwrap().push(state))),
+      file: std::env::temp_dir().join(format!("scsh-no-cast-{}", crate::runtime::random_nonce_6())),
+      limit: Duration::from_secs(1800),
+      startup: None,
+      startup_complete: None,
+      limit_wait: None,
+    };
+    let start = Instant::now();
+    let (ok, killed, _) =
+      proc.run_watched("sleep", &["30".into()], Some(Duration::from_secs(25)), Some(&watch), None).unwrap();
+    assert!(!ok);
+    assert_eq!(killed, Killed::ConnectionError);
+    assert!((Duration::from_millis(200)..Duration::from_secs(5)).contains(&start.elapsed()));
+    let reports = reports.lock().unwrap();
+    assert!(matches!(reports.first(), Some(Recovery::ConnectionError(_))));
+    assert_eq!(reports.last(), Some(&Recovery::Cleanup));
+  }
+
+  #[test]
+  fn a_shorter_inactivity_budget_wins_over_the_connection_error_grace() {
+    use crate::recovery::Recovery;
+    let ui = LiveUi::new(false, None);
+    let proc = ui.proc("shorter inactivity budget", false);
+    proc.start();
+    let reports = std::sync::Mutex::new(Vec::new());
+    let watch = ActivityWatch {
+      terminal_error: Some(TerminalErrorWatch { idle: Box::new(|| true), grace: Duration::from_secs(15) }),
+      recovery: Some(Box::new(|state| reports.lock().unwrap().push(state))),
+      file: std::env::temp_dir().join(format!("scsh-no-cast-{}", crate::runtime::random_nonce_6())),
+      limit: Duration::from_millis(200),
+      startup: None,
+      startup_complete: None,
+      limit_wait: None,
+    };
+    let (_, killed, _) = proc.run_watched("sleep", &["30".into()], None, Some(&watch), None).unwrap();
+    assert_eq!(killed, Killed::Inactive);
+    assert!(matches!(reports.lock().unwrap().first(), Some(Recovery::Inactivity(_))));
+  }
+
+  #[test]
+  fn recovery_deadline_reverts_when_the_terminal_resumes() {
+    use crate::recovery::Recovery;
+    let ui = LiveUi::new(false, None);
+    let proc = ui.proc("recovered connection", false);
+    proc.start();
+    let reports = std::sync::Mutex::new(Vec::new());
+    let start = Instant::now();
+    let watch = ActivityWatch {
+      terminal_error: Some(TerminalErrorWatch {
+        idle: Box::new(|| start.elapsed() < Duration::from_millis(300)),
+        grace: Duration::from_secs(15),
+      }),
+      recovery: Some(Box::new(|state| reports.lock().unwrap().push(state))),
+      file: std::env::temp_dir().join(format!("scsh-no-cast-{}", crate::runtime::random_nonce_6())),
+      limit: Duration::from_secs(1800),
+      startup: None,
+      startup_complete: None,
+      limit_wait: None,
+    };
+    let (ok, killed, _) = proc.run_watched("sleep", &["1".into()], None, Some(&watch), None).unwrap();
+    assert!(ok);
+    assert_eq!(killed, Killed::No);
+    let reports = reports.lock().unwrap();
+    assert!(matches!(reports.first(), Some(Recovery::ConnectionError(_))));
+    assert!(reports.iter().any(|state| matches!(state, Recovery::Inactivity(_))));
+  }
+
+  #[test]
   fn proc_run_watched_lets_an_active_screen_run_to_completion() {
     let ui = LiveUi::new(false, None);
     let p = ui.proc("active", false);
@@ -2156,6 +2322,8 @@ mod tests {
     // as the same frame — that is the spinner-thrash case the watchdog now kills.)
     let script = format!("for w in a b c d e f g h; do echo tok-$w >> {}; sleep 0.1; done", file.display());
     let watch = ActivityWatch {
+      terminal_error: None,
+      recovery: None,
       file: file.clone(),
       limit: Duration::from_millis(600),
       startup: None,
@@ -2183,6 +2351,8 @@ mod tests {
       file.display()
     );
     let watch = ActivityWatch {
+      terminal_error: None,
+      recovery: None,
       file: file.clone(),
       limit: Duration::from_millis(500),
       startup: None,
@@ -2203,6 +2373,8 @@ mod tests {
     // The cast never appears: the tight initial-silence budget fires, not the (much longer)
     // inactivity limit, and the kill is reported as a SILENT startup stall.
     let watch = ActivityWatch {
+      terminal_error: None,
+      recovery: None,
       file: std::env::temp_dir().join(format!("scsh-startup-mute-{}", std::process::id())),
       limit: Duration::from_secs(20),
       startup: Some(StartupStall {
@@ -2233,6 +2405,8 @@ mod tests {
     // 20s inactivity limit. `exec` so the wedge IS this child (see the DoneWatch test).
     let script = format!("echo boot-a >> {f}; echo boot-b >> {f}; exec sleep 30", f = file.display());
     let watch = ActivityWatch {
+      terminal_error: None,
+      recovery: None,
       file: file.clone(),
       limit: Duration::from_secs(20),
       startup: Some(StartupStall {
@@ -2261,6 +2435,8 @@ mod tests {
     write_cast(&file, &["Read proposal.md", "I am consolidating the review."]);
     let calls = std::cell::Cell::new(0);
     let watch = ActivityWatch {
+      terminal_error: None,
+      recovery: None,
       file: file.clone(),
       limit: Duration::from_secs(5),
       startup: Some(StartupStall {
@@ -2290,6 +2466,8 @@ mod tests {
     let file = std::env::temp_dir().join(format!("scsh-started-wedge-{}.cast", crate::runtime::random_nonce_6()));
     write_cast(&file, &["Read proposal.md"]);
     let watch = ActivityWatch {
+      terminal_error: None,
+      recovery: None,
       file: file.clone(),
       limit: Duration::from_millis(700),
       startup: Some(StartupStall {
@@ -2323,6 +2501,8 @@ mod tests {
     let script =
       format!("for w in a b c d e f g h; do echo tok-$w >> {}; sleep 0.1; done; exec sleep 30", file.display());
     let watch = ActivityWatch {
+      terminal_error: None,
+      recovery: None,
       file: file.clone(),
       limit: Duration::from_millis(700),
       startup: Some(StartupStall {
@@ -2362,6 +2542,8 @@ mod tests {
     };
     // An inactivity limit far too long to be what stops this run.
     let watch = ActivityWatch {
+      terminal_error: None,
+      recovery: None,
       file: result.clone(),
       limit: Duration::from_secs(20),
       startup: None,
@@ -2391,6 +2573,8 @@ mod tests {
       settling: Some(Box::new(move |_| start.elapsed() < Duration::from_secs(3))),
     };
     let watch = ActivityWatch {
+      terminal_error: None,
+      recovery: None,
       file: file.clone(),
       limit: Duration::from_millis(10),
       startup: Some(StartupStall {
