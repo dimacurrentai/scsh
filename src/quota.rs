@@ -195,6 +195,72 @@ pub struct QuotaWindow {
   pub resets_at: Option<String>,
 }
 
+/// One run's quota, read just before its harness started and again once it exited. A side is
+/// `None` when its snapshot is missing or unreadable, e.g. a run stopped before it began.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunQuota {
+  pub before: Option<Vec<QuotaWindow>>,
+  pub after: Option<Vec<QuotaWindow>>,
+}
+
+impl RunQuota {
+  /// A Cline run's snapshots beside its log (`<log>.cline-quota-{before,after}.{limits,plan}.json`,
+  /// written by the harness command). `None` when neither side was captured.
+  pub fn from_cline_run(run_log: &std::path::Path) -> Option<RunQuota> {
+    let side = |when: &str| {
+      let read = |kind: &str| {
+        let mut path = run_log.as_os_str().to_owned();
+        path.push(format!(".cline-quota-{when}.{kind}.json"));
+        std::fs::read_to_string(path).ok()
+      };
+      cline_windows(&read("limits")?, &read("plan")?).ok().map(|(_, windows)| windows)
+    };
+    let quota = RunQuota { before: side("before"), after: side("after") };
+    (quota.before.is_some() || quota.after.is_some()).then_some(quota)
+  }
+
+  pub fn compact_json(&self) -> String {
+    let side =
+      |windows: &Option<Vec<QuotaWindow>>| windows.as_deref().map(windows_json).unwrap_or_else(|| "null".into());
+    format!("{{\"before\": {}, \"after\": {}}}", side(&self.before), side(&self.after))
+  }
+
+  pub fn from_value(value: &Value) -> Option<RunQuota> {
+    let Value::Object(fields) = value else { return None };
+    let side = |key: &str| -> Option<Option<Vec<QuotaWindow>>> {
+      match get(fields, key) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::Array(items)) => items
+          .iter()
+          .map(|item| match item {
+            Value::Object(w) => Some(QuotaWindow {
+              id: get_str(w, "id")?.to_string(),
+              label: get_str(w, "label")?.to_string(),
+              used_percent: get_num(w, "used_percent")?,
+              resets_at: get_str(w, "resets_at").map(str::to_string),
+            }),
+            _ => None,
+          })
+          .collect::<Option<Vec<_>>>()
+          .map(Some),
+        Some(_) => None,
+      }
+    };
+    Some(RunQuota { before: side("before")?, after: side("after")? })
+  }
+
+  /// `5h ($10) 11% · weekly ($25) 4% · monthly ($50) 2%` for one side.
+  pub fn phrase(windows: Option<&[QuotaWindow]>) -> String {
+    match windows {
+      Some(windows) if !windows.is_empty() => {
+        windows.iter().map(|w| format!("{} {}%", w.label, trim_percent(w.used_percent))).collect::<Vec<_>>().join(" · ")
+      }
+      Some(_) => "no active limit windows reported".into(),
+      None => "unavailable".into(),
+    }
+  }
+}
+
 /// The normalized quota answer for one harness. `summary` is always present — for
 /// non-`ok` statuses it says what went wrong, so a caller can print it verbatim.
 #[derive(Debug, Clone)]
@@ -1126,9 +1192,8 @@ fn parse_cursor_plan(body: &str) -> Option<String> {
 /// Same shape for `scsh quota --json` and the daemon's Setup quota endpoint.
 /// One harness's quota as a JSON object body (shared by the aggregate document and the
 /// per-run result file): `"harness"`, `"status"`, `"plan"`, `"windows"`, `"summary"`, `"hint"`.
-fn harness_json_fields(q: &HarnessQuota) -> String {
-  let windows: Vec<String> = q
-    .windows
+fn windows_json(windows: &[QuotaWindow]) -> String {
+  let windows: Vec<String> = windows
     .iter()
     .map(|w| {
       format!(
@@ -1140,12 +1205,16 @@ fn harness_json_fields(q: &HarnessQuota) -> String {
       )
     })
     .collect();
+  format!("[{}]", windows.join(", "))
+}
+
+fn harness_json_fields(q: &HarnessQuota) -> String {
   format!(
-    "\"harness\": {}, \"status\": {}, \"plan\": {}, \"windows\": [{}], \"summary\": {}, \"hint\": {}, \"source\": {}, \"observed_at\": {}",
+    "\"harness\": {}, \"status\": {}, \"plan\": {}, \"windows\": {}, \"summary\": {}, \"hint\": {}, \"source\": {}, \"observed_at\": {}",
     json::quote(q.harness.as_str()),
     json::quote(q.status),
     q.plan.as_deref().map(json::quote).unwrap_or_else(|| "null".into()),
-    windows.join(", "),
+    windows_json(&q.windows),
     json::quote(&q.summary),
     json::quote(&q.hint),
     json::quote(q.source),
@@ -1248,6 +1317,42 @@ mod tests {
     assert_eq!(windows[2].resets_at.as_deref(), Some("2026-10-21T01:59:26Z"));
     let missing = r#"{"data":{"limits":[{"type":"five_hour","percentUsed":0},{"type":"weekly","percentUsed":0}]}}"#;
     assert!(cline_windows(missing, plan).is_err());
+  }
+
+  #[test]
+  fn cline_run_quota_reads_both_snapshots_and_round_trips() {
+    let dir = std::env::temp_dir().join(format!("scsh-run-quota-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("scsh-run.log");
+    assert_eq!(RunQuota::from_cline_run(&log), None, "no snapshot, no quota");
+    let plan = r#"{"data":{"plan":{"displayName":"Cline Pass (Monthly)","entitlements":{"cline_pass":{"inferenceCapThreshold":{
+      "last5HoursUsageCostUSDPerUser":1000000000,
+      "last7daysUsageCostUSDPerUser":2500000000,
+      "last30daysUsageCostUSDPerUser":5000000000
+    }}}}}}"#;
+    let limits = |five_hour: f64| {
+      format!(
+        r#"{{"data":{{"limits":[{{"type":"five_hour","percentUsed":{five_hour},"resetsAt":"2026-10-21T18:20:48.49Z"}},
+        {{"type":"weekly","percentUsed":4}},{{"type":"monthly","percentUsed":2}}]}}}}"#
+      )
+    };
+    let write =
+      |name: &str, text: &str| std::fs::write(dir.join(format!("scsh-run.log.cline-quota-{name}.json")), text).unwrap();
+    write("before.limits", &limits(11.0));
+    write("before.plan", plan);
+    let quota = RunQuota::from_cline_run(&log).expect("the before side alone is a quota");
+    assert_eq!(quota.after, None, "a run stopped mid-way has no after side");
+    assert_eq!(RunQuota::phrase(quota.before.as_deref()), "5h ($10) 11% · weekly ($25) 4% · monthly ($50) 2%");
+    assert_eq!(RunQuota::phrase(quota.after.as_deref()), "unavailable");
+    write("after.limits", &limits(12.5));
+    write("after.plan", plan);
+    let quota = RunQuota::from_cline_run(&log).unwrap();
+    assert_eq!(RunQuota::phrase(quota.after.as_deref()), "5h ($10) 12.5% · weekly ($25) 4% · monthly ($50) 2%");
+    let parsed = RunQuota::from_value(&json::parse(&quota.compact_json()).unwrap()).unwrap();
+    assert_eq!(parsed, quota);
+    write("after.plan", "<html>502</html>");
+    assert_eq!(RunQuota::from_cline_run(&log).unwrap().after, None, "an error page is not a quota");
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   /// Trimmed live response from `api.anthropic.com/api/oauth/usage` (values anonymized).
