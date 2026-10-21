@@ -6133,6 +6133,7 @@ fn build_and_run(
         phase_until: None,
         recovery: None,
         usage: o.usage.clone(),
+        quota: None,
       });
     }
     let _ = fleet::write_rollups(&session_id, &fake_procs);
@@ -7414,6 +7415,15 @@ fn run_one_skill(
   }
   if let (Some(c), Some(u)) = (&daemon_client, &usage) {
     c.proc_usage(spinner.index(), u);
+  }
+  let run_quota = match skill.harness {
+    config::Harness::Cline | config::Harness::ClineHeadless => {
+      quota::RunQuota::from_cline_run(&run_dir.join(runtime::RUN_LOG_REL))
+    }
+    _ => None,
+  };
+  if let (Some(c), Some(q)) = (&daemon_client, &run_quota) {
+    c.proc_quota(spinner.index(), q);
   }
   // The run's own status-line capture, read out before the forwarded credentials (and the
   // capture beside them) are scrubbed. Also the last chance to learn when the account's limit

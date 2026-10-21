@@ -166,7 +166,7 @@ If Setup says **Found via keychain** or **Missing**, the running daemon did not 
   2. The `cline` provider's `apiKey` in `~/.cline/data/settings/providers.json`.
   3. A `CLINE_API_KEY=` line in `~/.env` (an `export ` prefix is fine).
 - **What `scsh` forwards:** the key alone, never your host Cline settings. Each run gets a fresh, minimal `providers.json` that selects the Cline provider, and its data directory marks Cline's one-time promo notices as shown, so the interactive TUI starts straight at the prompt. `SCSH_NO_CLINE_AUTH=1` disables the forwarding.
-- **Quota:** with the key, `scsh quota` and each run's before/after snapshots read the five-hour, weekly, and monthly Cline Pass windows from `api.cline.bot`.
+- **Quota:** with the key, `scsh quota` and each run's before/after snapshots read the five-hour, weekly, and monthly Cline Pass windows from `api.cline.bot`. A finished Cline run's job-page entry shows both snapshots as **quota before** and **quota after** under its cost line.
 - **Both interfaces:** `harness: cline` runs the recorded TUI (`cline -i`), and `harness: cline-headless` runs `cline --json` with a transcript. They share this login and the same usage accounting.
 
 ## gemini — Gemini CLI (not yet an `scsh` harness)
