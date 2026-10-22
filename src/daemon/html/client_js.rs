@@ -888,8 +888,12 @@ function procQuotaHtml(p) {
     const pct = n => Number.isInteger(Number(n)) ? String(Number(n)) : Number(n).toFixed(1);
     return windows.map(w => w.label + ' ' + pct(w.used_percent) + '%').join(' · ');
   };
+  const s = p.quota.spend;
+  const spend = s ? '$' + (Number(s.cost_micro) / 1e8).toFixed(4) + ' over ' + s.requests + ' request' +
+    (Number(s.requests) === 1 ? '' : 's') + (s.percent_of_5h == null ? '' : ' · ' + Number(s.percent_of_5h).toFixed(2) + '% of the 5h window') : '';
   return '<div class="proc-quota dim"><span><strong>quota before</strong> ' + esc(side(p.quota.before)) +
-    '</span><span><strong>quota after</strong> ' + esc(side(p.quota.after)) + '</span></div>';
+    '</span><span><strong>quota after</strong> ' + esc(side(p.quota.after)) + '</span>' +
+    (spend ? '<span><strong>quota used</strong> ' + esc(spend) + '</span>' : '') + '</div>';
 }
 function procIsLive(status) {
   return status === 'running' || status === 'waiting';
