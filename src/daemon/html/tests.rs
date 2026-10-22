@@ -113,6 +113,7 @@ fn quota_before_and_after_follow_the_finished_cost_line() {
   let quota = crate::quota::RunQuota {
     before: Some(vec![window("5h ($10)", 11.0), window("weekly ($25)", 4.0)]),
     after: Some(vec![window("5h ($10)", 12.5), window("weekly ($25)", 4.0)]),
+    spend: Some(crate::quota::RunSpend { cost_micro: 2_100_737, requests: 4, percent_of_5h: Some(0.2100737) }),
   };
   let mut running = store_with_cast_proc(ProcStatus::Running);
   running.sessions.get_mut("castab").unwrap().procs[0].quota = Some(quota.clone());
@@ -130,6 +131,7 @@ fn quota_before_and_after_follow_the_finished_cost_line() {
   assert!(cost < quota_at, "quota follows the cost line");
   assert!(html.contains("<strong>quota before</strong> 5h ($10) 11% · weekly ($25) 4%"));
   assert!(html.contains("<strong>quota after</strong> 5h ($10) 12.5% · weekly ($25) 4%"));
+  assert!(html.contains("<strong>quota used</strong> $0.0210 over 4 requests · 0.21% of the 5h window"));
   let exports = [super::session_export::CastExport::Cast {
     ndjson: "{\"version\":3,\"term\":{\"cols\":10,\"rows\":3}}\n".into(),
     summary: None,
@@ -180,6 +182,7 @@ const originalAttemptLinkHtml = () => '', procMetaHtml = () => '';
           resets_at: None,
         }]),
         after: None,
+        spend: Some(crate::quota::RunSpend { cost_micro: 2_100_737, requests: 4, percent_of_5h: Some(0.21) }),
       });
       let expected = super::proc::proc_usage_html(&session.procs[0]);
       let expected_quota = super::proc::proc_quota_html(&session.procs[0]);

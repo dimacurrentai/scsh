@@ -166,7 +166,7 @@ If Setup says **Found via keychain** or **Missing**, the running daemon did not 
   2. The `cline` provider's `apiKey` in `~/.cline/data/settings/providers.json`.
   3. A `CLINE_API_KEY=` line in `~/.env` (an `export ` prefix is fine).
 - **What `scsh` forwards:** the key alone, never your host Cline settings. Each run gets a fresh, minimal `providers.json` that selects the Cline provider, and its data directory marks Cline's one-time promo notices as shown, so the interactive TUI starts straight at the prompt. `SCSH_NO_CLINE_AUTH=1` disables the forwarding.
-- **Quota:** with the key, `scsh quota` and each run's before/after snapshots read the five-hour, weekly, and monthly Cline Pass windows from `api.cline.bot`. A finished Cline run's job-page entry shows both snapshots as **quota before** and **quota after** under its cost line.
+- **Quota:** with the key, `scsh quota` and each run's before/after snapshots read the five-hour, weekly, and monthly Cline Pass windows from `api.cline.bot`. A finished Cline run's job-page entry shows both snapshots as **quota before** and **quota after** under its cost line, then **quota used**: the run's exact spend, summed from the account's per-request usage records (window percentages are whole numbers, so a short run often reads the same before and after).
 - **Both interfaces:** `harness: cline` runs the recorded TUI (`cline -i`), and `harness: cline-headless` runs `cline --json` with a transcript. They share this login and the same usage accounting.
 
 ## gemini — Gemini CLI (not yet an `scsh` harness)
@@ -207,6 +207,30 @@ If Setup says **Found via keychain** or **Missing**, the running daemon did not 
   Nebius as `nebius-glm/zai-org/GLM-5.2`). Configure the provider with
   `opencode auth login` plus a provider entry in `opencode.json`, and the model id becomes
   usable in `.scsh.yml` as `harness: opencode` + `model: <provider>/<model>`.
+- **Cline Pass:** Cline's API speaks the OpenAI chat-completions protocol, so opencode can run
+  Cline Pass models through an `@ai-sdk/openai-compatible` provider. Run
+  `opencode auth login`, choose *Other*, enter the provider id (`cline` below) and your Cline
+  API key, then declare it in `opencode.json`:
+
+  ```json
+  {
+    "provider": {
+      "cline": {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "Cline Pass",
+        "options": { "baseURL": "https://api.cline.bot/api/v1" },
+        "models": {
+          "cline-pass/glm-5.3": { "name": "GLM-5.3 (Cline Pass)", "tool_call": true, "reasoning": true }
+        }
+      }
+    }
+  }
+  ```
+
+  The route is then `harness: opencode` + `model: cline/cline-pass/glm-5.3`. Any model whose
+  name after the provider id starts with `cline-pass/` gets the same **quota before**,
+  **quota after**, and **quota used** lines as a Cline run; `scsh` forwards the Cline key (from
+  the probes in the Cline section, else this provider's `auth.json` entry) for those snapshots.
 
 ---
 
