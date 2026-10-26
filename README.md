@@ -683,3 +683,27 @@ job page's results, log, and errors sections.
   ask your AI to) to watch `scsh` explain every failure mode from its own output.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — house style and conventions.
 - **`scsh help`** — the full command list and the `.scsh.yml` schema.
+
+### Image-build downloads through SSH
+
+Use `--ssh-proxy HOST` when HTTP or HTTPS downloads inside the local image builder cannot reach package repositories or tool download sites. Downloads travel from the local build through an SSH tunnel and a temporary proxy on the remote Linux host. Builds still execute locally, and their images stay local.
+
+```sh
+scsh build-images --ssh-proxy build-proxy
+scsh run harness-smoke --ssh-proxy build-proxy
+```
+
+**Recommended:** define a host alias and its username in the host machine's `~/.ssh/config`, so the command needs only the alias:
+
+```sshconfig
+Host build-proxy
+    HostName linux.example.com
+    User alice
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+An explicit username also works: `scsh build-images --ssh-proxy alice@linux.example.com`. SSH resolves keys, ports, and jump hosts from the normal host configuration. The destination must support noninteractive SSH authentication, TCP forwarding, and Python 3 with its standard library. Establish host trust and verify access with `ssh build-proxy python3 --version` first.
+
+The proxy starts only for images that need building and stops after each build, including failures and interruptions. It installs no remote files, persists no proxy configuration, and leaves image fingerprints unchanged. Only HTTP/HTTPS requests made by build steps that honor standard proxy variables use it. Runtime image pulls, remote build execution, agent containers, and model calls keep their normal network paths. There is no automatic fallback to a direct connection; fix SSH or rerun without the flag if proxy startup fails.
+
+Supported local builders are Apple Containers and rootful Docker/Podman on Linux with a host-accessible bridge. The listener binds only to that bridge address. Docker Desktop, remote container engines, and rootless runtimes whose gateway cannot be bound on the host are not supported. See [SSH-BUILD-PROXY.md](SSH-BUILD-PROXY.md) for lifecycle and download verification.
