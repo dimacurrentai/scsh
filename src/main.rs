@@ -47,7 +47,8 @@ fn fleet_route_name(skill: &ResolvedInvocation) -> Option<&str> {
 
 fn main() {
   let args: Vec<String> = std::env::args().skip(1).collect();
-  std::process::exit(run(&args));
+  let code = run(&args);
+  std::process::exit(ui::signals::exit_code_after_cleanup(code));
 }
 
 fn run(args: &[String]) -> i32 {
