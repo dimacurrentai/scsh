@@ -13,7 +13,7 @@
 //!   `kill`.
 
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -23,6 +23,25 @@ use signal_hook::iterator::Signals;
 
 /// Guards [`install`] so the signal thread is started exactly once.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// The caught signal, published before killing children so main cannot exit as a
+/// generic build failure while the signal thread is still cleaning up.
+static EXIT_SIGNAL: AtomicI32 = AtomicI32::new(0);
+/// Signal cleanup finished; main may exit with the same code as the signal thread.
+static SIGNAL_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Preserve signal exit status and cleanup when a killed build returns before the
+/// signal thread. Exercised by the SIGINT/SIGTERM harness in SSH-BUILD-PROXY.md.
+pub fn exit_code_after_cleanup(normal: i32) -> i32 {
+  let sig = EXIT_SIGNAL.load(Ordering::SeqCst);
+  if sig == 0 {
+    return normal;
+  }
+  while !SIGNAL_CLEANUP_DONE.load(Ordering::SeqCst) {
+    thread::sleep(Duration::from_millis(10));
+  }
+  128 + sig
+}
 
 /// PIDs of scsh's live children (each in its own process group). On abort we SIGTERM these
 /// GROUPS, wait one second, then SIGKILL any that remain — see [`signal_child_group`].
@@ -46,10 +65,12 @@ pub fn install() {
   };
   thread::spawn(move || {
     if let Some(sig) = signals.forever().next() {
+      EXIT_SIGNAL.store(sig, Ordering::SeqCst);
       // A kill / terminal close / off-TTY Ctrl-C: put the terminal back (the live board may have
       // it in raw mode with mouse reporting on), tear everything down, then exit.
       super::screen::restore_terminal();
       terminate_all();
+      SIGNAL_CLEANUP_DONE.store(true, Ordering::SeqCst);
       std::process::exit(128 + sig);
     }
   });
