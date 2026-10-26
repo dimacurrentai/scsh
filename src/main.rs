@@ -6,6 +6,7 @@
 //! under its configured harness.
 
 mod annotate;
+mod build_proxy;
 mod cleanup;
 mod config;
 mod daemon;
@@ -60,6 +61,7 @@ fn run(args: &[String]) -> i32 {
       return 2;
     }
   };
+  build_proxy::configure(cli.ssh_proxy.clone());
   let profile = cli.profile.as_deref();
   if let Some(n) = cli.retries {
     // One process-wide answer: the daemon client reads SCSH_RETRIES at registration.
@@ -984,6 +986,8 @@ struct Cli {
   build_force: bool,
   /// `build-images --rebuild-base`: force-rebuild the shared base (`--no-cache`) first.
   build_rebuild_base: bool,
+  /// Temporary SSH network route for image-build downloads only.
+  ssh_proxy: Option<build_proxy::Destination>,
   /// `run --def <name>`: run the named harness definition (a `.harness/<name>.yml` or a
   /// built-in) instead of the repo's `.scsh.yml` skills. Its params come from the environment.
   def: Option<String>,
@@ -1055,6 +1059,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut build_harnesses: Vec<String> = Vec::new();
   let mut build_force = false;
   let mut build_rebuild_base = false;
+  let mut ssh_proxy = None;
   let mut def: Option<String> = None;
   let mut resume_from: Option<String> = None;
   let mut retries: Option<u32> = None;
@@ -1419,6 +1424,15 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         retries = Some(n.parse().map_err(|_| format!("bad --retries value '{n}'"))?);
         None
       }
+      "--ssh-proxy" => {
+        i += 1;
+        let host = args.get(i).ok_or("--ssh-proxy needs an SSH alias or username@host")?;
+        if ssh_proxy.is_some() {
+          return Err("--ssh-proxy may only be specified once".into());
+        }
+        ssh_proxy = Some(build_proxy::Destination::parse(host)?);
+        None
+      }
       // `run --no-cache`: skip cache lookups, so every skill runs fresh (and refreshes its entry).
       "--no-cache" => {
         no_cache = true;
@@ -1618,6 +1632,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if retries.is_some() && !matches!(mode, Mode::Run) {
     return Err("--retries only applies to 'run' (e.g. `scsh run --def greet --retries 3`)".into());
   }
+  if ssh_proxy.is_some() && !matches!(mode, Mode::Run | Mode::BuildImages) {
+    return Err("--ssh-proxy only applies to run and build-images".into());
+  }
   if no_cache && !matches!(mode, Mode::Run) {
     return Err("--no-cache only applies to 'run' (e.g. `scsh run matrix --no-cache`)".into());
   }
@@ -1649,6 +1666,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     build_harnesses,
     build_force,
     build_rebuild_base,
+    ssh_proxy,
     def,
     resume_from,
     retries,
@@ -9508,7 +9526,7 @@ fn run_build_tui(
     let _ = std::fs::remove_dir_all(&dir);
     return Err((format!("could not write Dockerfile to build context: {e}"), 1));
   }
-  let build_argv = runtime::build_command_context(
+  let mut build_argv = runtime::build_command_context(
     runtime_name,
     tag,
     target,
@@ -9519,6 +9537,22 @@ fn run_build_tui(
     fingerprint,
     no_cache,
   );
+  // Lazy: cached images never contact SSH. This guard owns both connections until
+  // the recorded build returns, including failures; signals use the shared child registry.
+  if build_proxy::is_configured() {
+    build.note("connecting SSH build proxy…");
+  }
+  let proxy = match build_proxy::BuildProxy::for_build(runtime_name) {
+    Ok(proxy) => proxy,
+    Err(error) => {
+      let _ = std::fs::remove_dir_all(&dir);
+      return Err((error, 1));
+    }
+  };
+  if let Some(proxy) = &proxy {
+    build_argv.splice(2..2, proxy.build_args());
+    build.note("downloads via SSH proxy");
+  }
   let term = config::Terminal::default();
   // scsh records the PTY itself — argv passes through verbatim after `--`, no shell join.
   let exe = std::env::current_exe().map_err(|e| (format!("could not find the scsh binary: {e}"), 1))?;
@@ -11347,11 +11381,12 @@ fn print_help_command(name: &str) {
     ),
     "build-images" => (
       "build the container images outside a run",
-      "scsh build-images [harness…] [--force] [--rebuild-base] [--session <id>]",
+      "scsh build-images [harness…] [--force] [--rebuild-base] [--ssh-proxy HOST] [--session <id>]",
       &[
         ("[harness…]", "Harness images to build (opencode, claude, codex, grok, cursor, cline); none = all."),
         ("--force", "Rebuild the selected harness images even when up to date (--no-cache)."),
         ("--rebuild-base", "Force-rebuild the shared base image first (--no-cache), then the selection."),
+        ("--ssh-proxy HOST", "Route build downloads through SSH; prefer a ~/.ssh/config alias with User set. Also accepts username@host. Requires Python 3 and TCP forwarding; builds stay local. See scsh help run."),
         ("--session <id>", "Report into this session id (used by the dashboard's Build buttons)."),
       ],
     ),
@@ -11480,6 +11515,7 @@ fn print_help_overview() {
   println!("{}", h_head("Options:"));
   help_row("--profile <names>", "With `run`: only these profiles (`default` = no-profile skills).");
   help_row("--no-cache", "With `run`: run every skill fresh instead of replaying cached results.");
+  help_row("--ssh-proxy HOST", "With run/build-images: route build downloads through an SSH host.");
   help_row("--override-dot-scsh-yml <path>", "With `run`/`list`/`check-profile`: use this `.scsh.yml`");
   help_cont("(+ sibling `.skills/`) instead of the repo's — no install into the target tree.");
   help_row("--verbose", "With list: also print the Dockerfile and exact commands.");
@@ -11499,13 +11535,21 @@ fn print_help_run() {
   println!("{} {}", h_head("run"), console::style("\u{2014} run scoped skills in parallel").bold());
   println!();
   println!("{}", h_head("Synopsis"));
-  println!("{}", h_dim("  scsh run [profile…] [--override-dot-scsh-yml <path>] [--base <ref>]"));
+  println!("{}", h_dim("  scsh run [profile…] [--ssh-proxy HOST] [--override-dot-scsh-yml <path>] [--base <ref>]"));
   println!();
   println!("{}", h_head("Discover what to run (before `run`)"));
   help_row("scsh list", "Every skill by profile — result path, harness, env (human-readable).");
   help_row("scsh list --json", "Same, as JSON — preferred for scripts and agents.");
   help_row("scsh check-profile <name>", "Exit 0 iff that profile exists with at least one skill (no runtime).");
   help_row("scsh probe [profile…]", "Exit 0 iff at least one of its harness·model routes is runnable here.");
+  println!();
+  println!("{}", h_head("Image-build network proxy"));
+  help_row("--ssh-proxy HOST", "Route HTTP/HTTPS build downloads through an SSH alias or username@host.");
+  println!("{}", h_dim("  Recommended: set HostName and User in ~/.ssh/config, then pass the alias."));
+  println!("{}", h_dim("  Requires noninteractive SSH, TCP forwarding, and Python 3 on the remote host."));
+  println!("{}", h_dim("  Builds stay local. Image pulls and agent/model traffic use their normal network."));
+  println!("{}", h_dim("  Supports Apple Containers and rootful Linux Docker/Podman with a local bridge."));
+  println!("{}", h_dim("  Temporary proxy connections close after each build; cached images need no SSH."));
   println!();
   println!("{}", h_head("External config (no install into the target repo)"));
   help_row("--override-dot-scsh-yml <path>", "Use this `.scsh.yml` and its sibling `.skills/` instead of the repo's.");
@@ -12137,6 +12181,24 @@ fn print_help_cache() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn ssh_proxy_is_scoped_to_building_commands() {
+    let cli = |args: &[&str]| parse_cli(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    for command in ["run", "build-images"] {
+      for host in ["build-proxy", "alice@linux.example.com"] {
+        assert!(cli(&[command, "--ssh-proxy", host]).unwrap().ssh_proxy.is_some());
+      }
+    }
+    for args in [
+      vec!["list", "--ssh-proxy", "build-proxy"],
+      vec!["run", "--ssh-proxy"],
+      vec!["run", "--ssh-proxy", "--no-cache"],
+      vec!["run", "--ssh-proxy", "a", "--ssh-proxy", "b"],
+    ] {
+      assert!(cli(&args).is_err(), "{args:?}");
+    }
+  }
 
   #[test]
   fn host_key_channel_is_a_private_sibling_of_the_container_mount() {
