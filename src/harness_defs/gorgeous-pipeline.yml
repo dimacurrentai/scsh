@@ -85,7 +85,7 @@ steps:
     needs: prepare
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: conventions-reviewer
     output:
@@ -125,7 +125,7 @@ steps:
     needs: prepare
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: justification-reviewer
     output:
@@ -165,7 +165,7 @@ steps:
     needs: prepare
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: reviewability-reviewer
     output:
@@ -205,7 +205,7 @@ steps:
     needs: prepare
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: sanity-reviewer
     output:
@@ -245,7 +245,7 @@ steps:
     needs: prepare
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: testing-reviewer
     output:
@@ -492,7 +492,7 @@ steps:
     needs: journal
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: conventions-reviewer
     output:
@@ -535,7 +535,7 @@ steps:
     needs: journal
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: justification-reviewer
     output:
@@ -578,7 +578,7 @@ steps:
     needs: journal
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: reviewability-reviewer
     output:
@@ -621,7 +621,7 @@ steps:
     needs: journal
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: sanity-reviewer
     output:
@@ -664,7 +664,7 @@ steps:
     needs: journal
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: testing-reviewer
     output:

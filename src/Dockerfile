@@ -132,19 +132,15 @@ ENV PATH=/usr/local/go/bin:/usr/local/cargo/bin:/usr/local/bin:$PATH
 ENV SCSH_RUN_LOG=/home/agent/repo/tmp/scsh-run.log
 ENV TERM=xterm-256color
 
-# Use only the classic Dockerfile grammar here. Podman 4.9 / Buildah 1.33 treat
-# Dockerfile heredoc bodies as top-level instructions (for example `set -u` as SET).
+# Classic grammar: Podman 4.9 / Buildah 1.33 reject heredocs.
 RUN printf '%s\n' \
   '#!/bin/sh' \
   'set -u' \
   'cols=$1; rows=$2; quit=$3; submit=$4; result=$5; cmd=$6' \
-  '# SCSH_RUN_LOG lives under the bind-mounted repo tmp/; create it so tuidebug/cast' \
-  '# never fail with "Directory nonexistent" when the mount is empty or late.' \
+  '# Create the bind-mounted log directory before recording.' \
   'mkdir -p "$(dirname "$SCSH_RUN_LOG")" 2>/dev/null || true' \
   'dbg="$SCSH_RUN_LOG.tuidebug"' \
   'exit_file="$SCSH_RUN_LOG.exit"' \
-  '# Host->pane keystroke channel: a host-only directory is mounted read-only here.' \
-  '# Each atomic record is "sequence key"; the watcher forwards every new record once.' \
   'keys="/run/scsh-keys/key"' \
   'last_keys=' \
   'log() { echo "$(date +%H:%M:%S.%N 2>/dev/null | cut -c1-12) $*" >> "$dbg" 2>/dev/null; }' \
@@ -180,6 +176,10 @@ RUN printf '%s\n' \
   '{' \
   '  while tmux has-session -t scsh 2>/dev/null; do' \
   '    tmux capture-pane -p -t scsh > "$SCSH_RUN_LOG.screen.new" 2>/dev/null && mv "$SCSH_RUN_LOG.screen.new" "$SCSH_RUN_LOG.screen"' \
+  '    # Codex model_migration.rs optional picker (2026-10-30); remove when CLI can disable it.' \
+  '    if [ "$quit" = slash-quit ] && [ "${migration_seen:-0}" = 0 ] && grep -q "Try new model" "$SCSH_RUN_LOG.screen" && grep -q "Use existing model" "$SCSH_RUN_LOG.screen"; then' \
+  '      sleep 1; tmux send-keys -t scsh 2; migration_seen=1; log "kept configured Codex model"' \
+  '    fi' \
   '    if [ -f "$keys" ]; then' \
   '      current="$(cat "$keys" 2>/dev/null || true)"' \
   '      if [ -n "$current" ] && [ "$current" != "$last_keys" ]; then' \
@@ -219,8 +219,9 @@ RUN printf '%s\n' \
   '  log "watcher: exit (session gone or killed)"' \
   '} >/dev/null 2>&1 &' \
   '' \
+  '# tmux 3.7 rejects send-keys with read-only attach.' \
   'asciinema rec -q --overwrite -f asciicast-v3 --window-size "${cols}x${rows}" \' \
-  '  -c '"'"'tmux attach -r -t scsh'"'"' "$SCSH_RUN_LOG.cast"' \
+  '  -c '"'"'tmux attach -t scsh'"'"' "$SCSH_RUN_LOG.cast"' \
   'rc=$?; log "asciinema exited rc=$rc"' \
   '[ "$rc" -eq 0 ] || tmux kill-session -t scsh 2>/dev/null || true' \
   'wait' \

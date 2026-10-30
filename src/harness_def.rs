@@ -2554,7 +2554,7 @@ mod tests {
       );
       if r.id.ends_with("_terra") {
         assert_eq!(r.agent().unwrap().harness, crate::config::Harness::Codex);
-        assert_eq!(r.agent().unwrap().model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(r.agent().unwrap().model.as_deref(), Some("gpt-6.1-sol"));
         assert_eq!(r.agent().unwrap().effort.as_deref(), Some("high"));
       }
     }
