@@ -81,7 +81,7 @@ steps:
       plan.codex: run
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: conventions-reviewer
     output:
@@ -138,7 +138,7 @@ steps:
       plan.codex: run
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: justification-reviewer
     output:
@@ -195,7 +195,7 @@ steps:
       plan.codex: run
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: reviewability-reviewer
     output:
@@ -252,7 +252,7 @@ steps:
       plan.codex: run
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: sanity-reviewer
     output:
@@ -309,7 +309,7 @@ steps:
       plan.codex: run
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     skill: testing-reviewer
     output:
@@ -444,7 +444,7 @@ steps:
       plan.publisher: codex
     agent:
       harness: codex
-      model: gpt-5.6-terra
+      model: gpt-6.1-sol
       effort: high
     inputs:
       PR_URL: params.PR_URL

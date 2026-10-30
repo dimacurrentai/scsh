@@ -52,14 +52,16 @@ class TuiLauncherTest(unittest.TestCase):
     )
     self.env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"],
                     SCSH_RUN_LOG=str(self.root / "run.log"), TERM="xterm-256color")
+    self.env.pop("TMUX", None)
+    self.env.pop("TMUX_PANE", None)
 
   def stop_server(self):
     subprocess.run([TMUX, "-S", self.socket, "kill-server"], capture_output=True, timeout=5)
 
-  def launch(self, prompt):
+  def launch(self, prompt, quit="slash-exit"):
     command = shlex.join([sys.executable, str(self.fake), str(self.result), prompt])
     return subprocess.run(
-      ["sh", str(self.script), "200", "50", "slash-exit", "none", str(self.result), command],
+      ["sh", str(self.script), "200", "50", quit, "none", str(self.result), command],
       env=self.env, capture_output=True, text=True, timeout=15,
     )
 
@@ -90,6 +92,22 @@ class TuiLauncherTest(unittest.TestCase):
     screen = self.root / "run.log.screen"
     self.assertIn("Connection lost mid-response", screen.read_text())
     self.assertFalse((self.root / "run.log.screen.new").exists())
+
+  def test_codex_model_migration_keeps_the_configured_model(self):
+    self.fake.write_text(
+      "import json,sys,tty,termios,time\nfrom pathlib import Path\n"
+      "settings = termios.tcgetattr(sys.stdin.fileno())\n"
+      "tty.setraw(sys.stdin.fileno())\n"
+      'print("Meet GPT-6 Sol\\r\\n1. Try new model\\r\\n2. Use existing model", flush=True)\n'
+      "key = sys.stdin.read(1)\n"
+      "termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, settings)\n"
+      "Path(sys.argv[1]).write_text(json.dumps(key))\n"
+      "time.sleep(1)\n"
+    )
+    run = self.launch("review", quit="slash-quit")
+    self.assertEqual(run.returncode, 0, run.stderr)
+    self.assertEqual(json.loads(self.result.read_text()), "2")
+    self.assertIn("kept configured Codex model", (self.root / "run.log.tuidebug").read_text())
 
   def test_long_prompt_preserves_quotes_newlines_and_literal_shell_syntax(self):
     prompt = 'Quotes: "double", \'single\'; $HOME; $(echo literal); `literal`; é\n' * 800

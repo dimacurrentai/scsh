@@ -32,6 +32,7 @@ pub fn catalog_models(harness: Harness) -> &'static [CatalogModel] {
       CatalogModel { id: "gpt-5.6-luna", kind: "primary" },
       CatalogModel { id: "gpt-5.6-terra", kind: "builtin" },
       CatalogModel { id: "gpt-5.6-sol", kind: "builtin" },
+      CatalogModel { id: "gpt-6.1-sol", kind: "builtin" },
       CatalogModel { id: "gpt-5.6-spark", kind: "builtin" },
     ],
     Harness::Grok => {
