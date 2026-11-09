@@ -147,11 +147,9 @@ impl Server {
     self.persist_now();
     self.start_prune();
 
-    // Serve the local machine only. We bind every interface rather than just loopback so a
-    // remote caller gets an explicit, readable denial (see [`peer_is_local`]) instead of a
-    // silent connection refusal — every non-loopback peer is turned away in `handle_connection`
-    // before its request is read or routed.
-    let addr = format!("0.0.0.0:{}", self.port);
+    // Serve the local machine only: bind loopback, so the port is never reachable from another
+    // host. [`peer_is_local`] in `handle_connection` stays as a second line of defense.
+    let addr = format!("127.0.0.1:{}", self.port);
     let listener = TcpListener::bind(&addr)?;
     listener.set_nonblocking(true)?;
     let pid_path = pid_file(self.port);
@@ -563,9 +561,8 @@ fn handle_connection(
 ) -> std::io::Result<()> {
   // Accepted sockets inherit the listener's non-blocking mode on macOS; block for reads.
   stream.set_nonblocking(false)?;
-  // The daemon serves the local machine only. Turn away any non-loopback peer here — before
-  // the request is read or routed — with a clear denial instead of the silent connection
-  // refusal a loopback-only bind would give (see the listener bind for why we bind wider).
+  // The daemon serves the local machine only. The listener binds loopback, so a non-loopback
+  // peer should never get here; if one does, turn it away before the request is read or routed.
   match stream.peer_addr() {
     Ok(peer) if peer_is_local(peer) => {}
     peer => {
